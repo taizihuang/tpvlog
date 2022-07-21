@@ -1,0 +1,93 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（五）——分布式理论之分布式一致性：Raft算法原理</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（五）——分布式理论之分布式一致性：Raft算法原理</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我已经带大家了解了Paxos算法，Paxos算法过于晦涩，在工业应用中比较少，比较有名的是Google Chubby。但是Paxos算法的思想非常重要，本章我要介绍的Raft算法就是基于Multi-Paxos 思想实现的。</p>
+<p>Raft算法在理解和实现上都要比Paxos容易得多，也是现在分布式系统开发首选的共识算法，掌握Raft算法，可以得心应手地处理绝大部分场景的容错和一致性需求，比如分布式配置系统、分布式 NoSQL 存储等等。</p>
+<p>在讲解Raft算法之前，我建议读者先看看下面这个教程，然后再来看我的文章，这是我认为对Raft算法讲解最生动的教程：<a href="http://thesecretlivesofdata.com/raft/">Raft: Understandable Distributed Consensus</a>，也便于你理解我接下来要讲的内容。</p>
+<h2 id="-">一、角色</h2>
+<p>Raft 算法是通过”一切以领导者为准“的方式，实现一系列值的共识和各节点日志的一致。 Raft算法的核心就是通过 <strong>选举</strong> 来达成一致性，该算法一共涉及三种角色（状态）、两大过程（<em>Leader Election</em>、<em>Log Replication</em>）。</p>
+<p>我们先来看下Raft算法涉及的角色，在Raft算法中，所有节点都有三种状态，状态之间可以互相转换。</p>
+<center><br/><img src="./img/20200206183530827.png" style="zoom:12%"><br/></img></center>
+<p>节点的状态流转见下图：</p>
+<center><br/><img src="./img/20200206183540561.png" style="zoom:60%"/><br/></center>
+<h3 id="1-1-follower-">1.1 Follower（跟随者）</h3>
+<p>Raft协议刚开始时，所有节点都是Follower，默默地接收和处理来自Leader的消息，当等待Leader心跳信息超时的时候，就主动站出来，推荐自己当Candidate。</p>
+<h3 id="1-2-candidate-">1.2 Candidate（候选人）</h3>
+<p>Candidate将向其他节点发送投票请求（RequestVote），通知其他节点来投票，如果赢得了大多数（N/2+1）选票，就晋升Leader。</p>
+<h3 id="1-3-leader-">1.3 Leader（领导者）</h3>
+<p>Leader主要负责处理客户端请求，进行日志复制等操作，每一轮选举的目标就是选出一个Leader；Leader会不断地发送心跳信息，通知其他节点“我是领导者，我还活着，你们现在不要发起新的选举，找个新领导者来替代我。”</p>
+<h2 id="-leader-election-">二、Leader Election（领导者选举）</h2>
+<h3 id="2-1-">2.1 选举流程</h3>
+<p>1.首先，在初始状态下，集群中所有的节点都是<strong>Follower</strong>状态，并被设定一个随机 <strong>election timeout</strong>（150ms-300ms）：</p>
+<center><br/><img src="./img/20200402165005746.png" style="zoom:55%"/><br/></center>
+<p>2.如果超时时间到期后没有收到来自Leader的心跳，节点就发起选举：将自己的状态切换为 <strong>Candidate</strong>，增加自己的任期编号，然后向集群中的其它 Follower 节点发送请求，询问其是否选举自己成为 Leader：</p>
+<center><br/><img src="./img/20200402165014650.png" style="zoom:55%"/><br/></center>
+<p>3.其他节点接收到候选人 A 的请求投票消息后，如果在编号为 1 的这届任期内还没有进行过投票，那么它将把选票投给节点 A，并增加自己的任期编号：</p>
+<center><br/><img src="./img/20200402165023505.png" style="zoom:55%"/><br/></center>
+<p>4.当收到来自集群中过半数节点的接受投票后，节点即成为本届任期内  Leader，他将周期性地发送心跳消息，通知其他节点我是Leader，阻止Follower发起新的选举：</p>
+<center><br/><img src="./img/20200402165032695.png" style="zoom:55%"/><br/></center>
+<blockquote>
+<p>如果在指定时间内（一个随机时间，每个节点都不同），Follower没有接收到来自Leader的心跳消息，那么它就认为当前没有Leader，推举自己为Candidate，发起新一轮选举。 </p>
+</blockquote>
+<h3 id="2-2-">2.2 通信方式</h3>
+<p>在 Raft 算法中，节点之间的通信采用的是RPC方式，在Leader选举中，需要用到两类RPC：</p>
+<ol>
+<li>请求投票（RequestVote）RPC：由Candidate在选举期间发起，通知各Follower进行投票；</li>
+<li>日志复制（AppendEntries）RPC：由Leader发起，用来进行日志复制和心跳。</li>
+</ol>
+<h3 id="2-3-">2.3 任期</h3>
+<p>在选举流程中，我提到Leader节点是有任期的，每个任期由单调递增的数字标识，比如节点 A 的任期编号是 1。任期编号是随着选举的举行而变化的：</p>
+<ol>
+<li>Follower在等待Leader的心跳信息超时后，会推举自己为Candidate，此时会增加自己的任期编号；</li>
+<li>如果一个节点发现自己的任期编号比其他节点小，那么它会更新自己的编号为较大的编号值。比如节点 B 的任期编号是 0，当收到来自节点 A 的请求投票消息时，因为消息中包含了节点 A 的任期编号，且编号为 1，那么节点 B 将把自己的任期编号更新为 1。 </li>
+<li>当任期编号相同时，日志完整性高的Follower（也就是最后一条日志项对应的任期编号值更大，索引号更大），拒绝投票给日志完整性低的Candidate。 </li>
+</ol>
+<h2 id="-log-replication-">三、Log Replication（日志复制）</h2>
+<p>在 Raft 算法中，副本数据是以日志的形式存在的，Leader接收到来自客户端写请求后，处理写请求的过程就是一个日志复制的过程。</p>
+<h3 id="3-1-">3.1 日志项</h3>
+<p>日志是由<strong>日志项</strong>组成的，那么日志项究竟是什么样子呢？  </p>
+<p>日志项是一种数据格式，它主要包含客户端的指令（Command），还有索引值（Log index）、任期编号（Term）等信息： </p>
+<center><br/><img src="./img/20200402165041734.png" style="zoom:65%"/><br/></center>
+<p>从上图可以看到，一届领导者的任期中，往往有多条日志项，而且日志项的索引值是连续的， </p>
+<h3 id="3-2-">3.2 复制流程</h3>
+<ol>
+<li>首先，当Leader节点接收到客户端的写请求后，会创建一个新日志项，并附加到本地日志中；</li>
+<li>Leader通过日志复制（AppendEntries）RPC 消息，将日志项复制到集群其它Follower节点上；</li>
+<li>如果Leader接收到大多数的“复制成功”响应后，它将日志项应用到自己的状态机，并返回成功给客户端。如果Leader没有接收到大多数的“复制成功”响应，那么就返回错误给客户端；</li>
+<li>当Follower接收到心跳信息，或者新的AppendEntries消息后，如果发现Leader已经提交了某条日志项，而自己还没应用，那么Follower就会将这条日志项应用到本地的状态机中。 </li>
+</ol>
+<center><br/><img src="./img/20200402165050590.png" style="zoom:65%"/><br/></center>
+<p>从上面这个过程可以看出，当Follower节点接受Leader的心跳消息或者AppendEntries消息后，会将日志项应用到自己的状态机。这个优化，降低了处理客户端请求的延迟，将二阶段提交优化为了一段提交，降低了一半的消息延迟。 </p>
+<h3 id="3-3-">3.3 一致性检查</h3>
+<p>在 Raft 算法中，Leader通过强制Follower直接复制自己的日志项，处理不一致日志。具体有 2 个步骤： </p>
+<ol>
+<li>首先，Leader通过AppendEntries消息，找到Follower节点上与自己相同日志项的最大索引值。也就是说，这个索引值之前的日志，Leader和Follower是一致的，之后的日志是不一致的了。 </li>
+<li>然后，Leader强制Follower更新不一致日志项，实现日志的一致。 </li>
+</ol>
+<p>举个例子来理解下， 为了方便演示，我们引入 2 个新变量 ：</p>
+<ul>
+<li><strong>PrevLogEntry：</strong>表示当前要复制的日志项的前一条日志项的索引值。比如下图中，如果Leader将索引值为8的日志项发送给Follower，那么此时 PrevLogEntry 值为 7；</li>
+<li><strong>PrevLogTerm：</strong>表示当前要复制的日志项的前一条日志项的任期编号。比如下图中，如果Leader将索引值为8的日志项发送给Follower，那么此时 PrevLogTerm 值为 4。 </li>
+</ul>
+<center><br/><img src="./img/20200402165059927.png" style="zoom:55%"/><br/></center>
+<ol>
+<li>首先，Leader通过AppendEntries消息，发送当前最新的日志项到Follower，这个日志项的 PrevLogEntry 值为 7，PrevLogTerm 值为 4；</li>
+<li>如果Follower在它的日志中，找不到PrevLogEntry 值为 7、PrevLogTerm 值为 4 的日志项，也就是说它的日志和Leader的不一致了，那么Follower就会拒绝接收新的日志项，并返回失败信息给Leader；</li>
+<li>此时Leader会递减要复制的日志项的索引值，并发送新的日志项到Follower，这个消息的 PrevLogEntry 值为 6，PrevLogTerm 值为 3；</li>
+<li>如果Follower在它的日志中，找到了 PrevLogEntry 值为 6、PrevLogTerm 值为 3 的日志项，那么AppendEntries消息返回成功，这样一来，Leader就知道在 PrevLogEntry 值为 6、PrevLogTerm 值为 3 的位置，Follower的日志项与自己相同；</li>
+<li>最后， Leader通过AppendEntries消息，复制并更新覆盖该索引值之后的日志项（也就是不一致的日志项），最终实现了集群各节点日志的一致。 </li>
+</ol>
+<h2 id="-">四、总结</h2>
+<p>本章，我对Raft算法的原理进行了详细讲解，Raft算法是Multi-Paxos 思想的落地，其核心就是领导者选举和日志复制。Raft 算法能很好地处理绝大部分场景的一致性问题，推荐大家在设计分布式系统时，优先考虑 Raft 算法，当 Raft 算法不能满足现有场景需求时，再去调研其他共识算法。</p>
+<p>目前开源界对Raft算法的实现有很多，在生产环境落地较多并接受过大量检验的是 <a href="https://github.com/hashicorp/raft">Hashicorp Raft</a> ，  感兴趣的读者可以自行参考官方文档进行学习。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

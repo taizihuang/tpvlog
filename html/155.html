@@ -1,0 +1,148 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（九）——倒排索引原理 </title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（九）——倒排索引原理 </strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我们在第一章中简单介绍过倒排索引，本章我们来看下倒排索引的底层原理。先来回顾下什么是倒排索引，假设我们向某个索引里写入了下面两条document：</p>
+<table>
+<thead>
+<tr>
+<th>document</th>
+<th>某字段内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>doc1</td>
+<td>I really liked my small dogs, and I think my mom also liked them.</td>
+</tr>
+<tr>
+<td>doc2</td>
+<td>He never liked any dogs, so I hope that my mom will not expect me to liked him.</td>
+</tr>
+</tbody>
+</table>
+<p>Elasticsearch会对document的字段内容进行分词，然后构成倒排索引，比如可能是下面这个样子：</p>
+<table>
+<thead>
+<tr>
+<th>word</th>
+<th>doc1</th>
+<th>doc2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>I</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>really</td>
+<td>N</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>liked</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>省略其它分词....</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>解释一下，Y表示这个word存在于document中，N表示不存在。</p>
+</blockquote>
+<p>然后，当客户端进行搜素时，Elasticsearch也会对搜索关键字进行分词，比如关键字是“I liked her”，那么就会拆分成<code>I</code>、<code>liked</code>、<code>her</code>，这样Elasticsearch就能快速根据分词结果找到对应的document，doc1和doc2中都包含<code>I</code>和<code>liked</code>，就会都被检索出来。</p>
+<blockquote>
+<p>即使输入“I like her”也能被检索出来，这跟分词器的行为有关。</p>
+</blockquote>
+<h2 id="-">一、分词器</h2>
+<p>建立倒排索引最关键的部分就是<strong>分词器</strong>。分词器会对文本内容进行一些特定处理，然后根据处理后的结果再建立倒排索引，主要的处理过程一般如下：</p>
+<ol>
+<li><strong>character filter：</strong>符号过滤，比如<code>&lt;span&gt;hello&lt;span&gt;</code>过滤成<code>hello</code>，<code>I&amp;you</code>过滤成<code>I and you</code> ；</li>
+<li><strong>tokenizer：</strong>分词，比如，将<code>hello you and me</code>切分成<code>hello</code>、<code>you</code>、<code>and</code>、<code>me</code>；</li>
+<li><strong>token filter：</strong>比如，<code>dogs</code>替换为<code>dog</code>，<code>liked</code>替换为<code>like</code>，<code>Tom</code> 替换为 <code>tom</code>，<code>small</code> 替换为 <code>little</code>等等。</li>
+</ol>
+<p>不同分词器的行为是不同的，Elasticsearch主要内置了以下几种分词器：<strong>standard analyzer</strong>、<strong>simple analyzer</strong>、<strong>whitespace analyzer</strong>、<strong>language analyzer</strong>。</p>
+<p>我们可以通过以下命令，看下分词器的分词效果：</p>
+<pre><code class="lang-JAVA">GET /{index}/_analyze
+{
+  "analyzer": "standard", 
+  "text": "a dog is in the house"
+}
+# 采用standard分词器对text进行分词
+</code></pre>
+<blockquote>
+<p>分词器的各种替换行为，也叫做<strong><em>normalization</em></strong>，本质是为了提升命中率，官方叫做recall召回率。</p>
+</blockquote>
+<p>对于document中的不同字段类型，Elasticsearch会采用不同的分词器进行处理，比如date类型压根就不会分词，检索时就是完全匹配，而对于text类型则会进行分词处理。</p>
+<blockquote>
+<p>Elasticsearch通过<code>_mapping</code>元数据来定义不同字段类型的建立索引的行为，这块内容官方文档已经写得非常清楚了，我不再赘述。</p>
+</blockquote>
+<h3 id="1-1-">1.1 定制分词器</h3>
+<p>我们可以修改分词器的默认行为。比如，我们修改<code>my_index</code>索引的分词器，启用english停用词：</p>
+<pre><code class="lang-JAVA">PUT /my_index
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "es_std": {
+          "type": "standard",
+          "stopwords": "_english_"
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>然后可以通过以下命令，查看分词器的分词效果：</p>
+<pre><code class="lang-JAVA">GET /my_index/_analyze
+{
+  "analyzer": "es_std", 
+  "text": "a dog is in the house"
+}
+</code></pre>
+<p>也可以完全定制自己的分词器，更多分词器的用法读者可以参考Elasticsearch官方文档：</p>
+<pre><code class="lang-JAVA">PUT /my_index
+{
+  "settings": {
+    "analysis": {
+      "char_filter": {
+        "&amp;_to_and": {
+          "type": "mapping",
+          "mappings": ["&amp;=&gt; and"]
+        }
+      },
+      "filter": {
+        "my_stopwords": {
+          "type": "stop",
+          "stopwords": ["the", "a"]
+        }
+      },
+      "analyzer": {
+        "my_analyzer": {
+          "type": "custom",
+          "char_filter": ["html_strip", "&amp;_to_and"],
+          "tokenizer": "standard",
+          "filter": ["lowercase", "my_stopwords"]
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>在Elasticsearch中建立的索引时，一旦建立完成，索引就不可变，主要是出于性能考虑。关于倒排索引，最核心的一些东西就是上述文章所示的，更多内容建议读者自己去看官方文档。Elasticsearch的使用大多都是些API的调来调去，核心的东西其实就那么点。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

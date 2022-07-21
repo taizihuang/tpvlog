@@ -1,0 +1,163 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解分布式存储（四）——dfs客户端工程</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解分布式存储（四）——dfs客户端工程</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><code>dfs-client</code>，也就是分布式文件系统的客户端，需要提供各种文件/目录操作的命令，比如目录创建，文件上传/下载等等，然后实现跟分布式文件系统的通信。</p>
+<p>本章，我以"目录创建"命令为例，来实现客户端文件操作，客户端的操作接口我定义在<code>FileSystem</code>接口中：</p>
+<center><br/> <img src="./img/20210702224841360.png" style="zoom:70%"><br/></img></center>
+<h2 id="-">一、客户端接口</h2>
+<p>首先，我们需要定义好gRPC接口。</p>
+<h3 id="1-1-rpc-">1.1 RPC接口存根</h3>
+<p>我直接修改<code>dfs-rpc</code>工程<code>src/main/proto</code>目录下的<code>NameNodeServiceProto.proto</code>文件，新增一个“目录创建”接口，然后执行<code>mvn clean compile</code>命令生成新的接口存根：</p>
+<pre><code class="lang-protobuf">syntax = "proto3";
+
+option java_multiple_files = true;
+option java_outer_classname = "NameNodeServiceProto";
+
+service NameNodeService {
+    rpc register(RegisterRequest) returns (RegisterResponse){}
+    rpc heartbeat(HeartbeatRequest) returns (HeartbeatResponse){}
+    rpc mkdir(MkDirRequest) returns (MkDirResponse){}
+}
+
+message RegisterRequest{
+    string ip  = 1;
+    string hostname  = 2;
+}
+message RegisterResponse{
+    int32 status  = 1;
+}
+message HeartbeatRequest{
+    string ip  = 1;
+    string hostname  = 2;
+}
+message HeartbeatResponse{
+    int32 status  = 1;
+}
+message MkDirRequest{
+    string path  = 1;
+}
+message MkDirResponse{
+    int32 status  = 1;
+}
+</code></pre>
+<p>然后将存根复制到<code>dfs-rpc</code>工程<code>com.tpvlog.dfs.rpc.service</code>包中。</p>
+<h3 id="1-2-">1.2 客户端实现</h3>
+<p>客户端的实现比较简单，定义一个文件系统接口<code>FileSystem</code>。各个需要使用文件命令的应用引入<code>dfs-client</code>工程后，直接使用该接口就可以进行文件操作：</p>
+<pre><code class="lang-JAVA">/**
+ * 作为文件系统的接口
+ */
+public interface FileSystem {
+
+    /**
+     * 创建目录
+     *
+     * @param path 目录对应的路径
+     * @throws Exception
+     */
+    void mkdir(String path) throws Exception;
+}
+</code></pre>
+<p>我们来看下FileSystem的实现，就是一些gRPC调用的标准模板代码：</p>
+<pre><code class="lang-JAVA">public class FileSystemImpl implements FileSystem {
+
+    // 这里指定NameNode的地址
+    private static final String NAMENODE_HOSTNAME = "localhost";
+    private static final Integer NAMENODE_PORT = 50070;
+
+    private NameNodeServiceGrpc.NameNodeServiceBlockingStub namenode;
+
+    public FileSystemImpl() {
+        ManagedChannel channel = NettyChannelBuilder
+                .forAddress(NAMENODE_HOSTNAME, NAMENODE_PORT)
+                .negotiationType(NegotiationType.PLAINTEXT)
+                .build();
+        this.namenode = NameNodeServiceGrpc.newBlockingStub(channel);
+    }
+
+    /**
+     * 创建目录
+     */
+    public void mkdir(String path) throws Exception {
+        // 调用RPC服务
+        MkDirRequest request = MkDirRequest.newBuilder().setPath(path).build();
+        MkDirResponse response = namenode.mkdir(request);
+
+        System.out.println("创建目录的响应：" + response.getStatus());
+    }
+}
+</code></pre>
+<h2 id="-">二、服务端实现</h2>
+<p>我们再来看NameNode服务端的RPC服务实现。</p>
+<h3 id="2-1-rpc-">2.1 RPC服务实现</h3>
+<p>首先，NameNode需要在<code>NameNodeServiceImpl</code>中实现gRPC自动生成的接口存根方法，也就是上一节中的<code>mkdir</code>方法：</p>
+<pre><code class="lang-JAVA">/**
+ * NameNode的RPC服务接口
+ */
+public class NameNodeServiceImpl extends NameNodeServiceGrpc.NameNodeServiceImplBase {
+
+    public static final Integer STATUS_SUCCESS = 1;
+    public static final Integer STATUS_FAILURE = 2;
+
+    //...
+
+    // 负责管理元数据的核心组件
+    private FSNameSystem namesystem;
+
+    public NameNodeServiceImpl(FSNameSystem namesystem, DataNodeManager datanodeManager,
+                               EditLogReplicator replicator) {
+        this.namesystem = namesystem;
+        this.datanodeManager = datanodeManager;
+        this.replicator = replicator;
+    }
+
+    /**
+     * 创建目录
+     */
+    @Override
+    public void mkdir(MkdirRequest request, StreamObserver&lt;MkdirResponse&gt; responseObserver) {
+        try {
+            MkdirResponse response = null;
+
+            if(!isRunning) {
+                response = MkdirResponse.newBuilder().setStatus(STATUS_SHUTDOWN).build();
+            } else {
+                this.namesystem.mkdir(request.getPath());
+                response = MkdirResponse.newBuilder().setStatus(STATUS_SUCCESS).build();
+            }
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            e.printStackTrace(); 
+        }
+    }
+}
+</code></pre>
+<p>上面的接口实现比较简单，本质就是用gRPC的标准代码实现了<code>NameNodeServiceGrpc.NameNodeServiceImplBase</code>中的<code>mkdir</code>接口，然后调用<code>FSNameSystem.mkdir()</code>方法完成文件操作。</p>
+<h3 id="2-2-fsnamesystem">2.2 FSNameSystem</h3>
+<p>FSNameSystem是NameNode进行元数据管理的核心组件，客户端发送过来的所有文件操作命令，都会交由FSNameSystem处理。FSNameSystem会在内存中维护<strong>文件目录树</strong>，比如下面这样：</p>
+<pre><code class="lang-SHELL">/root
+  /usr
+  /local
+  /app
+/home
+  /kafka
+    /data
+      /access.log
+</code></pre>
+<p>同时，FSNameSystem还负责将操作命令写入<strong>edits log日志</strong>。关于edits log日志，我在后面章节会详细讲解，它有点类似于MySQL中binlog，可以用于NameNode宕机后的数据恢复。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我对<code>dfs-client</code>工程、客户端的文件操作逻辑以及服务端的操作命令处理逻辑进行了讲解，其中最核心是<code>FSNameSysytem</code>这个组件，它负责维护NameNode的内存文件目录树，以及写入edits log日志。我在后续章节会对这两块内容进行详细讲解。</p>
+<p>本章的内容，我用下面这张图总结，帮助读者理解：</p>
+<center><br/> <img src="./img/20210702224851428.png" style="zoom:45%"/><br/></center>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式存储分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/65">分布式存储</a></div>
+</div></body>
+        </html>
+        

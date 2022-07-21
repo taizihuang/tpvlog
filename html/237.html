@@ -1,0 +1,206 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（四五）—— J.U.C之executors框架：CompletionService实现</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（四五）—— J.U.C之executors框架：CompletionService实现</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p><code>CompletionService</code>是对于Task进行异步处理之后获取结果的Service，在开始本章节之前需要有<code>Future</code>和<code>FutureTask</code>及<code>Executor</code>(参见<code>ThreadPoolExecutor</code>)的相关知识。JDK中提供了<code>ExecutorCompletionService</code>作为<code>CompletionService</code>的默认实现，本章会以<code>ExecutorCompletionService</code>为例讲解<code>CompletionService</code>。</p>
+<h2 id="-">二、代码解析</h2>
+<p>首先了解<code>ExecutorCompletionService</code>的定义：</p>
+<pre><code class="lang-java">public class ExecutorCompletionService&lt;V&gt; implements CompletionService&lt;V&gt; {
+    private final Executor executor;
+    private final AbstractExecutorService aes;
+    /**
+     * 存储完成任务的队列
+     */
+    private final BlockingQueue&lt;Future&lt;V&gt;&gt; completionQueue;
+
+    /**
+     * 定义一个FutureTask的子类，将task包装起来，
+     * 同时当task完成之后会进入到completionQueue中
+     */
+    private class QueueingFuture extends FutureTask&lt;Void&gt; {
+        QueueingFuture(RunnableFuture&lt;V&gt; task) {
+            super(task, null);
+            this.task = task;
+        }
+        protected void done() { completionQueue.add(task); }
+        private final Future&lt;V&gt; task;
+    }
+
+    /**
+     * 根据已提供的基本任务执行器创建ExecutorCompletionService，
+     * 并创建一个LinkedBlockingQueue作为存储执行完毕task的队列
+     *
+     * @param executor 需要使用的执行器
+     * @throws如果excutor是null则抛出异常
+     */
+    public ExecutorCompletionService(Executor executor) {
+        if (executor == null)
+            throw new NullPointerException();
+        this.executor = executor;
+        this.aes = (executor instanceof AbstractExecutorService) ?
+            (AbstractExecutorService) executor : null;
+        this.completionQueue = new LinkedBlockingQueue&lt;Future&lt;V&gt;&gt;();
+    }
+
+    /**
+     * 根据已提供的基本任务执行器executor和completionQueue队列创建ExecutorCompletionService，
+     *
+     * @param executor 需要使用的执行器
+     * @param 为此服务提供的一个队列，此队列是无界队列
+     * @throws 如果 executor 或 completionQueue 为空则抛出异常
+     */
+    public ExecutorCompletionService(Executor executor,
+                                     BlockingQueue&lt;Future&lt;V&gt;&gt; completionQueue) {
+        if (executor == null || completionQueue == null)
+            throw new NullPointerException();
+        this.executor = executor;
+        this.aes = (executor instanceof AbstractExecutorService) ?
+            (AbstractExecutorService) executor : null;
+        this.completionQueue = completionQueue;
+    }
+
+}
+</code></pre>
+<p>从定义中我们看到<code>ExecutorCompletionService</code>的核心是<code>Executor</code>和<code>BlockingQueue&lt;Future&lt;V&gt;&gt;</code>，分别为执行任务的执行器和存储执行完毕的<code>FutureTask</code>的队列。</p>
+<blockquote>
+<p><code>BlockingQueue</code>、<code>AbstractExecutorService</code>的子类<code>ThradPoolExecutor</code>在前述章节已经阐述过，这里不再具体描述。</p>
+</blockquote>
+<p>接下来我们查看在任务提交之后的流程：</p>
+<pre><code class="lang-java">    /**
+    * 将提交的task封装为RunnableFuture
+    */
+        private RunnableFuture&lt;V&gt; newTaskFor(Callable&lt;V&gt; task) {
+        if (aes == null)
+            // 如果实例化ExecutorCompletionService的时候传递的
+            // 执行器不是AbstractExecutorService的子类，则直接将task包装为FutureTask
+            return new FutureTask&lt;V&gt;(task);
+        else
+            // 否则，直接执行执行器的newTaskFor方法，将task封装一次
+            return aes.newTaskFor(task);
+    }
+
+    private RunnableFuture&lt;V&gt; newTaskFor(Runnable task, V result) {
+        if (aes == null)
+            return new FutureTask&lt;V&gt;(task, result);
+        else
+            return aes.newTaskFor(task, result);
+    }
+
+    public Future&lt;V&gt; submit(Callable&lt;V&gt; task) {
+        if (task == null) throw new NullPointerException();
+        // 先将task封装为RunnableFuture
+        RunnableFuture&lt;V&gt; f = newTaskFor(task);
+        // 再将RunnableFuture以内部类QueueingFuture包装
+        executor.execute(new QueueingFuture(f));
+        return f;
+    }
+
+    public Future&lt;V&gt; submit(Runnable task, V result) {
+        if (task == null) throw new NullPointerException();
+        RunnableFuture&lt;V&gt; f = newTaskFor(task, result);
+        executor.execute(new QueueingFuture(f));
+        return f;
+    }
+</code></pre>
+<p>重点分析<code>submit</code>方法，在将task封装之后，代码又将封装之后的<code>RunnableFuture</code>以内部类<code>QueueingFuture</code>包装一次之后提交给执行器执行。之后执行器在<code>execute</code>时实际执行的就是<code>QueueingFuture</code>对象，经过层层封装之后执行的还是<code>FutureTask.run</code>方法：</p>
+<pre><code class="lang-java">    Callable&lt;V&gt; c = callable;
+    if (c != null &amp;&amp; state == NEW) {
+        V result;
+        boolean ran;
+        try {
+            result = c.call();
+            ran = true;
+        } catch (Throwable ex) {
+            result = null;
+            ran = false;
+            setException(ex);
+        }
+        if (ran)
+            set(result);
+    }
+</code></pre>
+<p>最后不论是<code>setException</code>还是<code>set</code>方法都会触发<code>finishCompletion</code>方法，而<code>finishCompletion</code>最终会调用抽象方法<code>done</code>，也就是调用了内部类<code>QueueingFuture</code>的<code>done</code>方法：</p>
+<pre><code class="lang-java">    private class QueueingFuture extends FutureTask&lt;Void&gt; {
+        QueueingFuture(RunnableFuture&lt;V&gt; task) {
+            super(task, null);
+            this.task = task;
+        }
+        protected void done() { completionQueue.add(task); }
+        private final Future&lt;V&gt; task;
+    }
+</code></pre>
+<blockquote>
+<p>因<code>ThreadPoolExecutor</code>和<code>Future</code>已经在之前的章节描述，所以这里一笔略过。</p>
+</blockquote>
+<p>执行<code>submit</code>最终会将执行完毕的Task入队，而后从队列中获取对应的<code>FutureTask</code>即可。</p>
+<pre><code class="lang-java">    public Future&lt;V&gt; take() throws InterruptedException {
+        return completionQueue.take();
+    }
+
+    public Future&lt;V&gt; poll() {
+        return completionQueue.poll();
+    }
+
+    public Future&lt;V&gt; poll(long timeout, TimeUnit unit)
+            throws InterruptedException {
+        return completionQueue.poll(timeout, unit);
+    }
+</code></pre>
+<blockquote>
+<p> 以上三个方法均为<code>BlockingQueue</code>所支持的方法，具体含义可以参见前面<code>BlockingQueue</code>相关章节。</p>
+</blockquote>
+<p>从整个源码的角度来看，<code>CompletionService</code>是较为简单的，是对已有工具的封装，只要认识了之前的工具类，<code>CompletionService</code>就很好理解。</p>
+<h2 id="-">三、应用举例</h2>
+<p>考虑执行下面一段代码：</p>
+<pre><code class="lang-java">    @Test
+    public void test() throws Exception{
+        CompletionService&lt;String&gt; service = new ExecutorCompletionService&lt;&gt;(Executors.newFixedThreadPool(5));
+        for (int i = 0; i &lt; 5; ++i) {
+            service.submit(new Task&lt;&gt;(String.valueOf(i)));
+        }
+
+        for (int i = 0; i &lt; 5; ++i) {
+            System.out.println(service.take().get());
+        }
+    }
+
+    public static class Task&lt;T extends String&gt; implements Callable&lt;T&gt; {
+        private String threadNum;
+
+        public Task(String threadNum) {
+            this.threadNum = threadNum;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override
+        public T call() throws Exception {
+            long current = System.currentTimeMillis();
+            if ((Integer.parseInt(threadNum) % 2) == 0) {
+                TimeUnit.SECONDS.sleep(Math.abs(5 - Integer.parseInt(threadNum)));
+            }
+            return (T) String.format("completion %s. cost time is %d s.",
+                    threadNum, (System.currentTimeMillis() - current) / 1000);
+        }
+    }
+</code></pre>
+<p>其输出为：</p>
+<pre><code class="lang-console">completion 1. cost time is 0 s.
+completion 3. cost time is 0 s.
+completion 4. cost time is 1 s.
+completion 2. cost time is 3 s.
+completion 0. cost time is 5 s.
+</code></pre>
+<p>这表明<code>CompletionService</code>获取的结果未必是其提交的先后顺序，而是其执行完毕的先后顺序。</p>
+<h2 id="-">四、总结</h2>
+<p><code>ExecutorCompletionService</code>是<code>Executor</code>和<code>BlockingQueue</code>的功能融合；其获取顺序和提交顺序未必一致；它适合批量执行已知数量的互相独立但是同构（结构一致）的任务。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

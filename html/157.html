@@ -1,0 +1,358 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十一）——Multi-Field搜索</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十一）——Multi-Field搜索</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来讲下全文检索（Full Text Query）中的多字段搜索。和上一章term filter不一样的是：全文检索不是搜索exact value，而是对检索关键字进行分词后，实现倒排索引检索。多字段搜索，说白了，就是希望在多个不同的field中检索关键字。</p>
+<h2 id="-">一、案例实战</h2>
+<h3 id="1-1-">1.1 数据准备</h3>
+<p>我们假设已经录入了以下4条文章数据：</p>
+<pre><code class="lang-JAVA">{
+    "articleID" : "XHDK-A-1293-#fJ3",
+    "userID" : 1,
+    "hidden" : false,
+    "postDate" : "2017-01-01",
+    "tag" : [
+        "java",
+        "hadoop"
+    ],
+    "view_cnt" : 30,
+    "title" : "this is java and elasticsearch blog"
+},
+{
+    "articleID" : "KDKE-B-9947-#kL5",
+    "userID" : 1,
+    "hidden" : false,
+    "postDate" : "2017-01-02",
+    "tag" : [
+        "java"
+    ],
+    "view_cnt" : 50,
+    "title" : "this is java blog"
+},
+{
+    "articleID" : "JODL-X-1937-#pV7",
+    "userID" : 2,
+    "hidden" : false,
+    "postDate" : "2017-01-01",
+    "tag" : [
+        "hadoop"
+    ],
+    "view_cnt" : 100,
+    "title" : "this is elasticsearch blog"
+},
+{
+    "articleID" : "QQPX-R-3956-#aD8",
+    "userID" : 2,
+    "hidden" : true,
+    "postDate" : "2017-01-02",
+    "tag" : [
+    "java",
+        "elasticsearch"
+    ],
+    "view_cnt" : 80,
+    "title" : "this is java, elasticsearch, hadoop blog"
+}
+</code></pre>
+<h3 id="1-2-full-text-query-">1.2 full text query示例</h3>
+<p>我们先来看下全文检索的基本使用方式：</p>
+<pre><code class="lang-JAVA"># 请求：搜索title中包含关键字“java elasticsearch”的记录
+GET /forum/_search
+{
+    "query": {
+        "match": {
+            "title": "java elasticsearch"
+        }
+    }
+}
+</code></pre>
+<p>全文检索时，会对搜索关键字进行拆分，上述"title"字段默认就是text类型，所以最终会以倒排索引的方式查询，只有记录中的“title”包含了“java”或“elasticsearch”，都会被检索出来。</p>
+<p>我们也可以用bool组合多个搜索条件：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "bool": {
+      "must":     { "match": { "title": "java" }},
+      "must_not": { "match": { "title": "spark"  }},
+      "should": [
+                  { "match": { "title": "hadoop" }},
+                  { "match": { "title": "elasticsearch"   }}
+      ]
+    }
+  }
+</code></pre>
+<h4 id="minimum_should_match">minimum_should_match</h4>
+<p>如果我们希望指定的关键字中，必须至少匹配其中的多少个关键字，才能作为结果返回，可以利用<code>minimum_should_match</code>参数：</p>
+<pre><code class="lang-JAVA">GET /forum/article/_search
+{
+  "query": {
+    "match": {
+      "title": {
+        "query": "java elasticsearch spark hadoop",
+        "minimum_should_match": "75%"
+      }
+    }
+  }
+}
+</code></pre>
+<p>上述查询到的结果中，至少会包含“java“、“elasticsearch“、“spark“、“hadoop”中的三个。</p>
+<h4 id="boost-">boost权重</h4>
+<p>我们可以通过<code>boost</code>进行权重控制，也就是对于检索关键字，我们希望拆分后的某些词被优先检索。Elasticsearch进行相关度分数计算时，权重越大，相应的relevance score会越高，也就会优先被返回。默认情况下，搜索条件的权重都是1。</p>
+<p>举个例子，假设我们希望检索出title包含hadoop或elasticsearch的记录，但是希望hadoop优先搜索出来，那么可以设置hadoop的权重更大些：</p>
+<pre><code class="lang-JAVA">GET /forum/_search 
+{
+  "query": {
+    "bool": {
+      "should": [
+        {
+          "match": {
+            "title": {
+              "query": "hadoop",
+              "boost": 5
+            }
+          }
+        },
+        {
+          "match": {
+            "title": {
+              "query": "elasticsearch",
+              "boost": 2
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<blockquote>
+<p>注意：如果一个index有多个shard的话，搜索结果可能不准确。因为对于一个搜索请求，coordinate node可能会将其转发给任意一个shard。Elasticsearch在计算相关度分数时，采用了TF/IDF算法，该算法需要知道关键字在所有document中出现的次数，而每个shard只包含了部分document，TF/IDF算法计算时只采用了当前shard中的所有document数，所以对于不同shard计算出的相关度分数可能都是不同的。</p>
+</blockquote>
+<h3 id="1-3-match-query-">1.3 match query底层原理</h3>
+<p>当我们使用match query进行检索时，Elasticsearch底层会转换成term形式。比如针对下面这种检索：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+    "query": {
+        "match": {
+            "title": {
+                "query": "java elasticsearch",
+                "operator": "and"
+               }
+        }
+    }
+}
+</code></pre>
+<p>Elasticsearch会将其转换成如下term形式：</p>
+<pre><code class="lang-JAVA">{
+  "bool": {
+    "should": [
+      { "term": { "title": "java" }},
+      { "term": { "title": "elasticsearch"   }}
+    ]
+  }
+}
+</code></pre>
+<h2 id="-best_fields-">二、best_fields策略</h2>
+<p>所谓best_fields策略，就是对多个filed进行搜索匹配时，挑选某个field匹配度最高的那个分数，同时在多个query最高分相同的情况下，在一定程度上考虑其他query的分数。简单来说，就是对多个field进行搜索时，就想搜索到某一个field包含更多关键字的数据。</p>
+<h3 id="2-1-multi-field-">2.1 multi-field搜索</h3>
+<p>语言描述实在太绕，我们通过一个例子来理解下，假设有五条doc记录：</p>
+<pre><code class="lang-JAVA"># 1
+{ "doc" : {"title" : "this is java and elasticsearch blog","content" : "i like to write best elasticsearch article"} }
+# 2
+{ "doc" : {"title" : "this is java blog","content" : "i think java is the best programming language"} }
+# 3
+{ "doc" : {"title" : "this is elasticsearch blog","content" : "i am only an elasticsearch beginner"} }
+# 4
+{ "doc" : {"title" : "this is java, elasticsearch, hadoop blog","content" : "elasticsearch and hadoop are all very good solution, i am a beginner"} }
+# 5
+{ "doc" : {"title" : "this is spark blog","content" : "spark is best big data solution based on scala ,an programming language similar to java"} }
+</code></pre>
+<p>我们希望搜索title或content中包含“java”或“solution”关键字的帖子，这其实就是典型的multi-field搜索，我们一般会像下面这样构建请求：</p>
+<pre><code class="lang-JAVA"># should相当于SQL语法中的OR
+GET /forum/_search
+{
+    "query": {
+        "bool": {
+            "should": [
+                { "match": { "title": "java solution" }},
+                { "match": { "content":  "java solution" }}
+            ]
+        }
+    }
+}
+</code></pre>
+<p>如果按照正常的思维，匹配度最高的应该是doc5，因为只有它的content字段既包含“java”又包含“solution”。但事实上，doc5的相关度分数（relevance score）并不是最高的，因为默认情况下，对于这种multi-field搜索，Elasticsearch采用的是<strong>most_fields策略</strong>，其算法大致是这样的：</p>
+<ol>
+<li><p>计算每个query的分数，然后求和。对于上述搜索，就是“should”中的两个field检索条件，比如doc4计算的结果分别是1.1和1.2，相加为2.3；</p>
+</li>
+<li><p>计算matched query的数量，比如对于doc4，两个field都能匹配到，数量就是2；</p>
+</li>
+<li><p>sum(每个query的分数）x count(matched query) / count(总query数量) 作为最终相关度分数。</p>
+</li>
+</ol>
+<p>对于doc4，上述算法的计算结果就是：(1.1+1.2) x 2/2=2.3；而对于doc5，title字段是匹配不到结果的，所以matched query=1，doc5的最终分数可能是(0+2.3) x 1/2=1.15，所以检索结果排在了doc4后面。</p>
+<h3 id="2-2-dis_max">2.2 dis_max</h3>
+<p>我们希望的搜索结果应该是：某一个field匹配到了尽可能多的关键词，其分数更高；而不是尽可能多的field匹配到了少数的关键词，却排在了前面。</p>
+<p>Elasticsearch提供了<code>dis_max</code>语法，可以直接取多个query中，分数最高的那一个query的分数，比如像下面这样构建请求，doc5的相关度分数就会上去：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+    "query": {
+        "dis_max": {
+            "queries": [
+                { "match": { "title": "java solution" }},
+                { "match": { "content":  "java solution" }}
+            ]
+        }
+    }
+}
+</code></pre>
+<p>比如对于上述的doc4，两个field检索的最终分数分别为1.1和1.2，那就取最大值1.2：</p>
+<pre><code class="lang-JAVA">{ "match": { "title": "java solution" }} -&gt; 1.1
+{ "match": { "content":  "java solution" }} -&gt; 1.2
+</code></pre>
+<p>对于doc5，针对“title”的检索没有匹配结果，分数为0，但“content”的分数为2.3，所以取最大值2.3：</p>
+<pre><code class="lang-JAVA">{ "match": { "title": "java solution" }} -&gt; 0
+{ "match": { "content":  "java solution" }} -&gt; 2.3
+</code></pre>
+<h3 id="2-3-tie_breaker">2.3 tie_breaker</h3>
+<p><code>dis_max</code>只取多个query中，分数最高的那一个query的分数，而完全不考虑其它query的分数。但有时这并不能满足我们的需求，举个例子，我们希望检索title字段包含“java solution”或"content"字段包含“java solution”的帖子，最终满足条件的每个doc的匹配结果如下：</p>
+<ul>
+<li>doc1，title中包含“java“，content不包含“java“、“solution“任何一个关键词；</li>
+<li>doc2，title中不包含任何一个关键词，content中包含“solution”；</li>
+<li>doc3，title中包含“java“，content中包含“solution“。</li>
+</ul>
+<p>最终搜索结果是，doc1和doc2排在了doc3的前面，而不是我们期望的doc3排在最前面。此时我们可以利用<code>tie_breaker</code>参数将其他query的分数也考虑进去：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+    "query": {
+        "dis_max": {
+            "queries": [
+                { "match": { "title": "java solution" }},
+                { "match": { "content":  "java solution" }}
+            ],
+            "tie_breaker": 0.3
+        }
+    }
+}
+</code></pre>
+<p><code>`tie_breaker</code>的值，在0-1之间，其意义在于：将其他query的分数，乘以<code>tie_breaker</code>，然后再与最高分数的那个query进行计算，得到最终分数。</p>
+<h3 id="2-4-multi_match-">2.4 multi_match搜索</h3>
+<p>上面我们讲的<code>dis_max</code>和<code>tie_breaker</code>其实就是bese_fields策略的核心实现原理了。Elasticsearch还提供了一种multi_match搜索，来简化实现bese_fields策略：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "multi_match": {
+        "query":                "java solution",
+        "type":                 "best_fields", 
+        "fields":               [ "title", "content" ],
+        "tie_breaker":          0.3,
+        "minimum_should_match": "50%" 
+    }
+  } 
+}
+</code></pre>
+<p>如果要用<code>dis_max</code>和<code>tie_breaker</code>和来实现同样的效果，则是下面这样，可以看到<code>multi_match</code>确实简化了编码：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "dis_max": {
+      "queries":  [
+        {
+          "match": {
+            "title": {
+              "query": "java solution",
+              "minimum_should_match": "50%"
+            }
+          }
+        },
+        {
+          "match": {
+            "body": {
+              "query": "java solution",
+              "minimum_should_match": "50%"
+            }
+          }
+        }
+      ],
+      "tie_breaker": 0.3
+    }
+  } 
+}
+</code></pre>
+<h3 id="2-5-">2.5 优缺点</h3>
+<p>best_fields策略是最常用，也是最符合人类思维的搜索策略。Google、Baidu之类的搜索引擎，默认就是用的这种策略。</p>
+<p><strong>优点：</strong>通过best_fields策略，以及综合考虑其他field，还有<code>minimum_should_match</code>支持，可以尽可能精准地将匹配的结果推送到最前面。<br/><strong>缺点：</strong>除了那些精准匹配的结果，其他差不多大的结果，排序结果不是太均匀，没有什么区分度了。</p>
+<h2 id="-most_fields-">三、most_fields策略</h2>
+<p>most_fields策略，也是Elasticsearch进行multi-field搜索时的默认策略，其实就是综合多个field一起进行搜索，尽可能多地让所有query参与到总分的计算中，结果不一定精准。</p>
+<p>比如，某个document的一个field虽然包含更多的关键字，但是因为其他document有更多field匹配到了，所以其它的doc会排在前面。</p>
+<p>我们可以通过以下方式显式使用most_fields策略：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "multi_match": {
+        "query":                "java solution",
+        "type":                 "most_fields", 
+        "fields":               [ "title", "content" ]
+    }
+  } 
+}
+</code></pre>
+<h3 id="3-1-">3.1 优缺点</h3>
+<p><strong>优点：</strong>将尽可能匹配更多field的结果推送到最前面，整个排序结果是比较均匀的。<br/><strong>缺点：</strong>可能那些精准匹配的结果，无法推送到最前面。</p>
+<h2 id="-cross-fields-">四、cross-fields策略</h2>
+<p>cross-fields搜索，就是跨多个field去搜索一个标识。比如姓名字段可以散落在多个field中，first_name和last_name，地址字段可以散落在country、province、city中，那么搜索人名或者地址，就是cross-fields搜索。</p>
+<p>要进行cross-fields搜索，我们可能会立马想到使用上面讲的<strong>most_fields策略</strong>，因为multi_fields会考虑多个field匹配的分数，而cross-fields搜索本身刚好就是多个field检索的问题。</p>
+<p>我们通过示例来看下cross-fields搜索，假设有以下用户信息：</p>
+<pre><code class="lang-JAVA"># 1
+{ "doc" : {"author_first_name" : "Peter", "author_last_name" : "Smith"} }
+# 2
+{ "doc" : {"author_first_name" : "Smith", "author_last_name" : "Williams"} }
+# 3
+{ "doc" : {"author_first_name" : "Jack", "author_last_name" : "Ma"} }
+# 4
+{ "doc" : {"author_first_name" : "Robbin", "author_last_name" : "Li"} }
+# 5
+{ "doc" : {"author_first_name" : "Tonny", "author_last_name" : "Peter Smith"} }
+</code></pre>
+<p>我们希望检索姓名中包含“Peter Smith”的用户信息，一般会像下面这样构造请求：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "multi_match": {
+      "query":       "Peter Smith",
+      "type":        "most_fields",
+      "fields":      [ "author_first_name", "author_last_name" ]
+    }
+  }
+}
+</code></pre>
+<p>检索出的结果包含：doc1、doc2、doc5，我们希望的结果应该是doc5排在最前面，然后是doc1，最后才是doc2，即doc5&gt;doc1&gt;doc2，<strong>但事实上，doc5可能会排在最后</strong>。之所以会出现这种情况，跟TF/IDF算法有关，我这边不作赘述，后面会讲TF/IDF算法原理。</p>
+<p>所以，如果我们需要进行cross-fields搜索，应该直接使用multi_match提供的<strong>cross-fields策略</strong>：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "multi_match": {
+      "query": "Peter Smith",
+      "type": "cross_fields", 
+      "operator": "and",
+      "fields": ["author_first_name", "author_last_name"]
+    }
+  }
+}
+</code></pre>
+<p>使用cross-fields策略进行多字段检索时，会要求关键字拆分后的每个term必须出现在被检索的字段中。比如上面我们检索“Peter Smith”时，会拆成“Peter”和“Smith”两个term，那就要求：</p>
+<ul>
+<li>Peter必须在author_first_name或author_last_name中出现；</li>
+<li>Smith必须在author_first_name或author_last_name中出现。</li>
+</ul>
+<h2 id="-">五、总结</h2>
+<p>全文检索时，如果需要针对多个field进行检索，我们一般会使用match query或multi_match语法。默认情况下，Elasticsearch进行这类多字段检索的策略是most_fields。读者要理解most_fields策略和best_fields策略的内容及其优缺点，根据自己的实际需求选择合适的策略。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

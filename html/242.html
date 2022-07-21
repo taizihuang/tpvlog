@@ -1,0 +1,289 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（四）——Eureka启动：整体流程</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（四）——Eureka启动：整体流程</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将正式对Eureka的源码进行分析。我会首先讲解Eureka-Server的启动流程，在这个过程中，我会对涉及到的Eureka的一些核心组件进行讲解，理解这些组件的概念是学习后面源码的基础。</p>
+<blockquote>
+<p>注意，Eureka源码中有很多和AWS亚马逊云服务相关的组件，这些我都会全部略过。</p>
+</blockquote>
+<h2 id="-">一、代码结构</h2>
+<p>从上一章我们已经知道，<code>eureka-server</code>本质就是对<code>eureka-client</code>和<code>eureka-core</code>进行了一层封装，方便以web应用的方式在web容器中进行部署。我们可以看下<code>eureka-server</code>模块的基本结构，本质就是个java web应用：</p>
+<pre><code class="lang-SHELL">C:\USERS\RESSMIX\DESKTOP\EUREKA\EUREKA-SERVER
+└─src
+    ├─main
+    │  ├─resources
+    │  └─webapp
+    │      └─WEB-INF
+    └─test
+        └─java
+            └─com
+                └─netflix
+                    └─eureka
+                        └─resources
+</code></pre>
+<h3 id="1-1-web-xml">1.1 web.xml</h3>
+<p>它的<code>web.xml</code>里面的内容也很简单：</p>
+<pre><code class="lang-XML">&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;web-app version="2.5"
+         xmlns="http://java.sun.com/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://java.sun.com/xml/ns/javaee
+    http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd"&gt;
+  &lt;listener&gt;
+    &lt;listener-class&gt;com.netflix.eureka.EurekaBootStrap&lt;/listener-class&gt;
+  &lt;/listener&gt;
+
+  &lt;filter&gt;
+    &lt;filter-name&gt;statusFilter&lt;/filter-name&gt;
+    &lt;filter-class&gt;com.netflix.eureka.StatusFilter&lt;/filter-class&gt;
+  &lt;/filter&gt;
+  &lt;filter&gt;
+    &lt;filter-name&gt;requestAuthFilter&lt;/filter-name&gt;
+    &lt;filter-class&gt;com.netflix.eureka.ServerRequestAuthFilter&lt;/filter-class&gt;
+  &lt;/filter&gt;
+  &lt;filter&gt;
+    &lt;filter-name&gt;rateLimitingFilter&lt;/filter-name&gt;
+    &lt;filter-class&gt;com.netflix.eureka.RateLimitingFilter&lt;/filter-class&gt;
+  &lt;/filter&gt;
+  &lt;filter&gt;
+    &lt;filter-name&gt;gzipEncodingEnforcingFilter&lt;/filter-name&gt;
+    &lt;filter-class&gt;com.netflix.eureka.GzipEncodingEnforcingFilter&lt;/filter-class&gt;
+  &lt;/filter&gt;
+  &lt;filter&gt;
+    &lt;filter-name&gt;jersey&lt;/filter-name&gt;
+    &lt;filter-class&gt;com.sun.jersey.spi.container.servlet.ServletContainer&lt;/filter-class&gt;
+    &lt;init-param&gt;
+      &lt;param-name&gt;com.sun.jersey.config.property.WebPageContentRegex&lt;/param-name&gt;
+      &lt;param-value&gt;/(flex|images|js|css|jsp)/.*&lt;/param-value&gt;
+    &lt;/init-param&gt;
+    &lt;init-param&gt;
+      &lt;param-name&gt;com.sun.jersey.config.property.packages&lt;/param-name&gt;
+      &lt;param-value&gt;com.sun.jersey;com.netflix&lt;/param-value&gt;
+    &lt;/init-param&gt;
+
+    &lt;!-- GZIP content encoding/decoding --&gt;
+    &lt;init-param&gt;
+      &lt;param-name&gt;com.sun.jersey.spi.container.ContainerRequestFilters&lt;/param-name&gt;
+      &lt;param-value&gt;com.sun.jersey.api.container.filter.GZIPContentEncodingFilter&lt;/param-value&gt;
+    &lt;/init-param&gt;
+    &lt;init-param&gt;
+      &lt;param-name&gt;com.sun.jersey.spi.container.ContainerResponseFilters&lt;/param-name&gt;
+      &lt;param-value&gt;com.sun.jersey.api.container.filter.GZIPContentEncodingFilter&lt;/param-value&gt;
+    &lt;/init-param&gt;
+  &lt;/filter&gt;
+
+  &lt;filter-mapping&gt;
+    &lt;filter-name&gt;statusFilter&lt;/filter-name&gt;
+    &lt;url-pattern&gt;/*&lt;/url-pattern&gt;
+  &lt;/filter-mapping&gt;
+  &lt;filter-mapping&gt;
+    &lt;filter-name&gt;requestAuthFilter&lt;/filter-name&gt;
+    &lt;url-pattern&gt;/*&lt;/url-pattern&gt;
+  &lt;/filter-mapping&gt;
+
+  &lt;!-- Uncomment this to enable rate limiter filter.
+  &lt;filter-mapping&gt;
+    &lt;filter-name&gt;rateLimitingFilter&lt;/filter-name&gt;
+    &lt;url-pattern&gt;/v2/apps&lt;/url-pattern&gt;
+    &lt;url-pattern&gt;/v2/apps/*&lt;/url-pattern&gt;
+  &lt;/filter-mapping&gt;
+  --&gt;
+
+  &lt;filter-mapping&gt;
+    &lt;filter-name&gt;gzipEncodingEnforcingFilter&lt;/filter-name&gt;
+    &lt;url-pattern&gt;/v2/apps&lt;/url-pattern&gt;
+    &lt;url-pattern&gt;/v2/apps/*&lt;/url-pattern&gt;
+  &lt;/filter-mapping&gt;
+  &lt;filter-mapping&gt;
+    &lt;filter-name&gt;jersey&lt;/filter-name&gt;
+    &lt;url-pattern&gt;/*&lt;/url-pattern&gt;
+  &lt;/filter-mapping&gt;
+
+  &lt;welcome-file-list&gt;
+    &lt;welcome-file&gt;jsp/status.jsp&lt;/welcome-file&gt;
+  &lt;/welcome-file-list&gt;
+&lt;/web-app&gt;
+</code></pre>
+<p>上述<code>web.xml</code>的核心一共包含以下部分：</p>
+<ul>
+<li><strong>EurekaBootStrap：</strong>这个Listener是在web应用启动时执行的，里面包含了Eureka-Server启动时的各种初始化逻辑，位于<code>eureka-core</code>模块中；</li>
+<li><strong>Filter：</strong>一共包含五个核心Filter：<code>jersey</code>、<code>StatusFilter</code>、<code>ServerRequestAuthFilter</code>、<code>RateLimitingFilter</code>、<code>GzipEncodingEnforcingFilter</code>，任何一个请求都会经过这些filter的处理，这个5个filter都在<code>eureka-core</code>模块中；</li>
+<li><strong>status.jsp：</strong>eureka-server的控制台首页页面。</li>
+</ul>
+<blockquote>
+<p> 注意：上述配置中，名称为<code>jersey</code>的Filter，这是Jersey框架的一个核心Filter，拦截所有请求交给框架层做处理，类似于Spring MVC中的<em>DispatcherServlet</em>。</p>
+</blockquote>
+<h3 id="1-2-">1.2 启动方式</h3>
+<p>Eureka-Server的启动比较简单，我们可以将其打成war包放到web容器里，但是这种方式不适合我们在IDE中进行调试。我们可以选择另一种方式：</p>
+<p>首先，修改 <code>EurekaClientServerRestIntegrationTest.startServer()</code> 方法：</p>
+<pre><code class="lang-JAVA">private static void startServer() throws Exception {
+    server = new Server(8080);
+    WebAppContext webAppCtx = new WebAppContext(new File("./eureka-server/src/main/webapp").getAbsolutePath(), "/");
+    webAppCtx.setDescriptor(new File("./eureka-server/src/main/webapp/WEB-INF/web.xml").getAbsolutePath());
+    webAppCtx.setResourceBase(new File("./eureka-server/src/main/resources").getAbsolutePath());
+    webAppCtx.setClassLoader(Thread.currentThread().getContextClassLoader());
+    server.setHandler(webAppCtx);
+
+    server.start();
+
+    eurekaServiceUrl = "http://localhost:8080/v2";
+}
+</code></pre>
+<p>接着，在<code>EurekaClientServerRestIntegrationTest.setUp()</code>方法的最后加入：</p>
+<pre><code>Thread.sleep(Long.MAX_VALUE);
+</code></pre><p>这就是让Eureka-Server启动之后就hang住，然后我们就可以用Eureka-Client去注册它。</p>
+<h2 id="-eureka-server-">二、Eureka-Server启动流程</h2>
+<p>Eureka-Server的启动类是<code>com.netflix.eureka.EurekaBootStrap</code>，可以看到本质就是个Servlet监听器：</p>
+<p><img alt="" src="./img/20210110223742292.png"/></p>
+<p>Web容器启动时会自动执行监听器的<code>contextInitialized</code>方法：</p>
+<pre><code class="lang-JAVA">public class EurekaBootStrap implements ServletContextListener {
+
+    //...
+
+    @Override
+    public void contextInitialized(ServletContextEvent event) {
+        try {
+            // 初始化Eureka-Server运行环境
+            initEurekaEnvironment();
+            // 初始化Eureka-Server上下文
+            initEurekaServerContext();
+
+            // 将Eureka-Server上下文保存到ServletContext中，方便后续使用
+            ServletContext sc = event.getServletContext();
+            sc.setAttribute(EurekaServerContext.class.getName(), serverContext);
+        } catch (Throwable e) {
+            logger.error("Cannot bootstrap eureka server :", e);
+            throw new RuntimeException("Cannot bootstrap eureka server :", e);
+        }
+    }
+}
+</code></pre>
+<h3 id="2-1-initeurekaenvironment">2.1 initEurekaEnvironment</h3>
+<p><code>initEurekaEnvironment</code>方法会初始化Eureka-Server的配置环境，内部调用了<code>ConfigurationManager</code>这个配置管理器获取Eureka依赖的配置文件信息，其核心就是做了两件事：</p>
+<ol>
+<li>初始化数据中心的配置，如果没有配置的话，就是DEFAULT（这个配置国内几乎没有用）；</li>
+<li>初始化Eureka-Server运行环境，如果没有配置的话，默认就设置为test环境；</li>
+</ol>
+<pre><code class="lang-java">protected void initEurekaEnvironment() throws Exception {
+    logger.info("Setting the eureka configuration..");
+
+    // 数据中心配置，国内基本不会用到这个配置
+    String dataCenter = ConfigurationManager.getConfigInstance().getString(EUREKA_DATACENTER);
+    if (dataCenter == null) {
+        logger.info("Eureka data center value eureka.datacenter is not set, defaulting to default");
+        ConfigurationManager.getConfigInstance()
+            .setProperty(ARCHAIUS_DEPLOYMENT_DATACENTER, DEFAULT);
+    } else {
+        ConfigurationManager.getConfigInstance()
+            .setProperty(ARCHAIUS_DEPLOYMENT_DATACENTER, dataCenter);
+    }
+
+    // 运行环境配置，不同的服务器环境( 例如，PROD / TEST 等) 读取不同的配置文件
+    String environment = ConfigurationManager.getConfigInstance().getString(EUREKA_ENVIRONMENT);
+    if (environment == null) {
+        ConfigurationManager.getConfigInstance().setProperty(ARCHAIUS_DEPLOYMENT_ENVIRONMENT, TEST);
+        logger.info("Eureka environment value eureka.environment is not set, defaulting to test");
+    }
+}
+</code></pre>
+<blockquote>
+<p><code>ConfigurationManager</code>是一个配置管理器，负责管理所有的配置，采用单例模式实现，位于Netflix Config项目中，感兴趣的读者可以拉取Netflix Config的源码看一下，其实它就是一个经典的<strong>double check+volatile</strong>的双重锁检查实现。后续章节，我将详细分析ConfigurationManager。</p>
+</blockquote>
+<h3 id="2-2-initeurekaservercontext">2.2 initEurekaServerContext</h3>
+<p><code>initEurekaServerContext</code>方法，目的就是对Eureka-Server上下文进行初始化，生成一个初始化完成的<code>EurekaServerContext</code>对象。</p>
+<p>由于Eureka-Server同时也是一个Eureka-Client，因为它可能要向其它的eureka server去进行注册，组成一个eureka server的集群。所以Eureka Server把自己也当做是一个Eureka Client，也就是一个服务实例，所以初始化过程会伴随Eureka Client的初始化。</p>
+<p>下面是<code>initEurekaServerContext</code>方法的代码，我做了一些简化，省略了无关代码：</p>
+<pre><code class="lang-JAVA">protected void initEurekaServerContext() throws Exception {
+    // 代表了Eureka-Server配置，默认会从eureka-server.properties配置文件中的读取
+    EurekaServerConfig eurekaServerConfig = new DefaultEurekaServerConfig();
+
+    // ...
+
+    // 应用信息管理器，用于对应用进行管理，后续我会讲解Application这个概念
+    ApplicationInfoManager applicationInfoManager = null;
+
+    // 创建eureka客户端
+    if (eurekaClient == null) {
+        // 应用实例配置，默认会从eureka-client.properties配置文件中的读取
+        EurekaInstanceConfig instanceConfig = new MyDataCenterInstanceConfig();
+
+        // 构造应用信息管理器
+        applicationInfoManager = new ApplicationInfoManager(
+            instanceConfig, new EurekaConfigBasedInstanceInfoProvider(instanceConfig).get());
+
+        // 代表了Eureka-Client配置，默认会从eureka-client.properties配置文件中的读取
+        EurekaClientConfig eurekaClientConfig = new DefaultEurekaClientConfig();
+        eurekaClient = new DiscoveryClient(applicationInfoManager, eurekaClientConfig);
+    } else {
+        applicationInfoManager = eurekaClient.getApplicationInfoManager();
+    }
+
+    // 创建应用实例信息注册表，后续我会讲解PeerAwareInstanceRegistry这个概念
+    PeerAwareInstanceRegistry registry = new PeerAwareInstanceRegistryImpl(
+            eurekaServerConfig,
+            eurekaClient.getEurekaClientConfig(),
+            serverCodecs,
+            eurekaClient
+    );
+
+    // 创建Eureka-Server集群节点集合，，后续我会讲解PeerEurekaNodes这个概念
+    PeerEurekaNodes peerEurekaNodes = getPeerEurekaNodes(
+        registry,
+        eurekaServerConfig,
+        eurekaClient.getEurekaClientConfig(),
+        serverCodecs,
+        applicationInfoManager
+    );
+
+    // 创建Eureka-Server上下文对象，这个对象提供Eureka-Server内部各组件对象的初始化、关闭、获取等方法
+    serverContext = new DefaultEurekaServerContext(
+        eurekaServerConfig,
+        serverCodecs,
+        registry,
+        peerEurekaNodes,
+        applicationInfoManager
+    );
+
+    // Eureka-Server上下文持有者，通过它可以很方便的获取到Eureka-Server上下文
+    EurekaServerContextHolder.initialize(serverContext);
+
+    // 初始化Eureka-Server上下文
+    serverContext.initialize();
+    logger.info("Initialized server context");
+
+    // 从集群中的邻近Eureka-Server拉取注册表信息
+    int registryCount = registry.syncUp();
+    registry.openForTraffic(applicationInfoManager, registryCount);
+
+    // 配合Netflix Servo实现监控信息采集，这个可以忽略
+    EurekaMonitors.registerAllStats();
+}
+</code></pre>
+<p>上述代码就是Eureka Server的整体启动流程，其中有一些非常核心的对象，理解它们是后续源码分析的基础，本章我先概述下，后续针对每一个组件详细讲解：</p>
+<ul>
+<li><strong>ApplicationInfoManager：</strong>应用信息管理器，主要用于对应用实例（InstanceInfo）进行管理，包含实例状态、配置、实例状态变更监听等等；</li>
+<li><strong>InstanceInfo：</strong>代表一个应用实例，比如我们一个Spring Boot应用ServiceA，它启动后就是一个应用实例。Eureka-Client 可以向 Eureka-Server <strong>注册</strong>该应用实例的信息，注册成功后，就可以被其它Eureka-Client发现了；</li>
+<li><strong>EurekaInstanceConfig：</strong>应用实例配置，比如应用名称、服务端口、IP等等，默认从<code>eureka-client.properties</code>文件中读取相关配置；</li>
+<li><strong>EurekaClientConfig：</strong>Eureka-Client配置，比如连接的Eureka-Server地址、拉取注册表频率、心跳频率等等，也是默认从<code>eureka-client.properties</code>中读取相关配置项。注意，EurekaClientConfig更侧重Eureka-Client这个角色，这是它与EurekaInstanceConfig主要区别；</li>
+<li><strong>EurekaServeronfig：</strong>Eureka-Server配置，默认从<code>eureka-server.properties</code>文件中读取相关配置；</li>
+<li><strong>EurekaClient：</strong>代表Eureka客户端，用于与 Eureka-Server 交互，通过EurekaClient可以向 Eureka-Server注册、续约、取消自身应用实例（InstanceInfo），同时查询应用集合（Applications）及应用实例信息（InstanceInfo）；</li>
+<li><strong>PeerAwareInstanceRegistry：</strong>应用实例注册表，同时提供了 Eureka-Server 集群内注册信息的<strong>同步</strong>功能；</li>
+<li><strong>PeerEurekaNodes：</strong>代表了Eureka-Server 集群节点集合；</li>
+<li><strong>EurekaServerContext：</strong>代表当前这个Eureka-Server的上下文，提供Eureka-Server 内部各组件对象的<strong>初始化</strong>、<strong>关闭</strong>、<strong>获取</strong>等方法；</li>
+</ul>
+<hr/>
+<p>整个流程如下图所示，后续章节，我将逐步讲解其中每一个部分：</p>
+<p><img alt="" src="./img/20210110223757333.png"/></p>
+<h2 id="-">三、总结</h2>
+<p>本章，我对Eureka-Server的整体启动流程作了讲解，可以看到<code>eureka-server</code>模块其实就是一个壳，对 <code>eureka-client</code>和<code>eureka-core</code>进行了封装，作为web应用进行部署。</p>
+<p>Eureka-Server的核心启动流程就是<code>EurekaBootStrap.contextInitialized</code>，它最终创建一个<em>EurekaServerContext</em>上下文对象，并对其中的核心组件进行了初始化。从下一章开始，我将深入其中的细节，对Eureka-Server启动过程中的各个组件进行详细讲解。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

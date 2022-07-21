@@ -1,0 +1,88 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十七）——IK中文分词</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十七）——IK中文分词</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我们前面章节对分词的讲解全是基于英文文本的。本章，我们就来看看如何对中文短语进行分词。Elasticsearch中，最常用的中文分词器就是IK。</p>
+<h2 id="-ik-">一、IK分词器</h2>
+<h3 id="1-1-">1.1 安装</h3>
+<p>首先，从GitHub上下载预编译好的IK包，比如，我的Elasticsearch版本是v7.6.0，我就下载7.6.0版本的IK：<a href="https://github.com/medcl/elasticsearch-analysis-ik/releases。">https://github.com/medcl/elasticsearch-analysis-ik/releases。</a></p>
+<p>IK和Elasticsearch主要的版本对照如下表：</p>
+<table>
+<thead>
+<tr>
+<th>IK version</th>
+<th>ES version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>master</td>
+<td>7.x -&gt; master</td>
+</tr>
+<tr>
+<td>6.x</td>
+<td>6.x</td>
+</tr>
+<tr>
+<td>5.x</td>
+<td>5.x</td>
+</tr>
+</tbody>
+</table>
+<p>然后解压缩放置到<code>YOUR_ES_ROOT/plugins/ik/</code>目录下，最后，重启Elasticsearch即可。</p>
+<h3 id="1-2-">1.2 基本使用</h3>
+<p>IK分词器有两种analyzer：<strong>ik_max_word</strong>、<strong>ik_smart</strong>，但是一般是选用<strong>ik_max_word</strong>。</p>
+<ul>
+<li>ik_max_word：会将文本做最细粒度的拆分，比如会将“中华人民共和国国歌”拆分为“中华人民共和国,中华人民,中华,华人,人民共和国,人民,人,民,共和国,共和,和,国国,国歌”等等，会穷尽各种可能的组合。</li>
+<li>ik_smart：只做最粗粒度的拆分，比如会将“中华人民共和国国歌”拆分为“中华人民共和国,国歌”。</li>
+</ul>
+<p>我们可以看下用IK分词器的分词效果，先将改变指定字段的mapping：</p>
+<pre><code class="lang-java">PUT /my_index 
+{
+  "mappings": {
+      "properties": {
+        "text": {
+          "type": "text",
+          "analyzer": "ik_max_word"
+        }
+      }
+  }
+}
+</code></pre>
+<p>然后看下分词效果：</p>
+<pre><code class="lang-JAVA">GET /my_index/_analyze
+{
+  "text": "美专家称疫情在美国还未达到顶峰",
+  "analyzer": "ik_max_word"
+}
+</code></pre>
+<h3 id="1-3-">1.3 配置文件</h3>
+<p>IK的配置文件存在于<code>YOUR_ES_ROOT/plugins/ik/config</code>目录下，我们可以看下这个目录下的各个文件的作用：</p>
+<ul>
+<li><strong>main.dic：</strong>IK原生内置的中文词库，总共有27万多条，只要是这些单词，都会被分在一起；</li>
+<li><strong>quantifier.dic：</strong>放了一些单位相关的词；</li>
+<li><strong>suffix.dic：</strong>放了一些后缀；</li>
+<li><strong>surname.dic：</strong>中国的姓氏；</li>
+<li><strong>stopword.dic：</strong>英文停用词。</li>
+</ul>
+<p>如果我们希望自定义词库，比如加入一些当下的流行词，就可以修改<code>IKAnalyzer.cfg.xml</code>的<code>ext_dict</code>，配置我们扩展的词库，然后重启ES就可以生效了。</p>
+<h2 id="-">二、热更新词库</h2>
+<p>上一节中，如果我们希望自定义词库，每次都必须修改配置文件然后重启Elasticsearch，这种做法只适合测试环境。如果在生产环境，我们希望热更新词库，比如基于MySQL中的热点数据来更新词库，那该怎么做呢？</p>
+<p>目前有两种方案，业界一般采用第一种：</p>
+<ol>
+<li>修改IK分词器源码，然后每隔一定时间，自动从MySQL中加载新的词库；</li>
+<li>基于IK分词器原生支持的热更新方案：部署一个web服务器，提供一个http接口，通过modified和tag两个http响应头，来提供词语的热更新。</li>
+</ol>
+<p>修改IK的源码，网上有很多现有示例，我这边就不再赘述了。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了IK中文分词器的安装及基本使用，生产环境中，我们一般会修改IK的源码，使它支持热更新词库。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

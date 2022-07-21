@@ -1,0 +1,58 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（九）——分布式框架之高性能：ElasticSearch数据持久化</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（九）——分布式框架之高性能：ElasticSearch数据持久化</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来看下Elasticsearch的持久化原理，也就是数据在底层究竟是如何写入到磁盘上的。开始之前，先来了解一个基本概念——<strong>Segment</strong>。</p>
+<h2 id="-segment-file">一、Segment File</h2>
+<p>我们知道，在Elasticsearch中创建一个index索引时，需要指定shard分片，一个shard分片在底层其实是一个Lucene索引，它<strong>由若干个segment文件和对应的<code>commit point</code>（提交点文件）构成</strong>。</p>
+<center><br/> <img src="./img/20200311212404694.png" style="zoom:50%"><br/></img></center>
+<p>segment文件可以理解成底层存储document数据的文件，ES进行检索时最终是从它里面检索出数据的；而<code>commit point</code>文件可以理解成一个保存了若干segment信息的列表，它标识着这个commit point前所有旧的segment file文件。</p>
+<p>举个例子，当Elasticsearch创建<code>commit point</code>文件时，会已有一些segment文件是已经存在的，那<code>commit point</code>就保存着这些旧的segment文件的信息：</p>
+<center><br/> <img src="./img/20200311212414141.png" style="zoom:45%"/><br/></center>
+<h2 id="-">二、写入流程</h2>
+<p>一条document数据被写入磁盘会经历以下几个过程：</p>
+<h3 id="1-1-write">1.1 write</h3>
+<p>首先，document会被写入<strong>in-memory buffer</strong>中，所谓<strong>in-memory buffer</strong>其实就是应用内存。同时，document数据会被写入<strong>translog</strong>日志文件。</p>
+<center><br/> <img src="./img/20200311212421556.png" style="zoom:55%"/><br/></center>
+<h3 id="1-2-refresh">1.2 refresh</h3>
+<p>每隔1秒，Elasticsearch会执行一次<strong><em>refresh</em></strong>操作：将buffer中的数据refresh到filesystem cache中的一个新segment file中。filesystem cache其实就是os cache，性能非常好。注意，此时的segment file仅仅是存在于os cache中的缓存数据，并不存在于磁盘上。</p>
+<center><br/> <img src="./img/20200311212430796.png" style="zoom:55%"/><br/></center>
+<p>refresh操作完成后，buffer会被清空。另外，如果buffer满了也会执行refresh。<strong>当数据进入filesystem cache后，其实就可以被检索到了</strong>。</p>
+<blockquote>
+<p>为什么说Elasticsearch是准实时（NRT，near real-time）的？因为默认每隔1秒refresh一次，所以写入的数据1秒之后才能被检索到。可以通过index的<code>index.refresh_interval</code>参数配置refresh的时间间隔。</p>
+</blockquote>
+<h3 id="1-3-flush">1.3 flush</h3>
+<p>上述过程中，segment file一直存在于os cache中，如果发生宕机，cache中的数据就会丢失。所以需要有一种机制能将os cache中的数据写入磁盘文件。这一过程在Elasticsearch中就叫做<strong><em>flush</em></strong>。</p>
+<p>在refresh的过程中，os cache中的segment file会越来越多（每次refresh都会创建一个新的segment file），<strong>translog</strong>日志文件也会越来越大。当translog大到一定程度的时候，就会触发<strong>flush</strong>操作：</p>
+<ol>
+<li>flush的第一步，将buffer中的现有数据refresh到os cache中，清空buffer；</li>
+<li>在磁盘上写入一个commit point文件，里面标识着这个commit point前os cache中的所有旧segment file文件数据；</li>
+<li>强行将os cache中的所有数据<code>fsync</code>到磁盘文件中去；</li>
+<li>最后将translog清空，因为此时里面记录的数据此时都已经被fsync到磁盘了。</li>
+</ol>
+<center><br/> <img src="./img/20200311212437991.png" style="zoom:55%"/><br/></center>
+<blockquote>
+<p>默认每隔30分钟会自动执行一次<strong>flush</strong>操作，但是如果translog过大，也会提前触发。</p>
+</blockquote>
+<p><strong><em>这里来思考下，translog日志文件的作用是什么？</em></strong></p>
+<p>在执行flush操作之前，数据要么是停留在buffer中，要么是停留在os cache中，此时一旦这台机器宕机，数据就全丢了。所以，需要将数据写入到一个专门的日志文件中，此时即使机器宕机了，再次重启时，Elasticsearch会自动读取translog日志文件中的数据，恢复到内存buffer和os cache中去。</p>
+<p>另外，translog中的数据，本身也是先写入os cache，然后默认每隔5秒刷一次到磁盘中。所以默认情况下，即使有translog保证可用性，也可能丢失5s的数据。此时数据仅仅停留在buffer或者translog文件的os cache中，如果此时机器挂了，会丢失这5秒钟的数据。</p>
+<center><br/> <img src="./img/20200311212445863.png" style="zoom:55%"/><br/></center>
+<blockquote>
+<p>如果你希望一定不能丢失数据的话，可以设置index的<code>index.translog.durability</code>参数，使每次写入一条数据，都是写入buffer，同时fsync写入磁盘上的translog文件，但是这会导致写性能、吞吐量严重下降。</p>
+</blockquote>
+<h3 id="1-4-merge">1.4 merge</h3>
+<p>由于每refresh一次，就会os cache中产生一个新的segment file，所以随着segment file越来越多，搜索的性能会降低。此时，Elasticsearch会定期执行<strong><em>merge</em></strong>操作。</p>
+<p>每次merge时，ES会选择一些相似大小的segment进行合并，同时会将那些标识为<code>deleted</code>的document物理删除掉。合并后新的segment file会被写入磁盘，同时会新建commit point文件，里面标识着所有合并后新的segment file。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了Elasticsearch的持久化原理，核心就是<code>refresh</code>、<code>flush</code>、<code>merge</code>这三个操作。目前很多开源分布式框架都采用了这种数据持久化的思路。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,326 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（十八）——dubbo-cluster模块：核心接口</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（十八）——dubbo-cluster模块：核心接口</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将对 Dubbo 架构中的 Cluster 层进行分析。</p>
+<p>在生产环境中，为了保证服务的高可用、高性能以及容错能力，我们通常会在多个服务器上运行相同的服务端程序，然后以<strong>集群</strong>的形式对外提供服务。根据各项性能指标的要求不同，各个服务端集群中服务实例的个数也不尽相同，从几个实例到几百个实例不等。</p>
+<p>针对这种服务集群的情况，客户端程序需要解决一些问题，比如：</p>
+<ul>
+<li>客户端程序是否要感知每个服务端地址？</li>
+<li>客户端程序的一次请求，到底调用哪个服务端程序呢？</li>
+<li>请求失败之后是重试，还是抛出异常？如果是重试，是再次请求该服务实例，还是尝试请求其它服务实例？</li>
+<li>服务端集群如何做到负载均衡，负载均衡的标准是什么呢？</li>
+</ul>
+<p>为了解决上述问题，<strong>Dubbo 独立出了一个实现集群功能的模块—— dubbo-cluster</strong>：</p>
+<center><br/> <img src="./img/20211127175042609.png" style="zoom:76%"><br/></img></center>
+<p>Dubbo Cluster 层隶属于 RPC 层，它在整个Dubbo 架构图中的位置如下：</p>
+<center><br/> <img src="./img/20211127175055634.jpg" style="zoom:100%"/><br/></center>
+<h2 id="-cluster-">一、Cluster 架构</h2>
+<p><code>dubbo-cluster</code> 模块的主要功能是将多个 Provider 聚合成一个 Provider 供 Consumer 调用，其中涉及集群的容错处理、路由规则的处理以及负载均衡。下图展示了 dubbo-cluster 模块中的核心组件：</p>
+<center><br/> <img src="./img/20211127175111355.png" style="zoom:65%"/><br/></center>
+<p>从上图可以看出，<code>dubbo-cluster</code> 主要包括以下四个核心接口：</p>
+<ul>
+<li><strong>Cluster 接口</strong>：集群容错接口，主要是在某些 Provider 节点发生故障时，让 Consumer 的调用请求能够发送到正常的 Provider 节点，从而保证服务集群的高可用；</li>
+<li><strong>Directory 接口</strong>：表示服务目录，是多个 Invoker 的集合，是后续路由规则、负载均衡策略以及集群容错的基础；</li>
+<li><strong>Router 接口</strong>：表示路由器，请求经过 Router 时会按照用户指定的规则匹配出符合条件的 Provider；</li>
+<li><strong>LoadBalance 接口</strong>：负载均衡接口，Consumer 会按照指定的负载均衡策略，从 Provider 集合中选出一个最合适的 Provider 节点来处理请求。</li>
+</ul>
+<p>Cluster 层的核心流程是：</p>
+<ol>
+<li>当调用进入 Cluster 时，Cluster 会创建一个 <strong>AbstractClusterInvoker</strong> 对象；</li>
+<li>这个 AbstractClusterInvoker 首先从 Directory 中获取当前 Invoker 集合；</li>
+<li>然后，按照 Router 集合进行路由，得到符合条件的 Invoker 集合；</li>
+<li>最后，按照 LoadBalance 指定的负载均衡策略，得到最终要调用的 Invoker 对象。</li>
+</ol>
+<p>了解了 dubbo-cluster 模块的核心架构和基础组件之后，我来按照上面架构图的顺序介绍每个接口的定义及相关实现。</p>
+<h2 id="-directory-">二、Directory 接口</h2>
+<p>Directory 接口表示的是一个集合，该集合由多个 Invoker 构成，后续的路由处理、负载均衡、集群容错等一系列操作都是在 Directory 基础上实现的。</p>
+<pre><code class="lang-JAVA">// Directory.java
+
+public interface Directory&lt;T&gt; extends Node {
+    /**
+     * 获取服务接口的类型
+     */
+    Class&lt;T&gt; getInterface();
+
+    /**
+     * 根据传入的Invocation请求，过滤自身维护的Invoker集合，返回符合条件的Invoker集合
+     */
+    List&lt;Invoker&lt;T&gt;&gt; list(Invocation invocation) throws RpcException;
+
+    /**
+     * 返回当前Directory对象维护的全部Invoker对象
+     */
+    List&lt;Invoker&lt;T&gt;&gt; getAllInvokers();
+    /**
+     * 返回Consumer端的Url
+     */
+    URL getConsumerUrl();
+}
+</code></pre>
+<h3 id="2-1-abstractdirectory">2.1 AbstractDirectory</h3>
+<p>AbstractDirectory 是 Directory 接口的抽象实现，其中除了维护 Consumer 端的 URL 信息，还维护了一个 RouterChain 对象，用于记录当前使用的 Router 对象集合。</p>
+<p>AbstractDirectory 对 list() 方法的实现也比较简单，就是直接委托给了 doList() 方法，doList() 是个抽象方法，由 AbstractDirectory 的子类实现。</p>
+<pre><code class="lang-JAVA">// AbstractDirectory.java
+
+public abstract class AbstractDirectory&lt;T&gt; implements Directory&lt;T&gt; {
+    private final URL url;
+
+    private volatile boolean destroyed = false;
+
+    private volatile URL consumerUrl;
+
+    protected RouterChain&lt;T&gt; routerChain;
+
+    public AbstractDirectory(URL url, RouterChain&lt;T&gt; routerChain) {
+        if (url == null) {
+            throw new IllegalArgumentException("url == null");
+        }
+
+        this.url = url.removeParameter(REFER_KEY).removeParameter(MONITOR_KEY);
+        this.consumerUrl = url.addParameters(StringUtils.parseQueryString(url.getParameterAndDecoded(REFER_KEY)))
+                .removeParameter(MONITOR_KEY);
+        setRouterChain(routerChain);
+    }
+
+    @Override
+    public List&lt;Invoker&lt;T&gt;&gt; list(Invocation invocation) throws RpcException {
+        if (destroyed) {
+            throw new RpcException("Directory already destroyed .url: " + getUrl());
+        }
+        return doList(invocation);
+    }
+
+    @Override
+    public URL getUrl() {
+        return url;
+    }
+
+    protected void addRouters(List&lt;Router&gt; routers) {
+        routers = routers == null ? Collections.emptyList() : routers;
+        routerChain.addRouters(routers);
+    }
+
+    protected abstract List&lt;Invoker&lt;T&gt;&gt; doList(Invocation invocation) throws RpcException;
+}
+</code></pre>
+<p>Directory 接口有 <strong>RegistryDirectory</strong> 和 <strong>StaticDirectory</strong> 两个具体实现，如下图所示：</p>
+<center><br/> <img src="./img/20211127175130626.png" style="zoom:75%"/><br/></center>
+<h3 id="2-2-staticdirectory">2.2 StaticDirectory</h3>
+<p>StaticDirectory 实现中维护的 Invoker 集合是静态的，在 StaticDirectory 对象创建完成之后，不会再发生变化。</p>
+<p>StaticDirectory 的实现比较简单：</p>
+<ul>
+<li>在构造方法中，StaticDirectory 会接收一个 Invoker 集合，并赋值到自身的 <code>invokers</code> 字段中，作为底层的 Invoker 集合；</li>
+<li>在 doList() 方法中，StaticDirectory 会使用 RouterChain 中的 Router 从 <code>invokers</code> 集合中过滤出符合路由规则的 Invoker 对象集合。</li>
+</ul>
+<pre><code class="lang-JAVA">// StaticDirectory.java
+
+public class StaticDirectory&lt;T&gt; extends AbstractDirectory&lt;T&gt; {
+
+    private final List&lt;Invoker&lt;T&gt;&gt; invokers;
+
+    public StaticDirectory(URL url, List&lt;Invoker&lt;T&gt;&gt; invokers, RouterChain&lt;T&gt; routerChain) {
+        super(url == null &amp;&amp; CollectionUtils.isNotEmpty(invokers) ? invokers.get(0).getUrl() : url, routerChain);
+        if (CollectionUtils.isEmpty(invokers)) {
+            throw new IllegalArgumentException("invokers == null");
+        }
+        this.invokers = invokers;
+    }
+
+    @Override
+    public Class&lt;T&gt; getInterface() {
+        return invokers.get(0).getInterface();
+    }
+
+    @Override
+    public List&lt;Invoker&lt;T&gt;&gt; getAllInvokers() {
+        return invokers;
+    }
+
+    public void buildRouterChain() {
+        // 根据 URL 构造一个包含内置 Router 的 RouterChain 对象
+        RouterChain&lt;T&gt; routerChain = RouterChain.buildChain(getUrl());
+        // 将invokers与RouterChain关联
+        routerChain.setInvokers(invokers);
+        // 设置routerChain字段
+        this.setRouterChain(routerChain);
+    }
+
+    @Override
+    protected List&lt;Invoker&lt;T&gt;&gt; doList(Invocation invocation) throws RpcException {
+        List&lt;Invoker&lt;T&gt;&gt; finalInvokers = invokers;
+        if (routerChain != null) {
+            try {
+                // 通过RouterChain过滤出符合条件的Invoker集合
+                finalInvokers = routerChain.route(getConsumerUrl(), invocation);
+            } catch (Throwable t) {
+                logger.error("Failed to execute router: " + getUrl() + ", cause: " + t.getMessage(), t);
+            }
+        }
+        return finalInvokers == null ? Collections.emptyList() : finalInvokers;
+    }
+}
+</code></pre>
+<h3 id="2-3-registrydirectory">2.3 RegistryDirectory</h3>
+<p>RegistryDirectory 中维护的 Invoker 集合会随着注册中心中维护的注册信息动态发生变化，这就依赖了 ZooKeeper 等注册中心的推送能力。</p>
+<p>RegistryDirectory 实现了 <code>NotifyListener</code> 接口，当注册中心中的服务信息发生变化时，RegistryDirectory 会收到变更通知，然后动态增删底层 Invoker 集合。</p>
+<h4 id="-">核心字段</h4>
+<p>我们先来看一下 RegistryDirectory 中的核心字段，在 RegistryDirectory 的构造方法中，会根据传入的注册中心 URL 初始化核心字段：</p>
+<pre><code class="lang-JAVA">// RegistryDirectory.java
+
+public class RegistryDirectory&lt;T&gt; extends AbstractDirectory&lt;T&gt; implements NotifyListener {
+    // 集群策略适配器，通过 Dubbo SPI 方式动态创建
+    private static final Cluster CLUSTER = ExtensionLoader.getExtensionLoader(Cluster.class).getAdaptiveExtension();
+
+    // 路由工厂适配器，通过 Dubbo SPI 方式动态创建
+    private static final RouterFactory ROUTER_FACTORY = ExtensionLoader.getExtensionLoader(RouterFactory.class).getAdaptiveExtension();
+
+    // 服务对应的 ServiceKey，默认由 {interface}:[group]:[version] 三部分构成
+    private final String serviceKey; 
+
+    // 服务接口类型，例如org.apache.dubbo.demo.DemoService
+    private final Class&lt;T&gt; serviceType; 
+
+    // Consumer URL 中 refer 参数解析后得到的全部 KV
+    private final Map&lt;String, String&gt; queryMap;
+
+    // 只保留 Consumer 属性的 URL，也就是由 queryMap 集合重新生成的 URL
+    private final URL directoryUrl; 
+
+    // 是否引用多个服务组
+    private final boolean multiGroup;
+
+    // 使用的 Protocol 实现
+    private Protocol protocol; 
+
+    // 使用的注册中心实现
+    private Registry registry; 
+
+    private volatile boolean forbidden = false;
+    private boolean shouldRegister;
+    private boolean shouldSimplified;
+
+    private volatile URL overrideDirectoryUrl;
+    private volatile URL registeredConsumerUrl;
+
+    // 动态更新的配置信息
+    private volatile List&lt;Configurator&gt; configurators; 
+
+    // Provider URL 与对应 Invoker 之间的映射，该集合会与 invokers 字段同时动态更新
+    private volatile Map&lt;String, Invoker&lt;T&gt;&gt; urlInvokerMap; 
+
+    // 动态更新的 Invoker 集合
+    private volatile List&lt;Invoker&lt;T&gt;&gt; invokers;
+
+    // 当前缓存的所有 Provider 的 URL，该集合会与 invokers 字段同时动态更新
+    private volatile Set&lt;URL&gt; cachedInvokerUrls;
+
+    private static final ConsumerConfigurationListener CONSUMER_CONFIGURATION_LISTENER = new ConsumerConfigurationListener();
+    private ReferenceConfigurationListener serviceConfigurationListener;
+
+    public RegistryDirectory(Class&lt;T&gt; serviceType, URL url) {
+        // 传入的url参数是注册中心的URL
+        super(url); 
+        shouldRegister = !ANY_VALUE.equals(url.getServiceInterface()) &amp;&amp; url.getParameter(REGISTER_KEY, true);
+        shouldSimplified = url.getParameter(SIMPLIFIED_KEY, false);
+        this.serviceType = serviceType;
+        this.serviceKey = url.getServiceKey();
+
+        // 解析refer参数值，得到其中Consumer的属性信息
+        this.queryMap = StringUtils.parseQueryString(url.getParameterAndDecoded(REFER_KEY));
+
+        // 将queryMap中的KV作为参数，重新构造URL，其中的protocol和path部分不变
+        this.overrideDirectoryUrl = this.directoryUrl = turnRegistryUrlToConsumerUrl(url);
+        String group = directoryUrl.getParameter(GROUP_KEY, "");
+        this.multiGroup = group != null &amp;&amp; (ANY_VALUE.equals(group) || group.contains(","));
+    }
+    //...
+}
+</code></pre>
+<h4 id="subscribe-">subscribe方法</h4>
+<p>在完成初始化之后，我们来看 <code>subscribe()</code> 方法，该方法会在 Consumer 进行订阅的时候被调用，内部会调用 <code>Registry.subscribe()</code> 完成订阅操作，同时还会将当前 RegistryDirectory 对象作为 NotifyListener 监听器添加到 Registry 中，具体实现如下：</p>
+<pre><code class="lang-JAVA">// RegistryDirectory.java
+
+public void subscribe(URL url) {
+
+    setConsumerUrl(url);
+
+    // 将当前RegistryDirectory对象作为ConfigurationListener记录到CONSUMER_CONFIGURATION_LISTENER中
+    CONSUMER_CONFIGURATION_LISTENER.addNotifyListener(this);
+
+    serviceConfigurationListener = new ReferenceConfigurationListener(this, url);
+
+    // 完成订阅操作，注册中心的相关操作在前文已经介绍过了，这里不再重复
+    registry.subscribe(url, this);
+}
+</code></pre>
+<h4 id="notify-">notify方法</h4>
+<p>在 RegistryDirectory.notify() 方法中，首先会按照 category 对发生变化的 URL 进行分类，分成 configurators、routers、providers 三类，并分别对不同类型的 URL 进行处理：</p>
+<ul>
+<li>将 configurators 类型的 URL 转化为 Configurator，保存到 configurators 字段中；</li>
+<li>将 router 类型的 URL 转化为 Router，并通过 routerChain.addRouters() 方法添加 routerChain 中保存；</li>
+<li>将 provider 类型的 URL 转化为 Invoker 对象，并记录到 invokers 集合和 urlInvokerMap 集合中。</li>
+</ul>
+<p>notify() 方法的具体实现如下：</p>
+<pre><code class="lang-JAVA">// RegistryDirectory.java
+
+public synchronized void notify(List&lt;URL&gt; urls) {
+
+    // 按照category进行分类，分成configurators、routers、providers三类
+    Map&lt;String, List&lt;URL&gt;&gt; categoryUrls = urls.stream()
+            .filter(Objects::nonNull)
+            .filter(this::isValidCategory)
+            .filter(this::isNotCompatibleFor26x)
+            .collect(Collectors.groupingBy(this::judgeCategory));
+
+    // 获取configurators类型的URL，并转换成Configurator对象
+    List&lt;URL&gt; configuratorURLs = categoryUrls.getOrDefault(CONFIGURATORS_CATEGORY, Collections.emptyList());
+    this.configurators = Configurator.toConfigurators(configuratorURLs).orElse(this.configurators);
+
+    // 获取routers类型的URL，并转成Router对象，添加到RouterChain中
+    List&lt;URL&gt; routerURLs = categoryUrls.getOrDefault(ROUTERS_CATEGORY, Collections.emptyList());
+    toRouters(routerURLs).ifPresent(this::addRouters);
+
+    // 获取providers类型的URL，调用refreshOverrideAndInvoker()方法进行处理
+    List&lt;URL&gt; providerURLs = categoryUrls.getOrDefault(PROVIDERS_CATEGORY, Collections.emptyList());
+
+    //... 在Dubbo3.0中会触发AddressListener监听器，但是现在AddressListener接口还没有实现，所以省略这段代码
+
+    refreshOverrideAndInvoker(providerURLs);
+}
+</code></pre>
+<h4 id="dolist-">doList方法</h4>
+<p>该方法是 AbstractDirectory 留给其子类实现的一个方法，也是通过 Directory 接口获取 Invoker 集合的核心所在，具体实现如下：</p>
+<pre><code class="lang-JAVA">// RegistryDirectory.java
+
+public List&lt;Invoker&lt;T&gt;&gt; doList(Invocation invocation) {
+
+    // 检测forbidden字段，当该字段在refreshInvoker()过程中设置为true时，表示无Provider可用，直接抛出异常
+    if (forbidden) { 
+        throw new RpcException("...");
+    }
+
+    if (multiGroup) {
+        // multiGroup为true时的特殊处理，在refreshInvoker()方法中针对multiGroup为true的场景，已经使用Router进行了筛选，所以这里直接返回接口
+        return this.invokers == null ? Collections.emptyList() : this.invokers;
+    }
+
+    List&lt;Invoker&lt;T&gt;&gt; invokers = null;
+
+    // 通过RouterChain.route()方法筛选Invoker集合，最终得到符合路由条件的Invoker集合
+    invokers = routerChain.route(getConsumerUrl(), invocation);
+    return invokers == null ? Collections.emptyList() : invokers;
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我首先介绍了 <code>dubbo-cluster</code> 模块的整体架构，简单说明了 Cluster、Directory、Router、LoadBalance 四个核心接口的功能。接下来我深入介绍了 Directory 接口的定义以及 StaticDirectory、RegistryDirectory 两个类的核心实现。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

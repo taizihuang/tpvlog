@@ -1,0 +1,426 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（四二）—— J.U.C之executors框架：Future模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（四二）—— J.U.C之executors框架：Future模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-future-">一、Future模式简介</h2>
+<p><a href="https://segmentfault.com/a/1190000015558810">Future模式</a>是Java多线程设计模式中的一种常见模式，它的主要作用就是异步地执行任务，并在需要的时候获取结果。我们知道，一般调用一个函数，需要等待函数执行完成，调用线程才会继续往下执行，如果是一些计算密集型任务，需要等待的时间可能就会比较长。</p>
+<blockquote>
+<p>笔者在读书期间曾参与过一个国家电网的复杂水电系统的联合优化调度项目，需要在工业上可接受的时间内计算出整个云南地区近40座大型水电站的日发电计划。<br/>在电力系统中日发电计划的制定非常重要，同时又涉及水利学、经济学、电气工程、政治政策等诸多复杂约束条件，工业上基本都是通过混合整数规划、动态规划再结合其它数学规划方法建模求解，模型涉及的变量基本都是百万级以上。<br/><strong><em>试想一下，这种复杂的计算模型，假设我把它封装到一个函数中，由调用方进行单线程调用，需要等待多少时间？如果将模型集成到UI，用户在界面上点击一下计算，那可能用户基本就认为应用假设死崩溃了。</em></strong></p>
+</blockquote>
+<p>在Java中，一种解决办法是由调用线程新建一个线程执行该任务，比如下面这样：</p>
+<pre><code class="lang-java">public void calculate(){
+    Thread t = new Thread(new Runnable() {
+        @Override
+        public void run() {
+            model.calculate();
+        }
+    });
+    t.start();
+}
+</code></pre>
+<p>但是，这样有一个问题，我拿不到计算结果，也不知道任务到底什么时候计算结束。我们来看下<strong>Future模式</strong>是如何来解决的。</p>
+<hr/>
+<p><strong><em>Future模式</em></strong>，可以让调用方立即返回，然后它自己会在后面慢慢处理，此时调用者拿到的仅仅是一个<strong>凭证</strong>，调用者可以先去处理其它任务，在真正需要用到调用结果的场合，再使用凭证去获取调用结果。这个凭证就是这里的<strong>Future</strong>。</p>
+<p>我们看下时序图来理解下两者的区别:</p>
+<p><em>传统的数据获取方式：</em></p>
+<center><br/><img src="./img/20191101201002278.png" style="zoom:100%;"><br/></img></center>
+<p><em>Future模式下的数据获取：</em></p>
+<center><br/><img src="./img/20191101201008341.png" style="zoom:100%;"/><br/></center>
+<blockquote>
+<p>如果读者对金融市场有些了解，或是了解金融衍生品的话，对<strong><em>Future</em></strong>这个单词应该不会陌生，<strong><em>Future</em></strong>在经济学中出现的频率相当之高，比如关于现金流的折算，其中的终值，英文就是<strong><em>Future value</em></strong>。常见的金融衍生品，期货、远期的英文分别是<strong><em>Futures</em></strong>、<strong><em>Financial future</em></strong>。</p>
+</blockquote>
+<p>我们之前说了，Future模式可以理解为一种凭证，拿着该凭证在将来的某个时间点可以取到我想要的东西，这其实就和期货、远期有点类似了，期货、远期也是双方制定协议或合同，然后在约定的某个时间点，拿着合同进行资金或实物的交割。可见，Future模式的命名是很有深意且很恰当的。</p>
+<h2 id="-j-u-c-future-">二、J.U.C中的Future模式</h2>
+<p>在<a href="https://segmentfault.com/a/1190000015558810">Java多线程基础之Future模式</a>中，我们曾经给出过Future模式的通用类关系图。本章中，我不想教科书般得再贴一遍该图，而是希望能循序渐进地带领读者去真正理解Future模式中的各个组件，去思考为什么Future模式的类关系图是那样，为什么一定就是那么几个组件？</p>
+<h3 id="-">真实的任务类</h3>
+<p>首先来思考下，我们需要执行的是一个任务，那么在Java中，一般需要实现<code>Runnable</code>接口，比如像下面这样：</p>
+<pre><code class="lang-java">public class Task implements Runnable {
+    @Override
+    public void run() {
+        // do something
+    }
+}
+</code></pre>
+<p>但是，如果我需要任务的返回结果呢，从Runnable的接口定义来看，并不能满足我们的要求，Runnable一般仅仅用于定义一个可以被线程执行的任务，它的run方法没有返回值：</p>
+<pre><code class="lang-java">public interface Runnable {
+    public abstract void run();
+}
+</code></pre>
+<p>于是，JDK提供了另一个接口——<code>Callable</code>，表示一个具有返回结果的任务：</p>
+<pre><code class="lang-java">public interface Callable&lt;V&gt; {
+    V call() throws Exception;
+}
+</code></pre>
+<p>所以，最终我们自定义的任务类一般都是实现了Callable接口。以下定义了一个具有复杂计算过程的任务，最终返回一个Double值：</p>
+<pre><code class="lang-java">public class ComplexTask implements Callable&lt;Double&gt; {
+    @Override
+    public Double call() {
+        // complex calculating...
+        return ThreadLocalRandom.current().nextDouble();
+    }
+}
+</code></pre>
+<hr/>
+<h3 id="-">凭证</h3>
+<p>第一节讲到，Future模式可以让调用方获取任务的一个凭证，以便将来拿着凭证去获取任务结果，凭证需要具有以下特点：</p>
+<ol>
+<li>在将来某个时间点，可以通过凭证获取任务的结果；</li>
+<li>可以支持取消。</li>
+</ol>
+<p>从以上两点来看，我们首先想到的方式就是对Callable任务进行包装，包装成一个凭证，然后返回给调用方。<br/>J.U.C提供了Future接口和它的实现类——<code>FutureTask</code>来满足我们的需求，我们可以像下面这样对之前定义的ComplexTask包装：</p>
+<pre><code class="lang-java">ComplexTask task = new ComplexTask();
+Future&lt;Double&gt; future = new FutureTask&lt;Double&gt;(task);
+</code></pre>
+<p>上面的FutureTask就是真实的“凭证”，Future则是该凭证的接口（从面向对象的设计思想来讲，调用方应面向接口操作）。</p>
+<p><em>Future接口的定义：</em></p>
+<pre><code class="lang-java">public interface Future&lt;V&gt; {
+
+    boolean cancel(boolean mayInterruptIfRunning);
+
+    boolean isCancelled();
+
+    boolean isDone();
+
+    V get() throws InterruptedException, ExecutionException;
+
+    V get(long timeout, TimeUnit unit)
+        throws InterruptedException, ExecutionException, TimeoutException;
+}
+</code></pre>
+<p>Future接口很简单，提供了<code>isCancelled</code>和<code>isDone</code>两个方法监控任务的执行状态，一个<code>cancel</code>方法用于取消任务的执行。两个<code>get</code>方法用于获取任务的执行结果，如果任务未执行完成，除非设置超时，否则调用线程将会阻塞。</p>
+<p>此外，为了能够被线程或线程池执行任务，凭证还需要实现Runnable接口，所以J.U.C还提供了一个<code>RunnableFuture</code>接口，其实就是组合了Runnable和Future接口：</p>
+<pre><code class="lang-java">public interface RunnableFuture&lt;V&gt; extends Runnable, Future&lt;V&gt; {
+    void run();
+}
+</code></pre>
+<p>上面提到的<strong>FutureTask</strong>，其实就是实现了<strong>RunnableFuture</strong>接口的“凭证”：</p>
+<pre><code class="lang-java">public class FutureTask&lt;V&gt; implements RunnableFuture&lt;V&gt; {
+
+    public FutureTask(Callable&lt;V&gt; callable) {
+        if (callable == null)
+            throw new NullPointerException();
+        this.callable = callable;
+        // ...       
+    }
+
+    public FutureTask(Runnable runnable, V result) {
+        this.callable = Executors.callable(runnable, result);
+        // ...
+    }
+}
+</code></pre>
+<p>从构造函数可以看到，FutureTask既可以包装Callable任务，也可以包装Runnable任务，但最终都是将Runnable转换成Callable任务，其实是一个适配过程。</p>
+<center><br/><img src="./img/20191101201014062.png" style="zoom:80%;"/><br/></center>
+<hr/>
+<h3 id="-">调用方</h3>
+<p>最终，调用方可以以下面这种方式使用Future模式，异步地获取任务的执行结果。</p>
+<pre><code class="lang-java">public class Client {
+    public static void main(String[] args) throws ExecutionException, InterruptedException {
+        ComplexTask task = new ComplexTask();
+        Future&lt;Double&gt; future = new FutureTask&lt;Double&gt;(task);
+
+        // time passed...
+
+        Double result = future.get();
+    }
+}
+</code></pre>
+<p>通过上面的分析，可以看到，整个Future模式其实就三个核心组件：</p>
+<ul>
+<li><strong>真实任务/数据类</strong>（通常任务执行比较慢，或数据构造需要较长时间），即示例中的ComplexTask</li>
+<li><strong>Future接口</strong>（调用方使用该凭证获取真实任务/数据的结果），即Future接口</li>
+<li><strong>Future实现类</strong>（用于对真实任务/数据进行包装），即FutureTask实现类</li>
+</ul>
+<h2 id="-futuretask-">三、FutureTask原理</h2>
+<p>在J.U.C提供的Future模式中，最重要的就是<code>FutureTask</code>类，FutureTask是在JDK1.5时，随着J.U.C一起引入的，它代表着一个异步任务，这个任务一般提交给Executor执行，当然也可以由调用方直接调用run方法运行。</p>
+<center><br/><img src="./img/20191101201019966.png" style="zoom:80%;"/><br/></center>
+<p>既然是任务，就有状态，FutureTask一共给任务定义了<strong>7种</strong>状态：</p>
+<ul>
+<li><strong><em>NEW：</em></strong>表示任务的初始化状态；</li>
+<li><strong><em>COMPLETING：</em></strong>表示任务已执行完成（正常完成或异常完成），但任务结果或异常原因还未设置完成，属于中间状态；</li>
+<li><strong><em>NORMAL：</em></strong>表示任务已经执行完成（正常完成），且任务结果已设置完成，属于最终状态；</li>
+<li><strong><em>EXCEPTIONAL：</em></strong>表示任务已经执行完成（异常完成），且任务异常已设置完成，属于最终状态；</li>
+<li><strong><em>CANCELLED：</em></strong>表示任务还没开始执行就被取消（非中断方式），属于最终状态；</li>
+<li><strong><em>INTERRUPTING：</em></strong>表示任务还没开始执行就被取消（中断方式），正式被中断前的过渡状态，属于中间状态；</li>
+<li><strong><em>INTERRUPTED：</em></strong>表示任务还没开始执行就被取消（中断方式），且已被中断，属于最终状态。</li>
+</ul>
+<p>各个状态之间的状态转换图如下：</p>
+<center><br/><img src="./img/20191101201026493.png" style="zoom:20%;"/><br/></center>
+<p>上图需要注意的是两点：</p>
+<ol>
+<li>FutureTask虽然支持任务的取消（cancel方法），但是只有当任务是初始化（<strong>NEW</strong>状态）时才有效，否则cancel方法直接返回false；</li>
+<li>当执行任务时（run方法），无论成功或异常，都会先过渡到<strong>COMPLETING</strong>状态，直到任务结果设置完成后，才会进入响应的终态。</li>
+</ol>
+<blockquote>
+<p>JDK1.7之前，FutureTask通过内部类实现了AQS框架来实现功能。 JDK1.7及以后，则改变为直接通过<code>Unsafe</code>类CAS操作<code>state</code>状态字段来进行同步。</p>
+</blockquote>
+<hr/>
+<h3 id="-">构造</h3>
+<p>FutureTask在构造时可以接受Runnable或Callable任务，如果是Runnable，则最终包装成Callable：</p>
+<pre><code class="lang-java">public FutureTask(Callable&lt;V&gt; callable) {
+    if (callable == null)
+        throw new NullPointerException();
+    this.callable = callable;
+    this.state = NEW;
+}
+
+public FutureTask(Runnable runnable, V result) {
+    this.callable = Executors.callable(runnable, result);
+    this.state = NEW;
+}
+</code></pre>
+<p>上述的<code>Executors.callable()</code>方法我们在<a href="https://segmentfault.com/a/1190000016586578">executors框架概述</a>提到过，其实就是对Runnable对象做了适配，返回Callable适配对象——RunnableAdapter：</p>
+<pre><code class="lang-java">public static &lt;T&gt; Callable&lt;T&gt; callable(Runnable task, T result) {
+    if (task == null)
+        throw new NullPointerException();
+    return new RunnableAdapter&lt;T&gt;(task, result);
+}
+</code></pre>
+<pre><code class="lang-java">static final class RunnableAdapter&lt;T&gt; implements Callable&lt;T&gt; {
+    final Runnable task;
+    final T result;
+    RunnableAdapter(Runnable task, T result) {
+        this.task = task;
+        this.result = result;
+    }
+    public T call() {
+        task.run();
+        return result;
+    }
+}
+</code></pre>
+<p>FutureTask的字段定义非常简单，State标识任务的当前状态，状态之间的转换通过Unsafe来操作，所有操作都基于<strong>自旋+CAS</strong>完成：</p>
+<pre><code class="lang-java">private volatile int state;
+private static final int NEW = 0;
+private static final int COMPLETING = 1;
+private static final int NORMAL = 2;
+private static final int EXCEPTIONAL = 3;
+private static final int CANCELLED = 4;
+private static final int INTERRUPTING = 5;
+private static final int INTERRUPTED = 6;
+
+private Callable&lt;V&gt; callable;       // 真正的任务
+private volatile Thread runner;     // 保存正在执行任务的线程
+
+/**
+ * 记录结果或异常
+ */
+private Object outcome;
+
+/**
+ * 无锁栈（Treiber stack）
+ * 保存等待线程
+ */
+private volatile WaitNode waiters;
+</code></pre>
+<p>注意<code>waiters</code>这个字段，waiters指向一个“无锁栈”，该栈保存着所有等待线程，我们知道当调用FutureTask的get方法时，如果任务没有完成，则调用线程会被阻塞，其实就是将线程包装成<code>WaitNode</code>结点保存到waiters指向的栈中：</p>
+<pre><code class="lang-java">static final class WaitNode {
+    volatile Thread thread;
+    volatile WaitNode next;
+
+    WaitNode() {
+        thread = Thread.currentThread();
+    }
+}
+</code></pre>
+<center><br/><img src="./img/20191101201032185.png" style="zoom:90%;"/><br/></center>
+<hr/>
+<h3 id="-">任务的运行</h3>
+<p>FutureTask的运行就是调用了<strong>run</strong>方法：</p>
+<pre><code class="lang-java">public void run() {
+    // 仅当任务为NEW状态时, 才能执行任务
+    if (state != NEW ||
+            !UNSAFE.compareAndSwapObject(this, runnerOffset, null, Thread.currentThread()))
+        return;
+    try {
+        Callable&lt;V&gt; c = callable;
+        if (c != null &amp;&amp; state == NEW) {
+            V result;
+            boolean ran;
+            try {
+                result = c.call();
+                ran = true;
+            } catch (Throwable ex) {
+                result = null;
+                ran = false;
+                setException(ex);
+            }
+            if (ran)
+                set(result);
+        }
+    } finally {
+        runner = null;
+        int s = state;
+        if (s &gt;= INTERRUPTING)
+            handlePossibleCancellationInterrupt(s);
+    }
+}
+</code></pre>
+<p>上述方法，首先判断当前任务的state是否等于NEW,如果不为NEW则说明任务或者已经执行过，或者已经被取消，直接返回。</p>
+<p>正常执行完成后，会调用<code>set</code>方法设置任务执行结果：</p>
+<pre><code class="lang-java">protected void set(V v) {
+    if (UNSAFE.compareAndSwapInt(this, stateOffset, NEW, COMPLETING)) {
+        outcome = v;
+        UNSAFE.putOrderedInt(this, stateOffset, NORMAL); // final state
+        finishCompletion();
+    }
+}
+</code></pre>
+<p>如果任务执行过程中抛出异常，则调用<code>setException</code>设置异常信息：</p>
+<pre><code class="lang-java">protected void setException(Throwable t) {
+    if (UNSAFE.compareAndSwapInt(this, stateOffset, NEW, COMPLETING)) {
+        outcome = t;
+        UNSAFE.putOrderedInt(this, stateOffset, EXCEPTIONAL); // final state
+        finishCompletion();
+    }
+}
+</code></pre>
+<hr/>
+<h3 id="-">任务的取消</h3>
+<p><strong>cancel</strong>方法用于取消任务，参数<code>mayInterruptIfRunning</code>如果为true，表示中断正在执行任务的线程，否则仅仅是将任务状态置为<strong>CANCELLED</strong> ：</p>
+<pre><code class="lang-java">public boolean cancel(boolean mayInterruptIfRunning) {
+    // 仅NEW状态下可以取消任务
+    if (!(state == NEW &amp;&amp;
+            UNSAFE.compareAndSwapInt(this, stateOffset, NEW,
+                    mayInterruptIfRunning ? INTERRUPTING : CANCELLED)))
+        return false;
+
+    try {   
+        if (mayInterruptIfRunning) {    // 中断任务
+            try {
+                Thread t = runner;
+                if (t != null)
+                    t.interrupt();
+            } finally { // final state
+                UNSAFE.putOrderedInt(this, stateOffset, INTERRUPTED);
+            }
+        }
+    } finally {
+        finishCompletion();
+    }
+    return true;
+}
+</code></pre>
+<p>任务取消后，最终调用<code>finishCompletion</code>方法，释放所有在栈上等待的线程：</p>
+<pre><code class="lang-java">/**
+ * 唤醒栈上的所有等待线程.
+ */
+private void finishCompletion() {
+    // assert state &gt; COMPLETING;
+    for (WaitNode q; (q = waiters) != null; ) {
+        if (UNSAFE.compareAndSwapObject(this, waitersOffset, q, null)) {
+            for (; ; ) {
+                Thread t = q.thread;
+                if (t != null) {
+                    q.thread = null;
+                    LockSupport.unpark(t);
+                }
+                WaitNode next = q.next;
+                if (next == null)
+                    break;
+                q.next = null; // unlink to help gc
+                q = next;
+            }
+            break;
+        }
+    }
+
+    done();                 // 钩子方法
+    callable = null;        // to reduce footprint
+}
+</code></pre>
+<hr/>
+<h3 id="-">结果获取</h3>
+<p>FutureTask可以通过get方法获取任务结果，如果需要限时等待，可以调用<code>get(long timeout, TimeUnit unit)</code>。</p>
+<pre><code class="lang-java">public V get() throws InterruptedException, ExecutionException {
+    int s = state;
+    if (s &lt;= COMPLETING)
+        s = awaitDone(false, 0L);
+    return report(s);   // 映射任务执行结果
+}
+</code></pre>
+<p>可以看到，如果当前任务的状态是<strong>NEW</strong>或<strong>COMPLETING</strong>，会调用<code>awaitDone</code>阻塞线程。否则会认为任务已经完成，直接通过<code>report</code>方法映射结果：</p>
+<pre><code class="lang-java">/**
+ * 将同步状态映射为执行结果.
+ */
+private V report(int s) throws ExecutionException {
+    Object x = outcome;
+    if (s == NORMAL)
+        return (V) x;
+    if (s &gt;= CANCELLED)
+        throw new CancellationException();
+    throw new ExecutionException((Throwable) x);
+}
+</code></pre>
+<p>report会根据任务的状态进行映射，如果任务是Normal状态，说明正常执行完成，则返回任务结果；如果任务被取消（CANCELLED或INTERRUPTED），则抛出CancellationException；其它情况则抛出ExecutionException。</p>
+<center><br/><img src="./img/20191101201037855.png" style="zoom:80%;"/><br/></center>
+<h2 id="-scheduledfuturetask">四、ScheduledFutureTask</h2>
+<p>在<a href="https://segmentfault.com/a/1190000016672638">ScheduledThreadPoolExecutor</a>一节中，我们曾经介绍过另一种FutureTask——<code>ScheduledFutureTask</code>。</p>
+<p>ScheduledFutureTask是<strong>ScheduledThreadPoolExecutor</strong>这个线程池的默认调度任务类。<br/>它在普通FutureTask的基础上增加了周期执行/延迟执行的功能。通过下面的类图可以看到，它其实是通过继承FutureTask和Delayed接口来实现周期/延迟功能的。</p>
+<center><br/><img src="./img/20191101201043201.png" style="zoom:80%;"/><br/></center>
+<pre><code class="lang-java">ScheduledFutureTask(Callable&lt;V&gt; callable, long ns) {
+    super(callable);
+    this.time = ns;
+    this.period = 0;
+    this.sequenceNumber = sequencer.getAndIncrement();
+}
+</code></pre>
+<p>ScheduledFutureTask的源码非常简单，基本都是委托FutureTask来实现的，关键是看下运行任务的方法：</p>
+<pre><code class="lang-java">public void run() {
+    boolean periodic = isPeriodic();                    // 是否是周期任务
+    if (!canRunInCurrentRunState(periodic))      // 能否运行任务
+        cancel(false);
+    else if (!periodic)                                           // 非周期任务：调用FutureTask的run方法运行
+        ScheduledFutureTask.super.run();
+    else if (ScheduledFutureTask.super.runAndReset()) {    // 周期任务：调用FutureTask的runAndReset方法运行
+        setNextRunTime();
+        reExecutePeriodic(outerTask);
+    }
+}
+</code></pre>
+<p>FutureTask的<code>runAndReset</code>方法与run方法的区别就是当任务正常执行完成后，不会设置任务的最终状态（即保持NEW状态），以便任务重复执行：</p>
+<pre><code class="lang-java">protected boolean runAndReset() {
+    // 仅NEW状态的任务可以执行
+    if (state != NEW ||
+            !UNSAFE.compareAndSwapObject(this, runnerOffset,
+                    null, Thread.currentThread()))
+        return false;
+
+    boolean ran = false;
+    int s = state;
+    try {
+        Callable&lt;V&gt; c = callable;
+        if (c != null &amp;&amp; s == NEW) {
+            try {
+                c.call(); // don't set result
+                ran = true;
+            } catch (Throwable ex) {
+                setException(ex);
+            }
+        }
+    } finally {
+        runner = null;
+        s = state;
+        if (s &gt;= INTERRUPTING)
+            handlePossibleCancellationInterrupt(s);
+    }
+    return ran &amp;&amp; s == NEW;
+}
+</code></pre>
+<h2 id="-">五、总结</h2>
+<p>本章我们从源头开始，讲解了Future模式的来龙去脉，并以J.U.C中的Future模式为例，分析了Future模式的组件以及核心实现类——<code>FutureTask</code>，最后回顾了ScheduledFutureTask中定义的内部异步任务类——<code>ScheduledFutureTask</code>。</p>
+<p>理解Future模式的关键就是理解它的两个核心组件，可以类比生活中的凭证来理解这一概念，不必拘泥于Java多线程设计模式中Future模式的类关系图。</p>
+<ul>
+<li>真实任务类</li>
+<li>凭证</li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,114 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（二八）—— J.U.C之collections框架：CopyOnWriteArraySet</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（二八）—— J.U.C之collections框架：CopyOnWriteArraySet</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-copyonwritearrayset-">一、CopyOnWriteArraySet简介</h2>
+<p><code>CopyOnWriteArraySet</code>，是另一类适合并发环境的SET工具类，也是在JDK1.5时，随着J.U.C包一起引入的。<br/>我们之前已经介绍过了<a href="https://segmentfault.com/a/1190000016214450">ConcurrentSkipListSet</a>，ConcurrentSkipListSet底层基于Skip List（跳表）实现，其操作平均时间复杂度均为<code>O(logn)</code>。</p>
+<p>CopyOnWriteArraySet，从名字上可以看出，也是基于“<strong>写时复制</strong>”的思想。事实上，CopyOnWriteArraySet内部引用了一个<code>CopyOnWriteArrayList</code>对象，以“组合”方式，委托CopyOnWriteArrayList对象实现了所有API功能。</p>
+<p><img src="./img/20191030221829820.png"/></p>
+<pre><code class="lang-JAVA">public class CopyOnWriteArraySet&lt;E&gt; extends AbstractSet&lt;E&gt;
+    implements java.io.Serializable {
+
+    private final CopyOnWriteArrayList&lt;E&gt; al;
+
+    /**
+     * Creates an empty set.
+     */
+    public CopyOnWriteArraySet() {
+        al = new CopyOnWriteArrayList&lt;E&gt;();
+    }
+
+    public CopyOnWriteArraySet(Collection&lt;? extends E&gt; c) {
+        if (c.getClass() == CopyOnWriteArraySet.class) {
+            CopyOnWriteArraySet&lt;E&gt; cc = (CopyOnWriteArraySet&lt;E&gt;) c;
+            al = new CopyOnWriteArrayList&lt;E&gt;(cc.al);
+        } else {
+            al = new CopyOnWriteArrayList&lt;E&gt;();
+            al.addAllAbsent(c);
+        }
+    }
+    // ...
+}
+</code></pre>
+<h2 id="-copyonwritearrayset-">二、CopyOnWriteArraySet原理</h2>
+<p>我们来看下CopyOnWriteArraySet是如何实现API接口的功能的：</p>
+<pre><code class="lang-JAVA">public int size() {
+    return al.size();
+}
+
+public boolean isEmpty() {
+    return al.isEmpty();
+}
+
+public boolean contains(Object o) {
+    return al.contains(o);
+}
+
+public Object[] toArray() {
+    return al.toArray();
+}
+
+public &lt;T&gt; T[] toArray(T[] a) {
+    return al.toArray(a);
+}
+
+public void clear() {
+    al.clear();
+}
+
+public boolean remove(Object o) {
+    return al.remove(o);
+}
+
+public boolean add(E e) {
+    return al.addIfAbsent(e);
+}
+
+public boolean containsAll(Collection&lt;?&gt; c) {
+    return al.containsAll(c);
+}
+
+public boolean addAll(Collection&lt;? extends E&gt; c) {
+    return al.addAllAbsent(c) &gt; 0;
+}
+
+public boolean removeAll(Collection&lt;?&gt; c) {
+    return al.removeAll(c);
+}
+
+public boolean retainAll(Collection&lt;?&gt; c) {
+    return al.retainAll(c);
+}
+
+public Iterator&lt;E&gt; iterator() {
+    return al.iterator();
+}
+
+
+public boolean removeIf(Predicate&lt;? super E&gt; filter) {
+    return al.removeIf(filter);
+}
+
+public void forEach(Consumer&lt;? super E&gt; action) {
+    al.forEach(action);
+}
+</code></pre>
+<p>可以看到，上述所有的方法都是通过委托实现的，唯一的区别就是CopyOnWriteArraySet不允许含有重复元素，所以添加元素（<code>add</code>方法）时，内部调用了CopyOnWriteArrayList的<code>addAllAbsent</code>方法。</p>
+<h2 id="-">三、总结</h2>
+<p>既然<strong>CopyOnWriteArraySet</strong>也是基于“写时复制”的思想，那么它的特性也和<strong>CopyOnWriteArrayList</strong>是类似的，归结起来，有以下几点：</p>
+<ol>
+<li>适合“读多写少”且数据量不大的场景。</li>
+<li>线程安全</li>
+<li>内存的使用较多</li>
+<li>迭代是对快照进行的，不会抛出<code>ConcurrentModificationException</code>，且迭代过程中不支持修改操作。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

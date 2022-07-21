@@ -1,0 +1,284 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（十）——组合模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（十）——组合模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>组合模式（Composite Design Pattern）</strong>，是一种结构型模式。它跟面向对象设计中的“组合关系（通过组合来组装两个类）”，完全是两码事。组合模式主是用来处理树形结构数据，这里的“数据”，可以简单理解为一组对象集合。</p>
+<p>正因为其应用场景的特殊性，数据必须能表示成树形结构，这也导致了这种模式在实际的项目开发中并不那么常用。但是，一旦数据满足树形结构，应用这种模式就能发挥很大的作用，能让代码变得非常简洁。</p>
+<h2 id="-">一、基本原理</h2>
+<p>我们通过两个示例来了解下组合模式。</p>
+<h3 id="1-1-">1.1 示例一：文件系统</h3>
+<p>假设我们有一个需求，需要设计一个类来表示文件系统中的目录，能方便地实现下面这些功能：</p>
+<ul>
+<li>动态地添加、删除某个目录下的子目录或文件；</li>
+<li>统计指定目录下的文件个数；</li>
+<li>统计指定目录下的文件总大小。</li>
+</ul>
+<p>我这里给出了这个类的骨架代码，我们把文件和目录统一用 FileSystemNode 类来表示，并且通过 isFile 属性来区分：</p>
+<pre><code class="lang-JAVA">public class FileSystemNode {
+  private String path;
+  private boolean isFile;
+  private List&lt;FileSystemNode&gt; subNodes = new ArrayList&lt;&gt;();
+
+  public FileSystemNode(String path, boolean isFile) {
+    this.path = path;
+    this.isFile = isFile;
+  }
+
+  public int countNumOfFiles() {
+    // TODO:...
+  }
+
+  public long countSizeOfFiles() {
+    // TODO:...
+  }
+
+  public String getPath() {
+    return path;
+  }
+
+  public void addSubNode(FileSystemNode fileOrDir) {
+    subNodes.add(fileOrDir);
+  }
+
+  public void removeSubNode(FileSystemNode fileOrDir) {
+    int size = subNodes.size();
+    int i = 0;
+    for (; i &lt; size; ++i) {
+      if (subNodes.get(i).getPath().equalsIgnoreCase(fileOrDir.getPath())) {
+        break;
+      }
+    }
+    if (i &lt; size) {
+      subNodes.remove(i);
+    }
+  }
+}
+</code></pre>
+<p>单纯从功能实现角度来说，上面的代码没有问题，已经实现了我们想要的功能。但是，如果我们开发的是一个大型系统，从扩展性（文件或目录可能会对应不同的操作）、业务建模（文件和目录从业务上是两个概念）、代码的可读性（文件和目录区分对待更加符合人们对业务的认知）的角度来说，我们最好对文件和目录进行区分设计，定义为 File 和 Directory 两个类。</p>
+<p>抽象父类：</p>
+<pre><code class="lang-JAVA">public abstract class FileSystemNode {
+  protected String path;
+
+  public FileSystemNode(String path) {
+    this.path = path;
+  }
+
+  public abstract int countNumOfFiles();
+  public abstract long countSizeOfFiles();
+
+  public String getPath() {
+    return path;
+  }
+}
+</code></pre>
+<p>文件类：</p>
+<pre><code class="lang-JAVA">public class File extends FileSystemNode {
+  public File(String path) {
+    super(path);
+  }
+
+  @Override
+  public int countNumOfFiles() {
+    return 1;
+  }
+
+  @Override
+  public long countSizeOfFiles() {
+    java.io.File file = new java.io.File(path);
+    if (!file.exists()) return 0;
+    return file.length();
+  }
+}
+</code></pre>
+<p>目录类：</p>
+<pre><code class="lang-JAVA">public class Directory extends FileSystemNode {
+  private List&lt;FileSystemNode&gt; subNodes = new ArrayList&lt;&gt;();
+
+  public Directory(String path) {
+    super(path);
+  }
+
+  @Override
+  public int countNumOfFiles() {
+    int numOfFiles = 0;
+    for (FileSystemNode fileOrDir : subNodes) {
+      numOfFiles += fileOrDir.countNumOfFiles();
+    }
+    return numOfFiles;
+  }
+
+  @Override
+  public long countSizeOfFiles() {
+    long sizeofFiles = 0;
+    for (FileSystemNode fileOrDir : subNodes) {
+      sizeofFiles += fileOrDir.countSizeOfFiles();
+    }
+    return sizeofFiles;
+  }
+
+  public void addSubNode(FileSystemNode fileOrDir) {
+    subNodes.add(fileOrDir);
+  }
+
+  public void removeSubNode(FileSystemNode fileOrDir) {
+    int size = subNodes.size();
+    int i = 0;
+    for (; i &lt; size; ++i) {
+      if (subNodes.get(i).getPath().equalsIgnoreCase(fileOrDir.getPath())) {
+        break;
+      }
+    }
+    if (i &lt; size) {
+      subNodes.remove(i);
+    }
+  }
+}
+</code></pre>
+<p>文件和目录类都设计好了，我们来看下如何用它们来表示一个文件系统中的目录树结构：</p>
+<pre><code class="lang-JAVA">public class Demo {
+  public static void main(String[] args) {
+    /**
+     * /
+     * /wz/
+     * /wz/a.txt
+     * /wz/b.txt
+     * /wz/movies/
+     * /wz/movies/c.avi
+     * /xzg/
+     * /xzg/docs/
+     * /xzg/docs/d.txt
+     */
+    Directory fileSystemTree = new Directory("/");
+    Directory node_wz = new Directory("/wz/");
+    Directory node_xzg = new Directory("/xzg/");
+    fileSystemTree.addSubNode(node_wz);
+    fileSystemTree.addSubNode(node_xzg);
+
+    File node_wz_a = new File("/wz/a.txt");
+    File node_wz_b = new File("/wz/b.txt");
+    Directory node_wz_movies = new Directory("/wz/movies/");
+    node_wz.addSubNode(node_wz_a);
+    node_wz.addSubNode(node_wz_b);
+    node_wz.addSubNode(node_wz_movies);
+
+    File node_wz_movies_c = new File("/wz/movies/c.avi");
+    node_wz_movies.addSubNode(node_wz_movies_c);
+
+    Directory node_xzg_docs = new Directory("/xzg/docs/");
+    node_xzg.addSubNode(node_xzg_docs);
+
+    File node_xzg_docs_d = new File("/xzg/docs/d.txt");
+    node_xzg_docs.addSubNode(node_xzg_docs_d);
+
+    System.out.println("/ files num:" + fileSystemTree.countNumOfFiles());
+    System.out.println("/wz/ files num:" + node_wz.countNumOfFiles());
+  }
+}
+</code></pre>
+<p>我们对照着这个例子，再重新看一下组合模式的定义：“将一组对象（文件和目录）组织成树形结构，以表示一种‘部分 - 整体’的层次结构（目录与子目录的嵌套结构）。组合模式让客户端可以统一单个对象（文件）和组合对象（目录）的处理逻辑（递归遍历）。”</p>
+<p>实际上，刚才讲的这种组合模式的设计思路，与其说是一种设计模式，倒不如说是对业务场景的一种数据结构和算法的抽象。其中，数据可以表示成树这种数据结构，业务需求可以通过在树上的递归遍历算法来实现。</p>
+<h3 id="1-2-oa-">1.2 示例二：OA系统</h3>
+<p>假设我们在开发一个 OA 系统（办公自动化系统）。公司的组织结构包含部门和员工两种数据类型。其中，部门又可以包含子部门和员工。在数据库中的表结构如下所示：</p>
+<center><br/> <img src="./img/20200419220935782.png" style="zoom:36%"><br/></img></center>
+<p>我们希望在内存中构建整个公司的人员架构图（部门、子部门、员工的隶属关系），并且提供接口计算出部门的薪资成本（隶属于这个部门的所有员工的薪资和）。</p>
+<p>部门包含子部门和员工，这是一种嵌套结构，可以表示成树这种数据结构。计算每个部门的薪资开支这样一个需求，也可以通过在树上的遍历算法来实现。所以，从这个角度来看，这个应用场景可以使用组合模式来设计和实现。</p>
+<p>这个例子的代码结构跟上一个例子的很相似，代码实现我直接贴在了下面，你可以对比着看一下。其中，HumanResource 是部门类（Department）和员工类（Employee）抽象出来的父类，为的是能统一薪资的处理逻辑。Demo 中的代码负责从数据库中读取数据并在内存中构建组织架构图。</p>
+<p>抽象类：</p>
+<pre><code class="lang-JAVA">public abstract class HumanResource {
+  protected long id;
+  protected double salary;
+
+  public HumanResource(long id) {
+    this.id = id;
+  }
+
+  public long getId() {
+    return id;
+  }
+
+  public abstract double calculateSalary();
+}
+</code></pre>
+<p>员工类：</p>
+<pre><code class="lang-JAVA">public class Employee extends HumanResource {
+  public Employee(long id, double salary) {
+    super(id);
+    this.salary = salary;
+  }
+
+  @Override
+  public double calculateSalary() {
+    return salary;
+  }
+}
+</code></pre>
+<p>部门类：</p>
+<pre><code class="lang-JAVA">public class Department extends HumanResource {
+  private List&lt;HumanResource&gt; subNodes = new ArrayList&lt;&gt;();
+
+  public Department(long id) {
+    super(id);
+  }
+
+  @Override
+  public double calculateSalary() {
+    double totalSalary = 0;
+    for (HumanResource hr : subNodes) {
+      totalSalary += hr.calculateSalary();
+    }
+    this.salary = totalSalary;
+    return totalSalary;
+  }
+
+  public void addSubNode(HumanResource hr) {
+    subNodes.add(hr);
+  }
+}
+</code></pre>
+<p>使用方式：</p>
+<pre><code class="lang-JAVA">public class Demo {
+  private static final long ORGANIZATION_ROOT_ID = 1001;
+  private DepartmentRepo departmentRepo; // 依赖注入
+  private EmployeeRepo employeeRepo; // 依赖注入
+
+  public void buildOrganization() {
+    Department rootDepartment = new Department(ORGANIZATION_ROOT_ID);
+    buildOrganization(rootDepartment);
+  }
+
+  private void buildOrganization(Department department) {
+    // 查找出所有子部门ID
+    List&lt;Long&gt; subDepartmentIds = departmentRepo.getSubDepartmentIds(department.getId());
+
+    // 递归遍历所有子部门，添加到当前部门中
+    for (Long subDepartmentId : subDepartmentIds) {
+      Department subDepartment = new Department(subDepartmentId);
+      department.addSubNode(subDepartment);
+      buildOrganization(subDepartment);
+    }
+
+    // 查找出当前部门的所有员工ID
+    List&lt;Long&gt; employeeIds = employeeRepo.getDepartmentEmployeeIds(department.getId());
+
+    // 遍历员工，添加在当前部门中
+    for (Long employeeId : employeeIds) {
+      double salary = employeeRepo.getEmployeeSalary(employeeId);
+      department.addSubNode(new Employee(employeeId, salary));
+    }
+  }
+}
+</code></pre>
+<p>我们再拿组合模式的定义跟这个例子对照一下：“将一组对象（员工和部门）组织成树形结构，以表示一种‘部分 - 整体’的层次结构（部门与子部门的嵌套结构）。组合模式让客户端可以统一单个对象（员工）和组合对象（部门）的处理逻辑（递归遍历）。”</p>
+<h2 id="-">二、总结</h2>
+<p>组合模式的设计思路，与其说是一种设计模式，倒不如说是对业务场景的一种数据结构和算法的抽象。其中，数据可以表示成树这种数据结构，业务需求可以通过在树上的递归遍历算法来实现。</p>
+<p>组合模式，将一组对象组织成树形结构，将单个对象和组合对象都看做树中的节点，以统一处理逻辑，并且它利用树形结构的特点，递归地处理每个子树，依次简化代码实现。使用组合模式的前提在于，你的业务场景必须能够表示成树形结构。所以，组合模式的应用场景也比较局限，它并不是一种很常用的设计模式。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

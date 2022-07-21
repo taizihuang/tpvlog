@@ -1,0 +1,378 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式实战（六）——Redis哨兵部署实战</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式实战（六）——Redis哨兵部署实战</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>关于Redis哨兵模式的原理，我在进阶篇的<a href="https://www.tpvlog.com/article/184">《分布式框架之高性能：Redis哨兵模式》</a>已经详细讲解过了，不熟悉的读者可以先去了解下。</p>
+<p>本章，我将带领大家部署一个3节点的哨兵集群，并介绍如何基于哨兵进行故障转移，以及一些企业级的配置方案。</p>
+<h2 id="-">一、哨兵部署</h2>
+<p>我们先来构建一个哨兵集群，一般哨兵集群至少需要三个独立的机器节点，这样才能保证哨兵自身的高可用。我在前几个章节已经带领大家部署了一主二从的Redis架构。本章，我们就在之前的ressmix-dsf01、ressmix-dsf02、ressmix-dsf03上分别部署一个哨兵，运行在5000端口，整个架构逻辑图如下：</p>
+<center><br/> <img src="./img/20200501160620636.png" style="zoom:42%"><br/></img></center>
+<h3 id="1-1-">1.1 哨兵配置</h3>
+<p>我以ressmix-dsf01节点为例，进行部署。哨兵的配置文件位于Redis安装包的根目录下，名叫sentinel.conf。我们先创建两个目录：</p>
+<pre><code class="lang-SHELL">#存放哨兵配置文件
+mkdir /etc/sentinal
+#哨兵的工作目录
+mkdir -p /var/sentinel/5000
+#存放哨兵日志
+mkdir -p /var/log/sentinel/5000
+</code></pre>
+<p>然后，把配置文件复制到/etc/sentinal目录，并重命名为5000.conf。接着，修改配置文件中的如下参数：</p>
+<pre><code class="lang-java">port 5000
+bind 192.168.0.107
+daemonize yes
+logfile /var/log/sentinel/5000/sentinel.log
+
+dir /var/sentinel/5000
+sentinel monitor mymaster ressmix-dsf01 6379 2
+sentinel down-after-milliseconds mymaster 30000
+sentinel parallel-syncs mymaster 1
+sentinel failover-timeout mymaster 180000
+sentinel auth-pass mymaster ressmix
+</code></pre>
+<p>我来解释下比较重要的几个参数：</p>
+<ul>
+<li>port 5000：就是哨兵自身运行的端口，默认是26379，我们修改成了5000；</li>
+<li>bind 192.168.0.107：默认情况下，哨兵只能从127.0.0.1访问，我们修改成机器的IP，这样哨兵之间可以互相通信；</li>
+<li>dir /var/sentinal/5000：哨兵自身的工作目录；</li>
+<li>sentinel monitor mymaster ressmix-dsf01 6379 2：这里的mymaster就是哨兵要监控的集群名称，可以自定义，我这里命名为”mymaster“。ressmix-dsf01是这个集群中的Master节点的IP，我这里直接用主机名，6379就是Master节点的运行端口。最后一个2表示quorum，也就是当有quorum个哨兵认为主节点客观下线时，就开始哨兵Leader选举，进行故障转移，由于我们一共有三个哨兵，所以按照大多数原则，quorum=(3/2)+1=2；</li>
+<li>down-after-milliseconds：表示如果哨兵超过这个时间都没法跟Redis主节点取得联系，那就可能认为这个redis实例挂了，即主观下线；</li>
+<li>parallel-syncs：表示发生故障转移时，选举了新的Master节点，那同时挂载多少个Slave节点去同步数据，我这里用默认值1个；</li>
+<li>failover-timeout：表示哨兵Leader进行故障转移的超时时间，如果超过这个时间还没做完故障转移，就会重新选举哨兵Leader主持故障转移，默认3分钟；</li>
+<li>最后，如果Master节点设置了认证口令，一定不要忘记在哨兵配置<code>sentinel auth-pass</code>中都加上密码。</li>
+</ul>
+<p>全部配置完成后，我们执行以下命令启动哨兵：</p>
+<pre><code class="lang-SHELL">redis-server /etc/sentinal/5000.conf --sentinel
+</code></pre>
+<p>如下图所示，哨兵发现了Master的两个Slave节点，并且也发现了另外两个哨兵，哨兵之间会互相通过我在进阶篇中讲到过的消息发布/订阅机制进行通信：</p>
+<center><br/> <img src="./img/20200501160800829.png" style="zoom:100%"/><br/></center>
+<h3 id="1-2-">1.2 哨兵状态</h3>
+<p>我们可以通过命令检查下哨兵的状态：</p>
+<pre><code class="lang-SHELL">redis-cli -h 192.168.0.109 -p 5000
+</code></pre>
+<p>查看集群中的Master节点状态：</p>
+<pre><code class="lang-SHELL">192.168.0.109:5000&gt; sentinel master mymaster
+ 1) "name"
+ 2) "mymaster"
+ 3) "ip"
+ 4) "192.168.0.107"
+ 5) "port"
+ 6) "6379"
+ 7) "runid"
+ 8) "5cb6aed556e853b886a0722170ef024aebc1ace4"
+ 9) "flags"
+10) "master"
+11) "link-pending-commands"
+12) "0"
+13) "link-refcount"
+14) "1"
+15) "last-ping-sent"
+16) "0"
+17) "last-ok-ping-reply"
+18) "362"
+19) "last-ping-reply"
+20) "362"
+21) "down-after-milliseconds"
+22) "30000"
+23) "info-refresh"
+24) "4481"
+25) "role-reported"
+26) "master"
+27) "role-reported-time"
+28) "285881"
+29) "config-epoch"
+30) "0"
+31) "num-slaves"
+32) "2"
+33) "num-other-sentinels"
+34) "2"
+35) "quorum"
+36) "2"
+37) "failover-timeout"
+38) "180000"
+39) "parallel-syncs"
+40) "1"
+</code></pre>
+<p>查看集群中的Slave节点的状态：</p>
+<pre><code class="lang-SHELL">192.168.0.109:5000&gt; SENTINEL slaves mymaster
+1)  1) "name"
+    2) "192.168.0.109:6379"
+    3) "ip"
+    4) "192.168.0.109"
+    5) "port"
+    6) "6379"
+    7) "runid"
+    8) "fe25299543962d47a64197664b281ce0d9e49410"
+    9) "flags"
+   10) "slave"
+   11) "link-pending-commands"
+   12) "0"
+   13) "link-refcount"
+   14) "1"
+   15) "last-ping-sent"
+   16) "0"
+   17) "last-ok-ping-reply"
+   18) "612"
+   19) "last-ping-reply"
+   20) "612"
+   21) "down-after-milliseconds"
+   22) "30000"
+   23) "info-refresh"
+   24) "9237"
+   25) "role-reported"
+   26) "slave"
+   27) "role-reported-time"
+   28) "340548"
+   29) "master-link-down-time"
+   30) "0"
+   31) "master-link-status"
+   32) "ok"
+   33) "master-host"
+   34) "192.168.0.107"
+   35) "master-port"
+   36) "6379"
+   37) "slave-priority"
+   38) "100"
+   39) "slave-repl-offset"
+   40) "77323"
+2)  1) "name"
+    2) "192.168.0.110:6379"
+    3) "ip"
+    4) "192.168.0.110"
+    5) "port"
+    6) "6379"
+    7) "runid"
+    8) "168c3cb9c0162f91c6a047e8b20c0b1562356a2f"
+    9) "flags"
+   10) "slave"
+   11) "link-pending-commands"
+   12) "0"
+   13) "link-refcount"
+   14) "1"
+   15) "last-ping-sent"
+   16) "0"
+   17) "last-ok-ping-reply"
+   18) "612"
+   19) "last-ping-reply"
+   20) "612"
+   21) "down-after-milliseconds"
+   22) "30000"
+   23) "info-refresh"
+   24) "9237"
+   25) "role-reported"
+   26) "slave"
+   27) "role-reported-time"
+   28) "340842"
+   29) "master-link-down-time"
+   30) "0"
+   31) "master-link-status"
+   32) "ok"
+   33) "master-host"
+   34) "192.168.0.107"
+   35) "master-port"
+   36) "6379"
+   37) "slave-priority"
+   38) "100"
+   39) "slave-repl-offset"
+   40) "77323"
+</code></pre>
+<p>查看监控这个集群的其它哨兵的状态：</p>
+<pre><code class="lang-SHELL">192.168.0.109:5000&gt; SENTINEL sentinels mymaster
+1)  1) "name"
+    2) "cd48456d2f4342db47efb9f33bf679aa5b611e56"
+    3) "ip"
+    4) "192.168.0.110"
+    5) "port"
+    6) "5000"
+    7) "runid"
+    8) "cd48456d2f4342db47efb9f33bf679aa5b611e56"
+    9) "flags"
+   10) "sentinel"
+   11) "link-pending-commands"
+   12) "0"
+   13) "link-refcount"
+   14) "1"
+   15) "last-ping-sent"
+   16) "0"
+   17) "last-ok-ping-reply"
+   18) "72"
+   19) "last-ping-reply"
+   20) "72"
+   21) "down-after-milliseconds"
+   22) "30000"
+   23) "last-hello-message"
+   24) "221"
+   25) "voted-leader"
+   26) "?"
+   27) "voted-leader-epoch"
+   28) "0"
+2)  1) "name"
+    2) "7ed8bb8d42e7d443aa90d3d2cfabc9dbd8f77217"
+    3) "ip"
+    4) "192.168.0.107"
+    5) "port"
+    6) "5000"
+    7) "runid"
+    8) "7ed8bb8d42e7d443aa90d3d2cfabc9dbd8f77217"
+    9) "flags"
+   10) "sentinel"
+   11) "link-pending-commands"
+   12) "0"
+   13) "link-refcount"
+   14) "1"
+   15) "last-ping-sent"
+   16) "0"
+   17) "last-ok-ping-reply"
+   18) "72"
+   19) "last-ping-reply"
+   20) "72"
+   21) "down-after-milliseconds"
+   22) "30000"
+   23) "last-hello-message"
+   24) "254"
+   25) "voted-leader"
+   26) "?"
+   27) "voted-leader-epoch"
+   28) "0"
+</code></pre>
+<h2 id="-">二、容灾演练</h2>
+<p>哨兵集群部署完成后，我们可以进行下容灾演练，看看哨兵是不是真的做到了故障自动转移。现在，我这边d的Redis主从架构是下面这样的：</p>
+<pre><code class="lang-SHELL">Master，部署在ressmix-dsf01: 192.168.0.107
+Slave1，部署在ressmix-dsf02: 192.168.0.109
+Slave2，部署在ressmix-dsf03: 192.168.0.110
+</code></pre>
+<h3 id="2-1-">2.1 故障转移</h3>
+<p>我先把Master节点kill -9掉，然后把它的pid文件(/var/run/redis_6379.pid)也删除掉，用来模拟Master节点挂掉。等待30s后，T通过日志可以发现哨兵进行了故障自动转移，下面是ressmix-dsf01节点上的哨兵日志：</p>
+<pre><code class="lang-SAS">1385:X 25 Apr 2020 14:16:45.880 # +sdown master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:45.935 # +odown master mymaster 192.168.0.107 6379 #quorum 3/2
+1385:X 25 Apr 2020 14:16:45.935 # +new-epoch 1
+1385:X 25 Apr 2020 14:16:45.935 # +try-failover master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:45.971 # +vote-for-leader 7ed8bb8d42e7d443aa90d3d2cfabc9dbd8f77217 1
+1385:X 25 Apr 2020 14:16:45.973 # 8e23c3b5d6d9edc4dbb845dc8b8e858e4ce2142c voted for 8e23c3b5d6d9edc4dbb845dc8b8e858e4ce2142c 1
+1385:X 25 Apr 2020 14:16:46.020 # cd48456d2f4342db47efb9f33bf679aa5b611e56 voted for 7ed8bb8d42e7d443aa90d3d2cfabc9dbd8f77217 1
+1385:X 25 Apr 2020 14:16:46.037 # +elected-leader master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.037 # +failover-state-select-slave master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.090 # +selected-slave slave 192.168.0.110:6379 192.168.0.110 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.090 * +failover-state-send-slaveof-noone slave 192.168.0.110:6379 192.168.0.110 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.148 * +failover-state-wait-promotion slave 192.168.0.110:6379 192.168.0.110 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.913 # +promoted-slave slave 192.168.0.110:6379 192.168.0.110 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.913 # +failover-state-reconf-slaves master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:46.932 * +slave-reconf-sent slave 192.168.0.109:6379 192.168.0.109 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:47.127 # -odown master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:16:47.915 * +slave-reconf-inprog slave 192.168.0.109:6379 192.168.0.109 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:19:46.900 # +failover-end-for-timeout master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:19:46.900 # +failover-end master mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:19:46.900 * +slave-reconf-sent-be slave 192.168.0.109:6379 192.168.0.109 6379 @ mymaster 192.168.0.107 6379
+1385:X 25 Apr 2020 14:19:46.900 # +switch-master mymaster 192.168.0.107 6379 192.168.0.110 6379
+1385:X 25 Apr 2020 14:19:46.900 * +slave slave 192.168.0.109:6379 192.168.0.109 6379 @ mymaster 192.168.0.110 6379
+1385:X 25 Apr 2020 14:19:46.900 * +slave slave 192.168.0.107:6379 192.168.0.107 6379 @ mymaster 192.168.0.110 6379
+</code></pre>
+<p>可以看到，新的Master节点变成了192.168.0.110，也就是ressmix-dsf03。我们可以通过命令<code>info replication</code>看下，它的角色已经变成了Master：</p>
+<pre><code class="lang-SHELL">192.168.0.110:6379&gt; info replication
+# Replication
+role:master
+connected_slaves:0
+master_replid:07383ad9fb832365fc67b9a578c54a36a21ff274
+master_replid2:f5180409b8a45a9f71eed3c8241bcedbc8986a48
+master_repl_offset:354070
+second_repl_offset:297908
+repl_backlog_active:1
+repl_backlog_size:1048576
+repl_backlog_first_byte_offset:1
+repl_backlog_histlen:354070
+</code></pre>
+<h3 id="2-2-">2.2 故障恢复</h3>
+<p>然后，我们再恢复ressmix-dsf01上的redis节点，这样它就会被作为Slave节点加入到集群中。我们可以通过任一哨兵看下集群的状态：</p>
+<pre><code class="lang-SHELL">192.168.0.109:5000&gt; SENTINEL slaves mymaster
+1)  1) "name"
+    2) "192.168.0.107:6379"
+    3) "ip"
+    4) "192.168.0.107"
+    5) "port"
+    6) "6379"
+    7) "runid"
+    8) "e7ec2725eca9313417e6823ebf00ac3867c74abc"
+    9) "flags"
+   10) "slave"
+   11) "link-pending-commands"
+   12) "0"
+   13) "link-refcount"
+   14) "1"
+   15) "last-ping-sent"
+   16) "0"
+   17) "last-ok-ping-reply"
+   18) "383"
+   19) "last-ping-reply"
+   20) "383"
+   21) "down-after-milliseconds"
+   22) "30000"
+   23) "info-refresh"
+   24) "2896"
+   25) "role-reported"
+   26) "slave"
+   27) "role-reported-time"
+   28) "34123"
+   29) "master-link-down-time"
+   30) "0"
+   31) "master-link-status"
+   32) "ok"
+   33) "master-host"
+   34) "192.168.0.110"
+   35) "master-port"
+   36) "6379"
+   37) "slave-priority"
+   38) "100"
+   39) "slave-repl-offset"
+   40) "418255"
+2)  1) "name"
+    2) "192.168.0.109:6379"
+    3) "ip"
+    4) "192.168.0.109"
+    5) "port"
+    6) "6379"
+    7) "runid"
+    8) "fe25299543962d47a64197664b281ce0d9e49410"
+    9) "flags"
+   10) "slave"
+   11) "link-pending-commands"
+   12) "0"
+   13) "link-refcount"
+   14) "1"
+   15) "last-ping-sent"
+   16) "0"
+   17) "last-ok-ping-reply"
+   18) "300"
+   19) "last-ping-reply"
+   20) "300"
+   21) "down-after-milliseconds"
+   22) "30000"
+   23) "info-refresh"
+   24) "300"
+   25) "role-reported"
+   26) "slave"
+   27) "role-reported-time"
+   28) "585068"
+   29) "master-link-down-time"
+   30) "616000"
+   31) "master-link-status"
+   32) "err"
+   33) "master-host"
+   34) "192.168.0.110"
+   35) "master-port"
+   36) "6379"
+   37) "slave-priority"
+   38) "100"
+   39) "slave-repl-offset"
+   40) "297907"
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解了Redis哨兵模式的搭建，通过实战我们可以对Redis高可用的原理有更深的认识，读者可以尝试在本机按照我所述的步骤动手搭建，加深印象。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

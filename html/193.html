@@ -1,0 +1,139 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二二）——分布式框架之可扩展：Zookeeper</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二二）——分布式框架之可扩展：Zookeeper</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Zookeeper是Apache开源的一款分布式协调框架，它提供了一种多层级的节点命名空间，可以提供诸如数据发布/订阅、分布式协调/通知、集群管理、Master 选举、配置管理、分布式锁等各种分布式协调服务。</p>
+<p>Zookeeper的核心是它底层的ZAB协议。ZAB协议是分布式CAP理论的典型实践，我已经在分布式理论篇中详细讲解过了，感兴趣的读者可以看一看，本文不再赘述。</p>
+<p>本章，我也不会介绍Zookeeper的各种语法，这些东西大家可以参考<a href="https://zookeeper.apache.org/">Apache官方文档</a>。我主要简单介绍下Zookeeper的系统模型，然后重点讲一讲Zookeeper的几种典型使用场景，特别是作为注册中心时与Eureka的对比。</p>
+<h2 id="-">一、数据模型</h2>
+<p>ZooKeeper拥有一个多层级的节点命名空间，和标准的文件系统非常相似，采用树形层次结构。ZooKeeper树中的每个节点被称为Znode，每个节点也可以拥有子节点：</p>
+<center><br/> <img src="./img/20200328114906450.png" style="zoom:90%"><br/></img></center>
+<p>Zookeeper为了保证高吞吐和低延迟，<strong>在内存中维护</strong>了这个树状的目录结构，这种特性使得Zookeeper<strong>不能用于存放大量的数据</strong>，每个节点的存放数据上限为<strong>1M</strong>。</p>
+<p>在Zookeeper中一共有4种类型的节点：PERSISTENT（持久节点）、EPHEMERAL（临时节点）、PERSISTENT_SEQUENTIAL（持久顺序节点）、EPHEMERAL_SEQUENTIAL（临时顺序节点）。</p>
+<h3 id="1-1-">1.1 节点类型</h3>
+<p><strong>PERSISTENT</strong><br/>持久节点，是指数据节点被创建后，就会一直存在于ZooKeeper服务器上，除非有删除操作主动清除该节点。</p>
+<p><strong>EPHEMERAL</strong><br/>临时节点，是指节点的生命周期和客户端会话是绑定的，如果客户端会话失效，那么这个节点就会被自动清理掉。</p>
+<p><strong>PERSISTENT_SEQUENTIAL</strong><br/>持久顺序节点，是指持久节点具备了额外的顺序性。在ZooKeeper中，每个父节点都会为它的第一级子节点维护一份顺序，用于记录每个顺序子节点创建的先后顺序。（ZooKeeper会自动给节点加上一个数字后缀，以表明顺序）</p>
+<p><strong>EPHEMERAL_SEQUENTIAL</strong><br/>临时顺序节点，是指临时节点具备了额外的顺序性。</p>
+<h3 id="1-2-">1.2 节点状态</h3>
+<p>每个数据节点除了存储数据内容外，还会存储节点本身的一些状态信息：</p>
+<table>
+<thead>
+<tr>
+<th>属性</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>czxid</td>
+<td>节点被创建的zxid</td>
+</tr>
+<tr>
+<td>mzxid</td>
+<td>节点被修改的zxid</td>
+</tr>
+<tr>
+<td>ctime</td>
+<td>节点被创建的时间</td>
+</tr>
+<tr>
+<td>mtime</td>
+<td>节点被修改的时间</td>
+</tr>
+<tr>
+<td>version</td>
+<td>节点被创建的版本号</td>
+</tr>
+<tr>
+<td>cversion</td>
+<td>节点所拥有的子结点被修改的版本号</td>
+</tr>
+<tr>
+<td>aversion</td>
+<td>节点的ACL被修改的版本号</td>
+</tr>
+<tr>
+<td>ephemeralOwner</td>
+<td>如果此节点为临时节点，那么该值为此节点拥有者的会话ID；否则为0</td>
+</tr>
+<tr>
+<td>dataLength</td>
+<td>节点数长度</td>
+</tr>
+<tr>
+<td>numChildren</td>
+<td>该节点的子节点数量</td>
+</tr>
+</tbody>
+</table>
+<p>在Zookeeper中，对节点的每一次修改操作，都会导致该节点的版本号增加，每个节点维护着三个版本号，他们分别为：</p>
+<ul>
+<li><strong>version</strong>：节点数据版本号</li>
+<li><strong>cversion</strong>：子节点版本号</li>
+<li><strong>aversion</strong>：节点所拥有的ACL版本号</li>
+</ul>
+<p>以version为例，节点首次被创建时，version为0，每次对节点的数据内容进行修改，都会导致version自增1。通过版本号机制，可以很容易的利用Zookeeper实现CAS操作：</p>
+<p>ZooKeeper在处理节点的内容更新时，会首先比较客户端上送的version与服务端该节点的版本号是否相同，如果相同则允许修改，否则抛出BadVersionException。</p>
+<blockquote>
+<p>如果客户端上送version为-1，则表示忽略版本号校验，强制更新数据。</p>
+</blockquote>
+<h2 id="-">二、使用场景</h2>
+<p>接下来，我们来重点看看Zookeeper的几种典型使用场景。</p>
+<h3 id="2-1-">2.1 分布式协调</h3>
+<p>这个其实是Zookeeper很经典的一个用法。比如A系统发送一个消息到MQ，然后B系统消费到了该消息。那么A系统如何知道B系统的处理结果呢？</p>
+<p>用Zookeeper就可以实现分布式系统之间的这种协调工作。A系统发送消息之后，可以在ZK上对该消息对应的node注册一个监听器，B系统处理完消息后就修改ZK上该节点的值，那么A系统就会立马收到通知。</p>
+<center><br/> <img src="./img/20200328114933453.png" style="zoom:55%"/><br/></center>
+<p>很多开源框架都利用了Zookeeper来实现分布式协调，比如Kafka其实就整合了Zookeeper。</p>
+<h3 id="2-2-">2.2 分布式锁</h3>
+<p>前面我们讲过Redis分布式锁，Zookeeper也可以实现分布式锁，而且生产中更常用。</p>
+<p>比如：系统A和系统B同时尝试对某个数据值进行修改，那么可以先让其中一个系统获取到Zookeeper上的一把分布式锁（本质是创建一个临时顺序节点），接着执行操作；然后另外一个系统也尝试去创建同名znode，结果发现自己创建不了，因为被别人创建了，那只能等着，等第一个系统执行完释放锁后自己再执行。</p>
+<blockquote>
+<p>关于如何利用Zookeeper实现一个分布式锁，我会在下一章专门讲解。</p>
+</blockquote>
+<h3 id="2-3-">2.3 配置管理</h3>
+<p>Zookeeper还可以用作很多系统的配置管理，比如Kafka、Storm等很多分布式系统都会选用ZK来做一些元数据、配置信息的管理，包括Dubbo的注册中心也支持ZK，下图是Zookeeper作为注册中心时的基本原理：</p>
+<center><br/> <img src="./img/20200328115312163.png" style="zoom:55%"/><br/></center>
+<p>Leader节点负责服务注册，它可以把数据同步给Follower，读的时候Leader/Follower都可以读。一旦Leader挂了，要重新选举Leader，选举过程中为了保证强一致性（C），不接受服务注册，知道选举完成。</p>
+<hr/>
+<p><strong>对比Eureka</strong></p>
+<p>我之前也介绍过<a href="https://www.tpvlog.com/article/191">Eureka注册中心</a>，这里就进行下对比：</p>
+<p>Eureka是peer-to-peer模式，每个节点都是对等的，如果数据还没同步到其它Eureka Server，当前节点就挂掉了的话，Client还可以继续从别的Server节点上拉取注册表。所以Eureka其实是保证了可用性（A），但牺牲了强一致性（A）：</p>
+<center><br/><img src="./img/20200328115321103.png" style="zoom:50%;"/><br/></center>
+<p>最后总结下，Zookeeper作为注册中心时，与Eureka的区别：</p>
+<p><strong>Zookeeper</strong><br/><em>设计原则</em>：CP，数据强一致</p>
+<p><em>优点</em>：</p>
+<ol>
+<li>时效性高，注册信息的变更可以秒级感知；</li>
+</ol>
+<p><em>缺点</em>：</p>
+<ol>
+<li>网络分区会影响Leader选举，可能导致整个集群不可用 ；</li>
+<li>很难支撑大规模的服务实例，服务上下线的时候，Leader节点会瞬间推送数据到所有的其他服务实例，所以一旦服务规模太大，到了几千个服务实例的时候，会导致网络带宽被大量占用；</li>
+</ol>
+<p><em>适合场景</em>：<br/>单机房集群，对数据一致性要求较高的场景。</p>
+<p><strong>Eureka</strong><br/><em>设计原则</em>：  AP，服务高可用</p>
+<p><em>优点</em>：</p>
+<ol>
+<li>集群的可用性较高；</li>
+</ol>
+<p><em>缺点</em>：</p>
+<ol>
+<li>默认配置下，数据时效性非常差，服务发现/注册的感知可能要几十秒甚至几分钟；</li>
+<li>也很难支撑大规模的服务实例，因为每个Eureka Server都要接受大量心跳请求，同时还要与其它Eureka Server进行P2P通信，服务实例太多后对集群的压力会非常大，很难抗住几千个服务实例；</li>
+</ol>
+<p><em>适合场景</em>：<br/>云机房集群，跨越多机房部署，对注册中心服务可用性要求较高。</p>
+<h3 id="2-4-">2.4 高可用</h3>
+<p>分布式系统采用Zookeeper来实现高可用还是很常见的，比如Hadoop HDFS就是基于Zookeer来开发HA高可用机制的。一般我们的系统都会采用主备架构，那么可以在Zookeeper上注册一个node，node的值就是当前活跃的主节点的名称。如果主节点挂了，那么Zookeeper会立马感知到，从而进行主备切换：</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了Zookeeper的数据模型和最典型的几种使用场景，并在作为注册中心时，对Zookeeper和Eureka进行了比较。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

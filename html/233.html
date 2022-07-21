@@ -1,0 +1,78 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式实战（四）——Redis企业级灾备方案</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式实战（四）——Redis企业级灾备方案</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我讲解了Redis的两种持久化方式的基本配置，那么在生产环境中，Redis的持久化到底该如何运用呢？企业级的数据备份和各种灾难下的数据恢复，又是怎么做的呢？</p>
+<p>本章，我就通过实战演练，讲一讲企业级Redis灾备方案。</p>
+<h2 id="-">一、持久化配置策略</h2>
+<p>Redis的持久化配置，就两种——RDB和AOF，在生产环境配置下，主要就是关注它们的一些核心参数。我们来一一看下。</p>
+<h3 id="1-1-rdb">1.1 RDB</h3>
+<p>RDB的配置，用Redis默认提供的配置方案就够了，这里不再赘述。</p>
+<h3 id="1-2-aof">1.2 AOF</h3>
+<p>生产环境，一定要把AOF持久化打开，持久化策略用默认的<code>appendfsync everysec</code>就可以了。</p>
+<h2 id="-">二、数据备份策略</h2>
+<p>我们知道，RDB非常适合做冷备，每次生成之后，就不会再有修改了。所以，一种最简单实用的数据备份方案就是利用crontab：</p>
+<ol>
+<li>写crontab定时脚本做数据备份；</li>
+<li>小时级备份：每小时复制一份RBD拷贝到某个目录中，该目录中仅保留最近48小时的备份；</li>
+<li>日级别备份：每天复制一份当日的RBD拷贝到某个目录中，该目录中仅保留最近1个月的备份；</li>
+<li>每天晚上将上述所有的数据备份，发送一份到远程的云服务上去。</li>
+</ol>
+<p>我这里给出这些crontab的脚本，供大家参考。</p>
+<h3 id="2-1-">2.1 小时级备份</h3>
+<p>脚本位置：<code>/usr/local/redis/copy/redis_rdb_copy_hourly.sh</code><br/>备份文件位置：<code>/usr/local/redis/snapshotting/[当前小时]/</code></p>
+<pre><code class="lang-SHELL">#!/bin/sh 
+
+cur_date=`date +%Y%m%d%k`
+rm -rf /usr/local/redis/snapshotting/$cur_date
+mkdir /usr/local/redis/snapshotting/$cur_date
+cp /var/redis/6379/dump.rdb /usr/local/redis/snapshotting/$cur_date
+
+del_date=`date -d -48hour +%Y%m%d%k`
+rm -rf /usr/local/redis/snapshotting/$del_date
+</code></pre>
+<p>然后执行命令<code>crontab -e</code>，输入以下内容：</p>
+<pre><code class="lang-SHELL">0 * * * * sh /usr/local/redis/copy/redis_rdb_copy_hourly.sh
+</code></pre>
+<h3 id="2-2-">2.2 日级别备份</h3>
+<p>脚本位置：<code>/usr/local/redis/copy/redis_rdb_copy_daily.sh</code><br/>备份文件位置：<code>/usr/local/redis/snapshotting/[当前日期]/</code></p>
+<pre><code class="lang-SHELL">#!/bin/sh 
+
+cur_date=`date +%Y%m%d`
+rm -rf /usr/local/redis/snapshotting/$cur_date
+mkdir /usr/local/redis/snapshotting/$cur_date
+cp /var/redis/6379/dump.rdb /usr/local/redis/snapshotting/$cur_date
+
+del_date=`date -d -1month +%Y%m%d`
+rm -rf /usr/local/redis/snapshotting/$del_date
+</code></pre>
+<p>然后执行命令<code>crontab -e</code>，输入以下内容：</p>
+<pre><code class="lang-SHELL">0 0 * * * sh /usr/local/redis/copy/redis_rdb_copy_daily.sh
+</code></pre>
+<h2 id="-">三、数据恢复策略</h2>
+<p>数据恢复分为很多种情况，我们先来看下各种情况下的恢复策略。</p>
+<ol>
+<li>Redis进程挂掉：重启Redis进程即可，直接基于AOF日志文件恢复数据，默认情况下最多丢失1s数据；</li>
+<li>AOF和RDB文件出现了丢失/损坏：从云端找一个最新的小时级RDB备份文件，复制到Redis的RBD目录中去，可以恢复到某一个小时的数据。</li>
+</ol>
+<h3 id="3-1-">3.1 恢复步骤</h3>
+<p>由于Redis启动时默认优先从AOF文件恢复数据，所以如果直接将云端RDB文件拷贝到Redis目录下，很可能启动后是没有数据的。正确的操作步骤应该如下：</p>
+<ol>
+<li>停止Redis；</li>
+<li>修改配置文件，关闭AOF持久化，同时删除Redis的AOF日志文件；</li>
+<li>拷贝RDB备份文件到Redis目录下，然后启动Redis；</li>
+<li>通过redis-cli命令行<code>config set appendonly yes</code> 热修改启动AOF持久化，此时AOF日志文件中的数据就和RBD文件中的一致了；</li>
+<li>最后，停止Redis，修改Redis配置文件，开启AOF持久化。</li>
+</ol>
+<h2 id="-">四、总结</h2>
+<p>本章，我主要介绍了生产环境的Redis灾备方案，核心是Redis的数据恢复步骤，基于RBD文件恢复Redis数据时，一定要记得先关闭掉aof持久化，因为Redis默认优先从AOF日志文件恢复数据。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

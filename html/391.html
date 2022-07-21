@@ -1,0 +1,230 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（二十）——dubbo-cluster模块：Configurator动态配置</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（二十）——dubbo-cluster模块：Configurator动态配置</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在前面章节，我讲解了RegistryDirectory 相关的内容，作为一个 NotifyListener 监听器，RegistryDirectory 会同时监听注册中心的 <code>providers</code>、<code>routers</code> 和 <code>configurators</code> 三个目录。通过 RegistryDirectory 处理 <code>configurators</code> 目录的逻辑，我们了解到 <code>configurators</code> 目录中动态添加的 URL 会覆盖 <code>providers</code> 目录下注册的 Provider URL，Dubbo 还会按照 <code>configurators</code> 目录下的最新配置，重新创建 Invoker 对象（同时会销毁原来的 Invoker 对象）。</p>
+<p>在老版本的 Dubbo 中，我们可以通过服务治理控制台向注册中心的 <code>configurators</code> 目录写入动态配置的 URL。在 Dubbo <code>2.7.x</code> 版本中，动态配置信息除了可以写入注册中心的 <code>configurators</code> 目录之外，还可以写入外部的配置中心。本章，我就对Dubbo的动态配置功能进行讲解。</p>
+<p>首先，我们需要了解 <code>configurators</code> 目录中 URL 都有哪些协议以及这些协议的含义，然后还要知道 Dubbo 是如何解析这些 URL 得到 Configurator 对象的，以及 Configurator 是如何与已有的 Provider URL 共同作用得到实现动态更新配置的效果。</p>
+<h2 id="-">一、配置示例</h2>
+<p>写入注册中心 <code>configurators</code> 中的动态配置有 <strong>override</strong> 和 <strong>absent</strong> 两种协议。下面是一个 override 协议的示例：</p>
+<pre><code class="lang-TXT">override://0.0.0.0/org.apache.dubbo.demo.DemoService?category=configurators&amp;dynamic=false&amp;enabled=true&amp;application=dubbo-demo-api-consumer&amp;timeout=1000
+</code></pre>
+<ul>
+<li>override：表示采用覆盖方式。Dubbo 支持 override 和 absent 两种协议，我们也可以通过 SPI 的方式进行扩展；</li>
+<li>0.0.0.0：表示对所有 IP 生效。如果只想覆盖某个特定 IP 的 Provider 配置，可以使用该 Provider 的具体 IP；</li>
+<li>org.apache.dubbo.demo.DemoService：表示只对指定服务生效；</li>
+<li>category=configurators：表示该 URL 为动态配置类型；</li>
+<li>dynamic=false：表示该 URL 为持久数据，即使注册该 URL 的节点退出，该 URL 依旧会保存在注册中心；</li>
+<li>enabled=true：表示该 URL 的覆盖规则已生效；</li>
+<li>application=dubbo-demo-api-consumer：表示只对指定应用生效。如果不指定，则默认表示对所有应用都生效；</li>
+<li>timeout=1000：表示将满足以上条件 Provider URL 中的 timeout 参数值覆盖为 1000。如果想覆盖其他配置，可以直接以参数的形式添加到 override URL 之上。</li>
+</ul>
+<h2 id="-configurator">二、Configurator</h2>
+<p>当我们在注册中心的 <code>configurators</code> 目录中添加 override（或 absent）协议的 URL 时，Registry 会收到注册中心的通知，回调注册在其上的 NotifyListener，其中就包括 RegistryDirectory。</p>
+<p>Configurator 接口抽象了一条配置信息，同时提供了将配置 URL 解析成 Configurator 对象的工具方法。Configurator 接口具体定义如下：</p>
+<pre><code class="lang-JAVA">// Configurator.java
+
+public interface Configurator extends Comparable&lt;Configurator&gt; {
+
+    // 获取该Configurator对象对应的配置URL，例如前文介绍的override协议URL
+    URL getUrl();
+
+    // configure()方法接收的参数是原始URL，返回经过Configurator修改后的URL
+    URL configure(URL url);
+
+    // toConfigurators()工具方法可以将多个配置URL对象解析成相应的Configurator对象
+    static Optional&lt;List&lt;Configurator&gt;&gt; toConfigurators(List&lt;URL&gt; urls) {
+
+        // 创建ConfiguratorFactory适配器
+        ConfiguratorFactory configuratorFactory = ExtensionLoader.getExtensionLoader(ConfiguratorFactory.class).getAdaptiveExtension();
+
+        // 记录解析的结果
+        List&lt;Configurator&gt; configurators = new ArrayList&lt;&gt;(urls.size()); 
+
+        for (URL url : urls) {
+            // 遇到empty协议，直接清空configurators集合，结束解析，返回空集合
+            if (EMPTY_PROTOCOL.equals(url.getProtocol())) {
+                configurators.clear();
+                break;
+            }
+
+            Map&lt;String, String&gt; override = new HashMap&lt;&gt;(url.getParameters());
+            override.remove(ANYHOST_KEY);
+
+            if (override.size() == 0) { // 如果该配置URL没有携带任何参数，则跳过该URL
+                configurators.clear();
+                continue;
+            }
+
+            // 通过ConfiguratorFactory适配器选择合适ConfiguratorFactory扩展，并创建Configurator对象
+            configurators.add(configuratorFactory.getConfigurator(url));
+        }
+
+        // 排序
+        Collections.sort(configurators); 
+        return Optional.of(configurators);
+    }
+
+    // 排序首先按照ip进行排序，所有ip的优先级都高于0.0.0.0，当ip相同时，会按照priority参数值进行排序
+    default int compareTo(Configurator o) {
+        if (o == null) {
+            return -1;
+        }
+
+        int ipCompare = getUrl().getHost().compareTo(o.getUrl().getHost());
+        if (ipCompare == 0) {
+            int i = getUrl().getParameter(PRIORITY_KEY, 0);
+            int j = o.getUrl().getParameter(PRIORITY_KEY, 0);
+            return Integer.compare(i, j);
+        } else {
+            return ipCompare;
+        }
+    }
+}
+</code></pre>
+<h3 id="2-1-">2.1 继承关系</h3>
+<p>Configurator 接口的继承关系如下图所示：</p>
+<center><br/> <img src="./img/20211127180242928.png" style="zoom:80%"><br/></img></center>
+<p>其中，AbstractConfigurator 中维护了一个 <code>configuratorUrl</code> 字段，记录了完整的配置 URL。<strong>AbstractConfigurator 是一个模板类，其核心实现是 configure() 方法</strong>，具体实现如下：</p>
+<pre><code class="lang-JAVA">// AbstractConfigurator.java
+
+public URL configure(URL url) {
+
+    // 这里会根据配置URL的enabled参数以及host决定该URL是否可用，同时还会根据原始URL是否为空以及原始URL的host是否为空，决定当前是否执行后续覆盖逻辑
+    if (!configuratorUrl.getParameter(ENABLED_KEY, true) || configuratorUrl.getHost() == null || url == null || url.getHost() == null) {
+        return url;
+    }
+
+    // 针对2.7.0之后版本，这里添加了一个configVersion参数作为区分
+    String apiVersion = configuratorUrl.getParameter(CONFIG_VERSION_KEY);
+
+    // 对2.7.0之后版本的配置处理
+    if (StringUtils.isNotEmpty(apiVersion)) { 
+
+        String currentSide = url.getParameter(SIDE_KEY);
+        String configuratorSide = configuratorUrl.getParameter(SIDE_KEY);
+
+        // 根据配置URL中的side参数以及原始URL中的side参数值进行匹配
+        if (currentSide.equals(configuratorSide) &amp;&amp; CONSUMER.equals(configuratorSide) &amp;&amp; 0 == configuratorUrl.getPort()) {
+            url = configureIfMatch(NetUtils.getLocalHost(), url);
+        } else if (currentSide.equals(configuratorSide) &amp;&amp; PROVIDER.equals(configuratorSide) &amp;&amp; url.getPort() == configuratorUrl.getPort()) {
+            url = configureIfMatch(url.getHost(), url);
+        }
+    } else { // 2.7.0版本之前对配置的处理
+        url = configureDeprecated(url);
+    }
+    return url;
+}
+</code></pre>
+<p>这里我们需要关注下<strong>configureDeprecated() 方法对历史版本的兼容</strong>，其实这也是对注册中心 <code>configurators</code> 目录下配置 URL 的处理，具体实现如下：</p>
+<pre><code class="lang-java">// AbstractConfigurator.java
+
+private URL configureDeprecated(URL url) {
+
+    // 如果配置URL中的端口不为空，则是针对Provider的，需要判断原始URL的端口，两者端口相同，才能执行configureIfMatch()方法中的配置方法
+    if (configuratorUrl.getPort() != 0) {
+        if (url.getPort() == configuratorUrl.getPort()) {
+            return configureIfMatch(url.getHost(), url);
+        }
+    } else {
+        // 如果没有指定端口，则该配置URL要么是针对Consumer的，要么是针对任意URL的（即host为0.0.0.0）
+        // 如果原始URL属于Consumer，则使用Consumer的host进行匹配
+        if (url.getParameter(SIDE_KEY, PROVIDER).equals(CONSUMER)) {
+            return configureIfMatch(NetUtils.getLocalHost(), url);
+        } else if (url.getParameter(SIDE_KEY, CONSUMER).equals(PROVIDER)) {
+            // 如果是Provider URL，则用0.0.0.0来配置
+            return configureIfMatch(ANYHOST_VALUE, url);
+        }
+    }
+    return url;
+}
+</code></pre>
+<p>configureIfMatch() 方法会排除匹配 URL 中不可动态修改的参数，并调用 Configurator 子类的 <code>doConfigurator()</code> 方法重写原始 URL，具体实现如下：</p>
+<pre><code class="lang-JAVA">// AbstractConfigurator.java
+
+private URL configureIfMatch(String host, URL url) {
+
+    if (ANYHOST_VALUE.equals(configuratorUrl.getHost()) || host.equals(configuratorUrl.getHost())) { // 匹配host
+        String providers = configuratorUrl.getParameter(OVERRIDE_PROVIDERS_KEY);
+        if (StringUtils.isEmpty(providers) || providers.contains(url.getAddress()) || providers.contains(ANYHOST_VALUE)) { 
+
+            String configApplication = configuratorUrl.getParameter(APPLICATION_KEY,
+                    configuratorUrl.getUsername());
+            String currentApplication = url.getParameter(APPLICATION_KEY, url.getUsername());
+
+            if (configApplication == null || ANY_VALUE.equals(configApplication)
+                    || configApplication.equals(currentApplication)) { // 匹配application
+
+                // 排除不能动态修改的属性，其中包括category、check、dynamic、enabled还有以~开头的属性
+                Set&lt;String&gt; conditionKeys = new HashSet&lt;String&gt;(); 
+
+                conditionKeys.add(CATEGORY_KEY);
+                conditionKeys.add(Constants.CHECK_KEY);
+                conditionKeys.add(DYNAMIC_KEY);
+                conditionKeys.add(ENABLED_KEY);
+                conditionKeys.add(GROUP_KEY);
+                conditionKeys.add(VERSION_KEY);
+                conditionKeys.add(APPLICATION_KEY);
+                conditionKeys.add(SIDE_KEY);
+                conditionKeys.add(CONFIG_VERSION_KEY);
+                conditionKeys.add(COMPATIBLE_CONFIG_KEY);
+                conditionKeys.add(INTERFACES);
+
+                for (Map.Entry&lt;String, String&gt; entry : configuratorUrl.getParameters().entrySet()) {
+                    String key = entry.getKey();
+                    String value = entry.getValue();
+                    if (key.startsWith("~") || APPLICATION_KEY.equals(key) || SIDE_KEY.equals(key)) {
+                        conditionKeys.add(key);
+                        // 如果配置URL与原URL中以~开头的参数值不相同，则不使用该配置URL重写原URL
+                        if (value != null &amp;&amp; !ANY_VALUE.equals(value)
+                                &amp;&amp; !value.equals(url.getParameter(key.startsWith("~") ? key.substring(1) : key))) {
+                            return url;
+                        }
+                    }
+                }
+                // 移除配置URL不支持动态配置的参数之后，调用Configurator子类的doConfigure方法重新生成URL
+                return doConfigure(url, configuratorUrl.removeParameters(conditionKeys));
+            }
+        }
+    }
+    return url;
+}
+</code></pre>
+<p>我们再反过来仔细审视一下 AbstractConfigurator.configure() 方法中针对 2.7.0 版本之后动态配置的处理，其中会根据 <code>side</code> 参数明确判断配置 URL 和原始 URL 属于 Consumer 端还是 Provider 端，判断逻辑也更加清晰。匹配之后的具体替换过程同样是调用 configureIfMatch() 方法实现的，这里不再重复。</p>
+<h3 id="2-2-">2.2 子类实现</h3>
+<p>Configurator 的两个子类实现非常简单。在 OverrideConfigurator 的 doConfigure() 方法中，会直接用配置 URL 中剩余的全部参数，覆盖原始 URL 中的相应参数，具体实现如下：</p>
+<pre><code class="lang-JAVA">// OverrideConfigurator.java
+
+public URL doConfigure(URL currentUrl, URL configUrl) {
+    // 直接调用addParameters()方法，进行覆盖
+    return currentUrl.addParameters(configUrl.getParameters());
+}
+</code></pre>
+<p>在 AbsentConfigurator 的 doConfigure() 方法中，会尝试用配置 URL 中的参数添加到原始 URL 中，如果原始 URL 中已经有了该参数是不会被覆盖的，具体实现如下：</p>
+<pre><code class="lang-JAVA">// AbsentConfigurator.java
+
+public URL doConfigure(URL currentUrl, URL configUrl) {
+    // 直接调用addParametersIfAbsent()方法尝试添加参数
+    return currentUrl.addParametersIfAbsent(configUrl.getParameters());
+}
+</code></pre>
+<p>到这里，Dubbo 2.7.0 版本之前的<strong>动态配置核心实现</strong>就介绍完了，其中我们也简单涉及了 Dubbo 2.7.0 版本之后一些逻辑，只不过没有全面介绍 Dubbo 2.7.0 之后的配置格式以及核心处理逻辑，不用担心，这些内容我们将会在后面的“配置中心”章节继续深入分析。</p>
+<h3 id="2-3-configuratorfactory">2.3 ConfiguratorFactory</h3>
+<p>ConfiguratorFactory 接口是一个扩展接口，Dubbo 提供了两个实现类，如下图所示：</p>
+<center><br/> <img src="./img/20211127180556206.png" style="zoom:80%"/><br/></center>
+<ul>
+<li>OverrideConfiguratorFactory 对应的扩展名为 override，创建的 Configurator 实现是 OverrideConfigurator</li>
+<li>AbsentConfiguratorFactory 对应的扩展名是 absent，创建的 Configurator 实现类是 AbsentConfigurator。</li>
+</ul>
+<h2 id="-">三、总结</h2>
+<p>本章我主要介绍了 Dubbo 中配置相关的实现。我首先通过示例分析了 configurators 目录中涉及的 override 协议 URL、absent 协议 URL 的格式以及各个参数的含义，然后还详细讲解了 Dubbo 解析 configurator URL 得到的 Configurator 对象，以及 Configurator 覆盖 Provider URL 各个参数的具体实现。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

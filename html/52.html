@@ -1,0 +1,329 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（三六）—— J.U.C之collections框架：DelayQueue</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（三六）—— J.U.C之collections框架：DelayQueue</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-delayqueue-">一、DelayQueue简介</h2>
+<p><code>DelayQueue</code>是JDK1.5时，随着J.U.C包一起引入的一种阻塞队列，它实现了BlockingQueue接口，底层基于已有的<strong>PriorityBlockingQueue</strong>实现：</p>
+<center><br/> <img src="./img/20191031215040371.png"><br/></img></center>
+<p>DelayQueue也是一种比较特殊的阻塞队列，从类声明也可以看出，DelayQueue中的所有元素必须实现<code>Delayed</code>接口：</p>
+<pre><code class="lang-JAVA">/**
+ * 一种混合风格的接口，用来标记那些应该在给定延迟时间之后执行的对象。
+ * &lt;p&gt;
+ * 此接口的实现必须定义一个 compareTo 方法，该方法提供与此接口的 getDelay 方法一致的排序。
+ */
+public interface Delayed extends Comparable&lt;Delayed&gt; {
+
+    /**
+     * 返回与此对象相关的剩余有效时间，以给定的时间单位表示.
+     */
+    long getDelay(TimeUnit unit);
+}
+</code></pre>
+<p>可以看到，Delayed接口除了自身的<code>getDelay</code>方法外，还实现了<strong>Comparable</strong>接口。getDelay方法用于返回对象的剩余有效时间，实现Comparable接口则是为了能够比较两个对象，以便排序。</p>
+<p>也就是说，如果一个类实现了Delayed接口，当创建该类的对象并添加到DelayQueue中后，<strong>只有当该对象的getDalay方法返回的剩余时间≤0时才会出队</strong>。</p>
+<p>另外，由于DelayQueue内部委托了PriorityBlockingQueue对象来实现所有方法，所以能以堆的结构维护元素顺序，这样剩余时间最小的元素就在堆顶，<strong>每次出队其实就是删除剩余时间≤0的最小元素</strong>。</p>
+<p>DelayQueue的特点简要概括如下：</p>
+<ol>
+<li>DelayQueue是无界阻塞队列；</li>
+<li>队列中的元素必须实现Delayed接口，元素过期后才会从队列中取走；</li>
+</ol>
+<h2 id="-delayqueue-">二、DelayQueue示例</h2>
+<p>为了便于理解DelayQueue的功能，我们先来看一个使用DelayQueue的示例。</p>
+<h3 id="-">队列元素</h3>
+<p>第一节说了，队列元素必须实现Delayed接口，我们先来定义一个<strong>Data</strong>类，作为队列元素：</p>
+<pre><code class="lang-JAVA">public class Data implements Delayed {
+    private static final AtomicLong atomic = new AtomicLong(0);
+    private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm:ss-n");
+
+    // 数据的失效时间点
+    private final long time;
+
+    // 序号
+    private final long seqno;
+
+    /**
+     * @param deadline 数据失效时间点
+     */
+    public Data(long deadline) {
+        this.time = deadline;
+        this.seqno = atomic.getAndIncrement();
+    }
+
+    /**
+     * 返回剩余有效时间
+     *
+     * @param unit 时间单位
+     */
+    @Override
+    public long getDelay(TimeUnit unit) {
+        return unit.convert(this.time - System.nanoTime(), TimeUnit.NANOSECONDS);
+    }
+
+    /**
+     * 比较两个Delayed对象的大小, 比较顺序如下:
+     * 1. 如果是对象本身, 返回0;
+     * 2. 比较失效时间点, 先失效的返回-1,后失效的返回1;
+     * 3. 比较元素序号, 序号小的返回-1, 否则返回1.
+     * 4. 非Data类型元素, 比较剩余有效时间, 剩余有效时间小的返回-1,大的返回1,相同返回0
+     */
+    @Override
+    public int compareTo(Delayed other) {
+        if (other == this)  // compare zero if same object
+            return 0;
+
+        if (other instanceof Data) {
+            Data x = (Data) other;
+
+            // 优先比较失效时间
+            long diff = this.time - x.time;
+            if (diff &lt; 0)
+                return -1;
+            else if (diff &gt; 0)
+                return 1;
+
+            else if (this.seqno &lt; x.seqno)    // 剩余时间相同则比较序号
+                return -1;
+            else
+                return 1;
+        }
+
+        // 一般不会执行到此处，除非元素不是Data类型
+        long diff = this.getDelay(TimeUnit.NANOSECONDS) - other.getDelay(TimeUnit.NANOSECONDS);
+        return (diff &lt; 0) ? -1 : (diff &gt; 0) ? 1 : 0;
+    }
+
+    @Override
+    public String toString() {
+        return "Data{" +
+            "time=" + time +
+            ", seqno=" + seqno +
+            "}, isValid=" + isValid();
+    }
+
+    private boolean isValid() {
+        return this.getDelay(TimeUnit.NANOSECONDS) &gt; 0;
+    }
+}
+</code></pre>
+<p>关于队列元素<strong>Data</strong>类，需要注意以下几点：</p>
+<ol>
+<li>每个元素的<code>time</code>字段保存失效时间点）的纳秒形式（构造时指定，比如当前时间+60s）；</li>
+<li><code>seqno</code>字段表示元素序号，每个元素唯一，仅用于失效时间点一致的元素之间的比较。</li>
+<li><code>getDelay</code>方法返回元素的剩余有效时间，可以根据入参的<strong>TimeUnit</strong>选择时间的表示形式（秒、微妙、纳秒等），一般选择纳秒以提高精度；</li>
+<li><code>compareTo</code>方法用于比较两个元素的大小，以便在队列中排序。由于DelayQueue基于优先级队列实现，所以内部是“堆”的形式，我们定义的规则是先失效的元素将先出队，所以先失效元素应该在堆顶，即compareTo方法返回结果&lt;0的元素优先出队；</li>
+</ol>
+<hr/>
+<h3 id="-">生产者-消费者</h3>
+<p>还是以“生产者-消费者”模式来作为DelayQueued的示例：</p>
+<p><strong><em>生产者</em></strong></p>
+<pre><code class="lang-JAVA">public class Producer implements Runnable {
+    private final DelayQueue&lt;Data&gt; queue;
+
+    public Producer(DelayQueue&lt;Data&gt; queue) {
+        this.queue = queue;
+    }
+
+    @Override
+    public void run() {
+        while (true) {
+
+            long currentTime = System.nanoTime();
+            long validTime = ThreadLocalRandom.current().nextLong(1000000000L, 7000000000L);
+
+            Data data = new Data(currentTime + validTime);
+            queue.put(data);
+
+            System.out.println(Thread.currentThread().getName() + ": put " + data);
+
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+</code></pre>
+<p><strong><em>消费者</em></strong></p>
+<pre><code class="lang-JAVA">public class Consumer implements Runnable {
+    private final DelayQueue&lt;Data&gt; queue;
+
+    public Consumer(DelayQueue&lt;Data&gt; queue) {
+        this.queue = queue;
+    }
+
+    @Override
+    public void run() {
+        while (true) {
+            try {
+                Data data = queue.take();
+                System.out.println(Thread.currentThread().getName() + ": take " + data);
+
+                Thread.yield();
+
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+</code></pre>
+<p><strong><em>调用</em></strong></p>
+<pre><code class="lang-JAVA">public class Main {
+    public static void main(String[] args) {
+        DelayQueue&lt;Data&gt; queue = new DelayQueue&lt;&gt;();
+
+        Thread c1 = new Thread(new Consumer(queue), "consumer-1");
+        Thread p1 = new Thread(new Producer(queue), "producer-1");
+
+        c1.start();
+        p1.start();
+    }
+}
+</code></pre>
+<p><strong><em>执行结果：</em></strong></p>
+<p>producer-1: put Data{time=73262562161592, seqno=0}, isValid=true<br/>producer-1: put Data{time=73262787192726, seqno=1}, isValid=true<br/>producer-1: put Data{time=73265591291171, seqno=2}, isValid=true<br/>producer-1: put Data{time=73266850330909, seqno=3}, isValid=true<br/><code>consumer-1: take Data{time=73262562161592, seqno=0}, isValid=false</code><br/><code>consumer-1: take Data{time=73262787192726, seqno=1}, isValid=false</code><br/>producer-1: put Data{time=73267928737184, seqno=4}, isValid=true<br/>producer-1: put Data{time=73265083111776, seqno=5}, isValid=true<br/>producer-1: put Data{time=73268729942809, seqno=6}, isValid=true<br/><code>consumer-1: take Data{time=73265083111776, seqno=5}, isValid=false</code></p>
+<p>上面示例中，我们创建了一个生产者，一个消费者，生产者不断得入队元素，每个元素都会有个截止有效期；消费者不断得从队列者获取元素。从输出可以看出，消费者每次获取到的元素都是有效期最小的，且都是已经失效了的。（因为DelayQueue每次出队只会删除有效期最小且已经过期的元素）</p>
+<h2 id="-delayqueue-">三、DelayQueue原理</h2>
+<p>介绍完了DelayQueued的基本使用，读者应该对该阻塞队列的功能有了基本了解，接下来我们看下Doug Lea是如何实现DelayQueued的。</p>
+<h3 id="-">构造</h3>
+<p>DelayQueued提供了两种构造器，都非常简单：</p>
+<pre><code class="lang-java">/**
+ * 默认构造器.
+ */
+public DelayQueue() {
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 从已有集合构造队列.
+ */
+public DelayQueue(Collection&lt;? extends E&gt; c) {
+    this.addAll(c);
+}
+</code></pre>
+<p>可以看到，内部的<strong>PriorityQueue</strong>并非在构造时创建，而是对象创建时生成：</p>
+<pre><code class="lang-JAVA">public class DelayQueue&lt;E extends Delayed&gt; extends AbstractQueue&lt;E&gt;
+    implements BlockingQueue&lt;E&gt; {
+
+    private final transient ReentrantLock lock = new ReentrantLock();
+    private final PriorityQueue&lt;E&gt; q = new PriorityQueue&lt;E&gt;();
+
+    /**
+     * leader线程是首个尝试出队元素（队列不为空）但被阻塞的线程.
+     * 该线程会限时等待（队首元素的剩余有效时间），用于唤醒其它等待线程
+     */
+    private Thread leader = null;
+
+    /**
+     * 出队线程条件队列, 当有多个线程, 会在此条件队列上等待.
+     */
+    private final Condition available = lock.newCondition();
+
+    //...
+
+}
+</code></pre>
+<p>上述比较特殊的是<code>leader</code>字段，我们之前已经说过，DelayQueue每次只会出队一个过期的元素，如果队首元素没有过期，就会阻塞出队线程，让线程在<code>available</code>这个条件队列上无限等待。</p>
+<p>为了提升性能，DelayQueue并不会让所有出队线程都无限等待，而是用<code>leader</code>保存了第一个尝试出队的线程，该线程的等待时间是队首元素的剩余有效期。这样，一旦leader线程被唤醒（此时队首元素也失效了），就可以出队成功，然后唤醒一个其它在<code>available</code>条件队列上等待的线程。之后，会重复上一步，新唤醒的线程可能取代成为新的leader线程。这样，就避免了无效的等待，提升了性能。这其实是一种名为“<a href="https://www.cse.wustl.edu/~schmidt/POSA/POSA2/">Leader-Follower pattern</a>”的多线程设计模式。</p>
+<hr/>
+<h3 id="-put">入队——put</h3>
+<p><strong>put</strong>方法没有什么特别，由于是无界队列，所以也不会阻塞线程。</p>
+<pre><code class="lang-JAVA">/**
+ * 入队一个指定元素e.
+ * 由于是无界队列, 所以该方法并不会阻塞线程.
+ */
+public void put(E e) {
+    offer(e);
+}
+
+public boolean offer(E e) {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        q.offer(e);             // 调用PriorityQueue的offer方法
+        if (q.peek() == e) {    // 如果入队元素在队首, 则唤醒一个出队线程
+            leader = null;
+            available.signal();
+        }
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+</code></pre>
+<blockquote>
+<p>需要注意的是当首次入队元素时，需要唤醒一个出队线程，因为此时可能已有出队线程在空队列上等待了，如果不唤醒，会导致出队线程永远无法执行。</p>
+<pre><code class="lang-java">if (q.peek() == e) {    // 如果入队元素在队首, 则唤醒一个出队线程
+    leader = null;
+    available.signal();
+}
+</code></pre>
+</blockquote>
+<hr/>
+<h3 id="-take">出队——take</h3>
+<p>整个<strong>take</strong>方法在一个自旋中完成，其实就分为两种情况：</p>
+<p><strong><em>1.队列为空</em></strong></p>
+<p> 这种情况直接阻塞出队线程。（在available条件队列等待）</p>
+<p><strong><em>2.队列非空</em></strong></p>
+<p>队列非空时，还要看队首元素的状态（有效期），如果队首元素过期了，那直接出队就行了；如果队首元素未过期，就要看当前线程是否是第一个到达的出队线程（即判断<code>leader</code>是否为空），如果不是，就无限等待，如果是，则限时等待。</p>
+<pre><code class="lang-JAVA">/**
+ * 队首出队元素.
+ * 如果队首元素（堆顶）未到期或队列为空, 则阻塞线程.
+ */
+public E take() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();
+    try {
+        for (; ; ) {
+            E first = q.peek();     // 读取队首元素
+            if (first == null)      // CASE1: 队列为空, 直接阻塞
+                available.await();
+            else {                  // CASE2: 队列非空
+                long delay = first.getDelay(NANOSECONDS);
+                if (delay &lt;= 0)                             // CASE2.0: 队首元素已过期
+                    return q.poll();
+
+                // 执行到此处说明队列非空, 且队首元素未过期
+                first = null;
+                if (leader != null)                         // CASE2.1: 已存在leader线程
+                    available.await();      // 无限期阻塞当前线程
+                else {                                      // CASE2.2: 不存在leader线程
+                    Thread thisThread = Thread.currentThread();
+                    leader = thisThread;    // 将当前线程置为leader线程
+                    try {
+                        available.awaitNanos(delay);        // 阻塞当前线程（限时等待剩余有效时间）
+                    } finally {
+                        if (leader == thisThread)
+                            leader = null;
+                    }
+                }
+            }
+        }
+    } finally {
+        if (leader == null &amp;&amp; q.peek() != null)             // 不存在leader线程, 则唤醒一个其它出队线程
+            available.signal();
+        lock.unlock();
+    }
+}
+</code></pre>
+<blockquote>
+<p>需要注意，自旋结束后如果<code>leader == null &amp;&amp; q.peek() != null</code>，需要唤醒一个等待中的出队线程。<br/><code>leader == null &amp;&amp; q.peek() != null</code>的含义就是——没有<code>leader</code>线程但队列中存在元素。我们之前说了，leader线程作用之一就是用来唤醒其它无限等待的线程，所以必须要有这个判断。</p>
+</blockquote>
+<h2 id="-">四、总结</h2>
+<p><strong>DelayQueue</strong>是阻塞队列中非常有用的一种队列，经常被用于缓存或定时任务等的设计。</p>
+<p><em>考虑一种使用场景：</em></p>
+<blockquote>
+<p>异步通知的重试，在很多系统中，当用户完成服务调用后，系统有时需要将结果异步通知到用户的某个URI。由于网络等原因，很多时候会通知失败，这个时候就需要一种重试机制。</p>
+</blockquote>
+<p>这时可以用DelayQueue保存通知失败的请求，失效时间可以根据已通知的次数来设定（比如：2s、5s、10s、20s），这样每次从队列中take获取的就是剩余时间最短的请求，如果已重复通知次数超过一定阈值，则可以把消息抛弃。</p>
+<p>后面，我们在讲<a href="https://segmentfault.com/a/1190000016586578">J.U.C之executors</a>框架的时候，还会再次看到DelayQueue的身影。JUC线程池框架中的<code>ScheduledThreadPoolExecutor.DelayedWorkQueue</code>就是一种延时阻塞队列。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

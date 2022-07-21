@@ -1,0 +1,164 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（七）——dubbo-serialization模块：序列化</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（七）——dubbo-serialization模块：序列化</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>RPC 框架需要通过网络完成跨 JVM 的通信，既然需要网络通信，就必然涉及使用序列化与反序列化的相关技术。下面我从 Java 序列化的基础内容开始，介绍常见的序列化算法，最后再分析 Dubbo 是如何支持这些序列化算法的。</p>
+<h2 id="-java-">一、Java序列化</h2>
+<p>Java语言原生支持序列化，使用起来分为如下几个步骤：</p>
+<ol>
+<li>被序列化的对象实现 <code>Serializable</code> 接口；</li>
+<li>生成一个序列化版本号 <code>serialVersionUID</code>，只有序列化和反序列化的 serialVersionUID 都相同的情况下，才能够成功地反序列化，如果类没有定义 <code>serialVersionUID</code>， JDK 会随机生成一个；</li>
+<li>根据需求决定是否要重写 writeObject()/readObject() 方法，实现自定义序列化；</li>
+<li>调用 java.io.ObjectOutputStream 的 writeObject()/readObject() 进行序列化与反序列化。</li>
+</ol>
+<h3 id="1-1-">1.1 序列化算法</h3>
+<p>Java 自身提供的序列化操作非常简单，但是开源社区里还是有各种各样的序列化框架，因为这些<strong>第三方序列化框架的速度更快、序列化的效率更高，而且支持跨语言操作</strong>。本节，我先对这些常见的序列化算法进行介绍。</p>
+<ul>
+<li><p><strong>Apache Avro </strong>：一种与编程语言无关的序列化框架。Avro 依赖于用户自定义的 Schema，在进行序列化数据的时候，无须多余的开销，就可以快速完成序列化，并且生成的序列化数据也较小。当进行反序列化的时候，需要获取到写入数据时用到的 Schema。Kafka、Hadoop 以及 Dubbo 中都可以使用 Avro 作为序列化方案。</p>
+</li>
+<li><p><strong>FastJson</strong> ：阿里巴巴开源的 JSON 解析库，可以解析 JSON 格式的字符串。它支持将 Java 对象序列化为 JSON 字符串，反过来从 JSON 字符串也可以反序列化为 Java 对象。FastJson 的优点在于性能很高，比 Jackson 快 20% 左右，但是近几年 FastJson 的安全漏洞比较多，所以需要谨慎使用。</p>
+</li>
+<li><p><strong>Fst（ fast-serialization）</strong>：一款高性能 Java 对象序列化工具包。100% 兼容 JDK 原生环境，序列化速度大概是JDK 原生序列化的 4~10 倍，序列化后的数据大小是 JDK 原生序列化大小的 1/3 左右。目前，Fst 已经更新到 3.x 版本，支持 JDK 14。</p>
+</li>
+<li><p><strong>Kryo </strong>：目前 Twitter、Yahoo、Apache 等都在使用该序列化技术，特别是 Spark、Hive 等大数据领域用得较多。Kryo 提供了一套快速、高效和易用的序列化 API。无论是数据库存储，还是网络传输，都可以使用 Kryo 完成 Java 对象的序列化。Kryo 还可以执行自动深拷贝和浅拷贝，支持环形引用。Kryo 的特点是 API 代码简单，序列化速度快，并且序列化之后得到的数据比较小。另外，Kryo 还提供了 NIO 的网络通信库——KryoNet。</p>
+</li>
+<li><p><strong>Hessian2</strong>：一种支持动态类型、跨语言的序列化协议。Java 对象序列化的二进制流可以被其他语言使用。Hessian2 序列化之后的数据可以进行自描述，不会像 Avro 那样依赖外部的 Schema 描述文件或者接口定义。Dubbo 中使用的 Hessian2 序列化并不是原生的 Hessian2 序列化，而是阿里修改过的 Hessian Lite，它是 Dubbo 默认使用的序列化方式。其序列化之后的二进制流大小大约是 Java 序列化的 50%，序列化耗时大约是 Java 序列化的 30%，反序列化耗时大约是 Java 序列化的 20%。</p>
+</li>
+<li><p><strong>Protobuf</strong>：Google 开源的一套灵活、高效、自动化的、用于对结构化数据进行序列化的协议。相比于常用的 JSON 格式，Protobuf 有更高的转化效率，时间效率和空间效率都是 JSON 的 5 倍左右。Protobuf 可用于通信协议、数据存储等领域，它本身是语言无关、平台无关、可扩展的序列化结构数据格式。目前 Protobuf提供了 C++、Java、Python、Go 等多种语言的 API，gRPC 底层就是使用 Protobuf 实现的序列化。</p>
+</li>
+</ul>
+<h2 id="-dubbo-">二、Dubbo序列化</h2>
+<p>Dubbo的<code>dubbo-serialization</code>模块，提供了对多种序列化算法的支持：</p>
+<center><br/> <img src="./img/20211124192503422.jpg" style="zoom:90%"><br/></img></center>
+<p>其中的<code>dubbo-serialization-api</code>子模块定义了 Dubbo 序列化层的核心接口：</p>
+<center><br/> <img src="./img/20211124192519854.png" style="zoom:70%"/><br/></center>
+<h3 id="2-1-serialization">2.1 Serialization</h3>
+<p>Serialization是 Dubbo 序列化层最核心的接口之一。它是一个扩展接口，被 @SPI 修饰，默认的扩展实现是 <strong>Hessian2Serialization</strong>：</p>
+<pre><code class="lang-JAVA">// Serialization.java
+
+@SPI("hessian2")
+public interface Serialization {
+
+    /**
+     * 获取ContentType的ID值，是一个byte类型的值，唯一确定一个算法.
+     */
+    byte getContentTypeId();
+
+    /**
+     * 每一种序列化算法都对应一个ContentType，该方法用于获取ContentType.
+     */
+    String getContentType();
+
+    /**
+     * 创建一个ObjectOutput对象，ObjectOutput负责实现序列化功能，即将Java对象转化为字节序列.
+     */
+    @Adaptive
+    ObjectOutput serialize(URL url, OutputStream output) throws IOException;
+
+    /**
+     * 创建一个ObjectInput对象，ObjectInput负责实现反序列化功能，即将字节序列转换成Java对象
+     *
+     * @param url URL address for the remote service
+     * @param input the underlying input stream
+     * @return deserializer
+     * @throws IOException
+     */
+    @Adaptive
+    ObjectInput deserialize(URL url, InputStream input) throws IOException;
+}
+</code></pre>
+<h3 id="2-2-hessian2serialization">2.2 Hessian2Serialization</h3>
+<p>下面我以默认的 hessian2 序列化方式为例，介绍 Serialization 接口的实现：</p>
+<pre><code class="lang-JAVA">// Hessian2Serialization.java
+
+public class Hessian2Serialization implements Serialization {
+
+    @Override
+    public byte getContentTypeId() {
+        return HESSIAN2_SERIALIZATION_ID;
+    }
+
+    @Override
+    public String getContentType() {
+        return "x-application/hessian2";
+    }
+
+    @Override
+    public ObjectOutput serialize(URL url, OutputStream out) throws IOException {
+        return new Hessian2ObjectOutput(out);
+    }
+
+    @Override
+    public ObjectInput deserialize(URL url, InputStream is) throws IOException {
+        return new Hessian2ObjectInput(is);
+    }
+}
+</code></pre>
+<p><code>Hessian2Serialization.serialize()</code> 方法创建了一个 Hessian2ObjectOutput 对象，Hessian2ObjectOutput继承自ObjectOutput，而ObjectOutput又继承了DataOutput，继承关系如下图所示：</p>
+<center><br/> <img src="./img/20211124192535902.png" style="zoom:70%"/><br/></center>
+<p>DataOutput 接口定义了序列化 Java 数据类型的各类方法，比如 boolean、short、int、long 等基础类型，也有 String、byte[] 类型：</p>
+<center><br/> <img src="./img/20211124192549081.png" style="zoom:70%"/><br/></center>
+<p>而 ObjectOutput 在DataOutput 接口的基础之上，添加了序列化对象的功能，其中的 writeThrowable()、writeEvent() 和 writeAttachments() 方法都是调用 writeObject() 方法实现的：</p>
+<center><br/> <img src="./img/20211124192600636.png" style="zoom:70%"/><br/></center>
+<p>Hessian2ObjectOutput 内部封装了一个 <code>Hessian2Output</code> 对象，这个对象基于 ThreadLocal 与线程进行绑定，也就是说它是一个线程本地变量。在 DataOutput 接口以及 ObjectOutput 接口中，序列化各类型数据的方法都会委托给 Hessian2Output 对象的相应方法完成，这也保证了线程安全性：</p>
+<pre><code class="lang-JAVA">// Hessian2ObjectOutput.java
+
+public class Hessian2ObjectOutput implements ObjectOutput {
+
+    private static ThreadLocal&lt;Hessian2Output&gt; OUTPUT_TL = ThreadLocal.withInitial(() -&gt; {
+        Hessian2Output h2o = new Hessian2Output(null);
+        h2o.setSerializerFactory(Hessian2SerializerFactory.SERIALIZER_FACTORY);
+        h2o.setCloseStreamOnClose(true);
+        return h2o;
+    });
+
+    // 每一个构造Hessian2ObjectOutput的线程，拥有独立的Hessian2Output对象
+    private final Hessian2Output mH2o;
+
+    public Hessian2ObjectOutput(OutputStream os) {
+        // 触发OUTPUT_TL的初始化
+        mH2o = OUTPUT_TL.get();
+        mH2o.init(os);
+    }
+
+    @Override
+    public void writeBool(boolean v) throws IOException {
+        mH2o.writeBoolean(v);
+    }
+
+    @Override
+    public void writeByte(byte v) throws IOException {
+        mH2o.writeInt(v);
+    }
+
+    @Override
+    public void writeObject(Object obj) throws IOException {
+        mH2o.writeObject(obj);
+    }
+
+    @Override
+    public void flushBuffer() throws IOException {
+        mH2o.flushBuffer();
+    }
+
+    public OutputStream getOutputStream() throws IOException {
+        return mH2o.getBytesOutputStream();
+    }
+    //...
+}
+</code></pre>
+<blockquote>
+<p>Hessian2Serialization 中的 deserialize() 方法与 serialize() 方法类似，只不过构造的是一个Hessian2ObjectInput对象，我就不赘述了，大家可以自己阅读下源码。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>本章，我对 Java 序列化的基础知识进行了讲解，并介绍了常见的一些开源序列化框架。Dubbo的<code>dubbo-serialization</code>模块实现了底层的序列化功能，Dubbo采用Hessian作为默认的序列化实现。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

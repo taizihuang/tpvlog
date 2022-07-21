@@ -1,0 +1,100 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Java网络编程（三）——HTTP协议</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Java网络编程（三）——HTTP协议</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>HTTP协议，即<em>Hyper Text Transfer Protocol（超文本传输协议）</em>，属于TCP/IP协议模型中的<strong>应用层</strong>协议，也是最常见的协议。比如，我们通过浏览器访问网页，本质就是通过HTTP协议获取网页内容。</p>
+<p>HTTP协议是一种<strong>无状态</strong>的请求/响应协议，它的底层还是通过TCP协议来建立连接的。本章，我将会对HTTP协议的报文结构、通信原理进行讲解。</p>
+<h2 id="-">一、报文结构</h2>
+<p>客户端发送一个HTTP请求到服务器，请求报文的格式如下，一共由四个部分组成：</p>
+<ul>
+<li>请求行（request line）；</li>
+<li>请求头部（header）；</li>
+<li>空行；</li>
+<li>请求体数据。</li>
+</ul>
+<center><br/> <img src="./img/20210916223542108.jpg" style="zoom:70%"><br/></img></center>
+<p>服务端的响应报文也由四个部分组成：</p>
+<ul>
+<li>状态行；</li>
+<li>响应头部（header）；</li>
+<li>空行；</li>
+<li>响应体数据。</li>
+</ul>
+<center><br/> <img src="./img/20210916223552351.jpg" style="zoom:70%"/><br/></center>
+<h3 id="1-1-">1.1 请求类型</h3>
+<p>HTTP 协议 一共定义了<strong>八种</strong>请求类型，通过请求行中的<code>method</code>标识：</p>
+<ul>
+<li><strong>OPTIONS</strong>：返回服务器针对特定资源所支持的HTTP请求类型，也可以利用向服务器发送 <code>*</code> 的请求来测试服务器的功能性；</li>
+<li><strong>HEAD</strong>：向服务器索要与GET请求相一致的响应，只不过响应体将不会被返回，这一方法可以在不必传输整个响应内容的情况下，就可以获取响应消息头中的元信息；</li>
+<li><strong>GET</strong>：向特定的资源发出请求；</li>
+<li><strong>POST</strong>：向指定资源提交数据进行处理请求（例如提交表单或者上传文件）；数据被包含在请求体中，POST请求可能会导致新的资源的创建和/或已有资源的修改；</li>
+<li><strong>PUT</strong>：向指定资源位置上传其最新内容；</li>
+<li><strong>DELETE</strong>：请求服务器删除 Request-URI 所标识的资源；</li>
+<li><strong>TRACE</strong>：回显服务器收到的请求，主要用于测试或诊断；</li>
+<li><strong>CONNECT</strong>：HTTP/1.1 协议中，预留给能够将连接改为管道方式的代理服务器。</li>
+</ul>
+<p>事实上，最常使用的请求类型也就<code>POST</code>和<code>GET</code>，两者的主要区别和联系如下：</p>
+<ol>
+<li><strong>GET</strong> 用于信息获取，应该是安全和幂等的；</li>
+<li><strong>GET</strong> 是会被浏览器主动缓存的，如果下一次传输的数据相同，那么就会返回缓存的内容；</li>
+<li><strong>GET</strong> 方法的 <strong>URL</strong> 一般都具有长度限制，HTTP协议本身并未规定GET请求的长度，这个长度限制主要由浏览器和Web服务器决定；</li>
+<li><strong>GET</strong> 只产生一个TCP数据包，浏览器会把请求头和请求数据一并发送出去；</li>
+<li><strong>POST</strong> 表示可能修改变服务器上资源的请求，因为有可能修改服务器上的资源，所以它不符合安全和幂等性；</li>
+<li><strong>POST</strong> 方法的请求信息放置在请求体中，所以请求信息是没有长度限制的；</li>
+<li><strong>POST</strong> 方法会产生两个 <strong>TCP</strong> 数据包，浏览器会先将请求头发送给服务器，待服务器响应100 continue，浏览器再发送请求数据，服务器响应200。</li>
+</ol>
+<blockquote>
+<p><strong>幂等性</strong>(Idempotence)：指无论调用这个URL多少次，都不会对服务端产生不同的结果影响。</p>
+</blockquote>
+<h3 id="1-2-">1.2 状态码</h3>
+<p>所有HTTP响应的第一行都是状态行，依次是当前HTTP协议版本号，3位数字组成的状态代码，以及描述状态的短语，彼此由空格分隔。</p>
+<p>状态代码的第一个数字代表当前响应的类型：</p>
+<ul>
+<li>1xx消息——请求已被服务器接收，继续处理；</li>
+<li>2xx成功——请求已成功被服务器接收、理解、并接受；</li>
+<li>3xx重定向——需要后续操作才能完成这一请求；</li>
+<li>4xx请求错误——请求含有词法错误或者无法被执行；</li>
+<li>5xx服务器错误——服务器在处理某个正确请求时发生错误。</li>
+</ul>
+<center><br/> <img src="./img/20210916223602415.png" style="zoom:39%"/><br/></center>
+<h3 id="1-3-">1.3 协议版本</h3>
+<p>HTTP协议的发展经历了几个阶段，每个阶段对应不同的协议版本：</p>
+<ul>
+<li><strong>http 1.0：</strong>http 1.0默认是短连接，即每次请求都要重新建立一个TCP连接，处理完就释放TCP连接。如果需要使用持久连接，则需要显式声明<code>keep-alive</code>；</li>
+<li><strong>http 1.1：</strong>http 1.1默认支持长连接，不需要显式声明<code>Connection: keep-alive</code>，底层的TCP连接会一直保持，所有HTTP请求都会基于同一个TCP连接；同时，HTTP 1.1版本引入了Cookie机制；</li>
+<li><strong>http 2.0：</strong>支持<strong>多路复用</strong>，基于一个TCP连接并行发送多个请求以及接收响应；HTTP1.1在同一时间对于同一个域名的请求数量有限制，超过限制就会阻塞请求。而多路复用机制底层采用了"增加二进制分帧层"的方法，在不改变原来的语义、首部字段的情况下提高了传输性能，降低延迟。</li>
+</ul>
+<blockquote>
+<p>所谓<strong>二进制分帧</strong>，是指将所有传输信息分割为更小的帧，用二进制进行编码，多个请求都在同一个TCP连接上完成，可以承载任意数量的双向数据流。</p>
+</blockquote>
+<center><br/> <img src="./img/20210916223612199.jpg" style="zoom:42%"/><br/></center>
+<h2 id="-https-">二、HTTPS原理</h2>
+<p>HTTP协议中的报文传输都是明文的，没有加密，所以在互联网环境中存在安全性风险，于是出现了HTTPS协议。</p>
+<p>HTTPS是一种安全通信传输协议，依然基于HTTP进行通信，但是利用了<strong><em>SSL/TLS</em></strong>建立安全信道，加密数据包，提供对网站服务器的身份认证，同时保护交换数据的隐私与完整性。</p>
+<blockquote>
+<p>注意：TLS是传输层加密协议，前身是SSL协议，由网景公司1995年发布，有时候两者不区分。TLS/SSL 的功能实现主要依赖于三类基本算法：<strong>散列函数</strong> 、<strong>对称加密</strong>和<strong>非对称加密</strong>，其利用非对称加密实现身份认证和密钥协商，对称加密算法采用协商的密钥对数据加密，散列函数用于验证信息的完整性，防止篡改。</p>
+</blockquote>
+<p>HTTPS的工作原理，可以用下面这张图表述：</p>
+<center><br/> <img src="./img/20210916223622592.png" style="zoom:100%"/><br/></center>
+<p>整体流程如下：</p>
+<ol>
+<li>浏览器请求HTTPS域名，同时携带自己支持的加密规则给目标网站；</li>
+<li>网站从客户端支持的加密规则中，选出一套<strong>对称加密算法</strong>和<strong>Hash算法</strong>，然后把自己的身份信息用<strong>证书</strong>的方式发回给浏览器，证书里包含<strong>网站地址</strong>、<strong>加密公钥</strong>、<strong>证书颁发机构</strong>等；</li>
+<li>浏览器验证证书的合法性，接着用约定好的对称加密算法生成一串<strong>随机数密码</strong>，然后用证书中的<strong>公钥</strong>对该对称密钥进行加密；</li>
+<li>浏览器用约定好的Hash算法计算握手消息并生成一串Hash值，然后用对称密钥加密<strong>握手消息+握手消息Hash值</strong>，并一起发送给网站服务端；</li>
+<li>网站用<strong>私钥</strong>对消息解密，获取对称密钥，然后用对称密钥解密握手消息，获取到握手消息及其Hash值；接着，用Hash算法对握手消息进行一次Hash，并比对客户端上送的握手消息Hash值，一致则说明消息没有被篡改；</li>
+<li>然后，网站用对称密钥加密一段握手消息——<strong>握手消息+握手消息Hash值</strong>给客户端；</li>
+<li>客户端用对称密钥解密并计算握手消息的Hash值，如果与服务端发来的Hash值一致，则握手过程结束，之后所有的通信将由双方协商好的<strong>对称密钥</strong>加密通信。  </li>
+</ol>
+<h2 id="-">三、总结</h2>
+<p>本章，我对HTTP协议的报文结构和原理进行了讲解。HTTP协议是一种应用层协议，其底层本质还是基于TCP协议进行连接和通信。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Java网络编程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/67">Java网络编程</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,124 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二七）——分布式框架之高可用：Hystrix请求流程</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二七）——分布式框架之高可用：Hystrix请求流程</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>通过前面一章的学习，我们已经了解了如何利用Hystrix来实现资源隔离，本章我将详细讲解一次请求调用在Hystrix底层的整个执行流程。</p>
+<h2 id="-command-">一、Command执行流程</h2>
+<p>我们来分析下下面这张图，它表述了一次Hystrix请求调用的完整底层逻辑：</p>
+<center><br/> <img src="./img/20200330222145845.png" style="zoom:100%"><br/></img></center>
+<h3 id="1-1-">1.1 创建请求</h3>
+<p>在Hystrix中，一个Command对象代表了对某个依赖服务的接口发起的一次请求，Command对象一共有两种：</p>
+<ul>
+<li><strong>HystrixCommand：</strong>用于仅仅返回一个结果的调用</li>
+<li><strong>HystrixObservableCommand：</strong>用于可能会返回多条结果的调用</li>
+</ul>
+<h3 id="1-2-">1.2 请求调用</h3>
+<p>执行Command就可以发起一次对依赖服务接口的调用，一共有四个方法可以选择：<code>execute()</code>、<code>queue()</code>、<code>observe()</code>、<code>toObservable()</code>，其中execute()和queue()仅仅对HystrixCommand适用：</p>
+<ul>
+<li><strong>execute()：</strong>同步调用，直到接口返回结果，或者抛出异常：<code>K value = command.execute();</code></li>
+<li><strong>queue()：</strong>异步调用，返回一个Future，后面可以通过Future获取结果：<code>Future&lt;K&gt; fValue = command.queue();</code></li>
+<li><strong>observe()：</strong>订阅一个Observable对象，Observable代表的是依赖服务接口返回的结果，最终获取到的是代表结果的Observable对象的拷贝对象：<code>Observable&lt;K&gt; ohValue = command.observe();</code></li>
+<li><strong>toObservable()：</strong>返回一个Observable对象，如果我们订阅这个对象，就会执行command并且获取返回结果：<code>Observable&lt;K&gt; ocValue = command.toObservable();</code></li>
+</ul>
+<blockquote>
+<p>execute()实际上会调用queue().get().queue()，接着会调用toObservable().toBlocking().toFuture()，也就是说，无论是哪种执行command的方式，最终都是依赖toObservable()去执行的。</p>
+</blockquote>
+<h3 id="1-3-">1.3 检查请求缓存</h3>
+<p>如果这个command开启了请求缓存（request cache），且这个调用的结果在缓存中存在，那么直接从缓存中返回结果。</p>
+<h3 id="1-4-">1.4 检查断路器</h3>
+<p>检查这个command对应的依赖服务是否开启了断路器（circuit breaker），如果断路器被打开了，那么hystrix就不会执行这个command，而是直接去执行fallback降级机制。</p>
+<h3 id="1-5-">1.5 检查资源池</h3>
+<p>如果command对应的线程池/Semaphore已经满了，那么也不会执行command，而是直接去调用fallback降级机制。</p>
+<h3 id="1-6-">1.6 执行请求</h3>
+<p>调用<code>HystrixCommand.run()</code>或<code>HystrixObservableCommand.construct()</code>来实际执行这个command，如果执行超时（timeout），那么command所在的线程就会抛出一个<code>TimeoutException</code>，此时会去执行fallback降级机制（执行出现异常也会执行fallback）。</p>
+<h3 id="1-7-">1.7 健康检查</h3>
+<p>Hystrix会将对每一个依赖服务的调用事件（成功、失败、拒绝、超时等）发送给断路器（circuit breaker）。断路器就会对调用结果的次数进行统计，并根据这些统计次数来决定是否要进行断路。如果打开了断路器，那么在一段时间内就会直接断路，然后后续某次检查发现调用成功后，又会自动关闭断路器。</p>
+<h3 id="1-8-fallback-">1.8 fallback降级</h3>
+<p>在以下几种情况中，hystrix会调用fallback降级机制：</p>
+<ul>
+<li>断路器处于打开状态，直接走降级流程；</li>
+<li><p>线程池/队列/semaphore满了，请求被reject；</p>
+</li>
+<li><p>执行了请求，但是Command的run()或construct()方法抛出异常或超时；</p>
+</li>
+</ul>
+<p>一般在降级机制中，都建议给出一些默认的返回值，比如静态的一些代码逻辑，或者从内存中的缓存中提取一些数据，尽量在这里不要再进行网络请求了。即使在降级中，一定要进行网络调用，也应该将那个调用放在一个Command中，进行隔离。</p>
+<h2 id="-">二、请求缓存</h2>
+<p>Hystrix中有一个概念，叫做<em>请求上下文（reqeust context）</em>。通俗点讲，请求上下文就是用于保存一次用户请求的信息。通常一次请求可能涉及对多个依赖服务的调用，某些服务的接口还可能会调用好几次，这样在一次请求上下文中，如果有多个command接口/参数都是一样的，那么可以认为其结果也是一样的。</p>
+<p>此时，就可以将第一次command执行后，返回的结果缓存在这个请求上下文中，后续的其它对这个依赖的调用全部从内存中取用缓存结果就可以了，不用在一次请求上下文中反复多次执行一样的command，提升整个请求的性能。</p>
+<p><code>HystrixCommand</code>和<code>HystrixObservableCommand</code>都可以指定一个缓存key，然后hystrix会自动进行缓存，接着在同一个request context内，再次访问的时候，就会直接取用缓存。</p>
+<p>我们继续以整合服务为例子，看下请求缓存的使用。</p>
+<h3 id="2-1-hystrixrequestcontext">2.1 创建HystrixRequestContext</h3>
+<p>首先，针对每一个请求，我们需要创建一个HystrixRequestContext，可以在web容器的Filter里面实现：</p>
+<pre><code class="lang-JAVA">public class HystrixRequestContextServletFilter implements Filter {
+
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) 
+     throws IOException, ServletException {
+        // 创建一个reqeust context对象
+        HystrixRequestContext context = HystrixRequestContext.initializeContext();
+        try {
+            chain.doFilter(request, response);
+        } finally {
+            // 关闭request context
+            context.shutdown();
+        }
+    }
+}
+</code></pre>
+<blockquote>
+<p>注意要在Spring容器中注入<code>HystrixRequestContextServletFilter</code>对象。</p>
+</blockquote>
+<h3 id="2-2-">2.2 改写商品批量查询接口</h3>
+<p>之前整合服务中的商品批量查询接口，如果商品id出现了重复，按照我们之前的业务逻辑，可能就会对重复的productId的商品查询多次。我们可以利用request cache做下优化，一次请求，就是一次request context，对相同的商品查询只能执行一次，其余的都走request cache。</p>
+<pre><code class="lang-JAVA">/**
+ * 封装获取商品信息的请求，采用线程池隔离。
+ * HystrixCommand中的泛型是请求返回的类型，此处是商品信息ProductInfo
+ */
+public class GetProductInfoCommand extends HystrixCommand&lt;ProductInfo&gt; {
+
+    private final Long productId;
+
+    public GetProductInfoCommand(Long productId) {
+        // 将command与线程池关联
+        super(HystrixCommandGroupKey.Factory.asKey("GetProductInfoCommandGroup"));
+        this.productId = productId;
+    }
+
+    /**
+      * run方法里执行的是真正请求处理逻辑
+      */
+    @Override
+    protected ProductInfo run() {
+        // 拿到一个商品id
+        // 调用商品服务的接口，获取商品id对应的商品的最新数据
+        // 用HttpClient去调用商品服务的http接口
+        String url = "http://127.0.0.1:8082/getProductInfo?productId=" + productId;
+        String response = HttpClientUtils.sendGetRequest(url);
+
+        return JSONObject.parseObject(response, ProductInfo.class);
+    }
+
+    /**
+      * 指定缓存key。
+      * 每次接口调用结果都会用这个key保存到内存中：&lt;key,结果&gt;
+      */
+    @Override
+    protected String getCacheKey() {
+        return "product_info_" + productId;
+    }
+
+}
+</code></pre>
+<p>上述代码的关键就是覆写了<code>HystrixCommand.getCacheKey</code>方法，根据商品ID先去缓存中查找是否有结果，有的话直接返回。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解了Hystrix中一个请求的整体执行流程，并对请求缓存进行了讲解，重点是Command执行流程。后续章节我将针对请求流程中的各个部分进行专门讲解，包括断路器、降级等。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

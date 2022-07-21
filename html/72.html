@@ -1,0 +1,25 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（十六）——分布式理论之可扩展：Range Based</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（十六）——分布式理论之可扩展：Range Based</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p><strong>Range Based</strong> 这种数据分片方式是指将整个Hash值空间，分成不相交的几个分段，每个物理节点负责其中的一段或几段值空间。比如Redis在集群模式下，Hash值空间为<em>[0,16383]</em>，每个节点会负责一定数量的分段（槽），所有的键根据哈希函数映射到0~16383整数槽内。</p>
+<center><br/> <img src="./img/20200207201329663.png" style="zoom:50%"><br/></img></center>
+<h2 id="-">二、优缺点</h2>
+<p>Range Based其实和一致性hash非常类似：</p>
+<ul>
+<li>如果一个节点只负责一段值空间，range based与没有虚拟节点概念的一致性hash很类似；</li>
+<li>如果一个节点负责多段值区间，range based与有虚拟节点概念的一致性hash很类似。</li>
+</ul>
+<p><strong>优点：</strong><br/>相对于一致性Hash，Range Based更为灵活，因为值空间与节点的映射关系可以显示指定。比如增加一个node-6节点，此时可以选择将node-5或node-4所管理的部分值空间交由node-6管理，这样迁移的数据就比较少。另外，当出现数据倾斜时，也能更好地负责均衡。</p>
+<p><strong>缺点：</strong><br/>值空间与节点映射关系的管理更为复杂。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

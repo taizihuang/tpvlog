@@ -1,0 +1,64 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解JVM系列</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解JVM系列</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将讲解Java虚拟机的基本原理和实战应用。整个系列包括两部分：<strong>基础篇</strong>和<strong>实战篇</strong>。基础篇针对JVM相关的基础知识进行介绍，核心内容是JVM内存模型、JVM垃圾回收机制，以及三种核心的垃圾回收器。实战篇则专注于JVM生产实践，主要解决JVM生产环境的参数优化，JVM GC问题和JVM OOM问题的处理。</p>
+<p>本系列的主要参考资料如下：</p>
+<ul>
+<li><a href="">《 从 0 开始带你成为JVM实战高手 》</a></li>
+<li><a href="">《实战Java虚拟机》  葛一鸣</a></li>
+<li><a href="">《深入理解Java虚拟机（第2版）》  周志明</a></li>
+<li><a href="https://docs.oracle.com/javase/specs/jvms/se8/jvms8.pdf">《The Java Virtual Machine Specification, Java SE 8 Edition》</a></li>
+</ul>
+<h2 id="-">基础篇</h2>
+<p>基础篇是后续实战篇的基础，我也会在基础篇的最后几个章节中讲解下JVM调优的基本思路。本部分包含以下文章：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/85">JVM基础（1）——JVM类加载机制</a></li>
+<li><a href="https://www.tpvlog.com/article/86">JVM基础（2）——JVM内存模型</a></li>
+<li><a href="https://www.tpvlog.com/article/87">JVM基础（3）——JVM垃圾回收机制</a></li>
+<li><a href="https://www.tpvlog.com/article/88">JVM基础（4）——JVM存活判定算法</a></li>
+<li><a href="https://www.tpvlog.com/article/89">JVM基础（5）——JVM垃圾回收算法</a></li>
+<li><a href="https://www.tpvlog.com/article/90">JVM基础（6）——JVM垃圾回收器简介</a></li>
+<li><a href="https://www.tpvlog.com/article/91">JVM基础（7）——ParNew垃圾回收器</a></li>
+<li><a href="https://www.tpvlog.com/article/92">JVM基础（8）——CMS垃圾回收器</a></li>
+<li><a href="https://www.tpvlog.com/article/93">JVM基础（9）——新生代调优</a></li>
+<li><a href="https://www.tpvlog.com/article/94">JVM基础（10）——老年代调优</a></li>
+<li><a href="https://www.tpvlog.com/article/95">JVM基础（11）——G1垃圾回收器</a></li>
+<li><a href="https://www.tpvlog.com/article/96">JVM基础（12）——G1调优</a></li>
+</ul>
+<h2 id="-">实战篇</h2>
+<p>实战篇主要通过各种实际的生产案例介绍JVM的调优方法，以及常用的调优工具。JVM调优是一个系统工程，涉及很多综合因素的考量，但是最基本的思路是可以形成一套系统的方法的。本部分的内容大体分为四块：新生代调优、老年代调优、调优工具介绍、内存溢出排查，包含以下文章：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/97">JVM实战（13）——JVM优化概述</a></li>
+<li><a href="https://www.tpvlog.com/article/98">JVM实战（14）——Young GC调优</a></li>
+<li><a href="https://www.tpvlog.com/article/99">JVM实战（15）——Full GC调优</a></li>
+<li><a href="https://www.tpvlog.com/article/100">JVM实战（16）——模拟Young GC</a></li>
+<li><a href="https://www.tpvlog.com/article/101">JVM实战（17）——模拟对象晋升</a></li>
+<li><a href="https://www.tpvlog.com/article/102">JVM实战（18）——模拟Full GC</a></li>
+<li><a href="https://www.tpvlog.com/article/103">JVM实战（19）——JVM调优工具概述</a></li>
+<li><a href="https://www.tpvlog.com/article/104">JVM实战（20）——jstat实战（1）</a></li>
+<li><a href="https://www.tpvlog.com/article/105">JVM实战（21）——jstat实战（2）</a></li>
+<li><a href="https://www.tpvlog.com/article/106">JVM实战（22）——jmap和MAT实战</a></li>
+<li><a href="https://www.tpvlog.com/article/107">JVM实战（23）——内存碎片优化</a></li>
+<li><a href="https://www.tpvlog.com/article/108">JVM实战（24）——大对象优化</a></li>
+<li><a href="https://www.tpvlog.com/article/109">JVM实战（25）——元数据区优化</a></li>
+<li><a href="https://www.tpvlog.com/article/110">JVM实战（26）——SystemGC</a></li>
+<li><a href="https://www.tpvlog.com/article/111">JVM实战（27）——内存溢出概述</a></li>
+<li><a href="https://www.tpvlog.com/article/112">JVM实战（28）——模拟Metaspace内存溢出</a></li>
+<li><a href="https://www.tpvlog.com/article/113">JVM实战（29）——模拟栈内存溢出</a></li>
+<li><a href="https://www.tpvlog.com/article/114">JVM实战（30）——模拟堆内存溢出</a></li>
+<li><a href="https://www.tpvlog.com/article/115">JVM实战（31）——内存溢出之请求超时</a></li>
+<li><a href="https://www.tpvlog.com/article/116">JVM实战（32）——内存溢出之堆外内存</a></li>
+<li><a href="https://www.tpvlog.com/article/117">JVM实战（33）——内存溢出之内存使用率过高</a></li>
+<li><a href="https://www.tpvlog.com/article/118">JVM实战（34）——内存溢出之消息队列处理不当</a></li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

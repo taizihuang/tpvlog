@@ -1,0 +1,174 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（三一）——Hystrix基本使用</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（三一）——Hystrix基本使用</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我之前讲解Hystrix时，都是使用原生的Netfilx Hystrix，但实践中我们一般不会直接使用。所以本章，我将讲解如何在Spring Cloud中使用Hystrix，Spring Cloud对Hystrix进行了封装，我之前已经讲解过了Eureka、Ribbon、Feign，事实上，Spring Cloud Netflix Hystrix既可以独立使用，也可以和Feign整合在一起，本章我会分别讲解这两种使用方式。</p>
+<blockquote>
+<p>关于Spring Cloud Netflix Hystrix使用的更多介绍，可以参考官方文档：<a href="https://docs.spring.io/spring-cloud-netflix/docs/2.2.5.RELEASE/reference/html/#circuit-breaker-hystrix-clients。">https://docs.spring.io/spring-cloud-netflix/docs/2.2.5.RELEASE/reference/html/#circuit-breaker-hystrix-clients。</a></p>
+</blockquote>
+<h2 id="-">一、独立使用</h2>
+<p>我们先来看下如何独立使用Spring Cloud Netflix Hystrix。首先需要引入<code>spring-cloud-starter-netflix-hystrix</code>这个maven依赖。我这里继续沿用<a href="https://www.tpvlog.com/article/264">《透彻理解Spring Cloud（二七）——Feign基本使用》</a>中的示例。</p>
+<h3 id="1-1-maven-">1.1 Maven依赖</h3>
+<p>首先，在ServiceB工程中添加Maven依赖：</p>
+<pre><code class="lang-XML">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+      &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+      &lt;artifactId&gt;serviceB&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;serviceB&lt;/name&gt;
+      &lt;url&gt;http://maven.apache.org&lt;/url&gt;
+
+      &lt;properties&gt;
+        &lt;project.build.sourceEncoding&gt;UTF-8&lt;/project.build.sourceEncoding&gt;
+      &lt;/properties&gt;
+
+    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.2.6.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;Hoxton.SR8&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+
+    &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-config&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-ribbon&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-client&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-hystrix&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-openfeign&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+            &lt;artifactId&gt;service-a-api&lt;/artifactId&gt;
+            &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-netflix-eureka-client&lt;/artifactId&gt;
+            &lt;version&gt;2.2.5.RELEASE&lt;/version&gt;
+            &lt;scope&gt;compile&lt;/scope&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/project&gt;
+</code></pre>
+<h3 id="1-2-">1.2 启动类</h3>
+<p>启动类中需要加上<code>@EnableCircuitBreaker</code>或<code>@EnableHystrix</code>注解：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+@EnableFeignClients
+@EnableCircuitBreaker
+public class ServiceBApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ServiceBApplication.class, args);
+    }
+}
+</code></pre>
+<blockquote>
+<p> @EnableHystrix注解仅仅是对@EnableCircuitBreaker注解的一个包装而已。</p>
+</blockquote>
+<h3 id="1-3-">1.3 服务类</h3>
+<p>最后是服务类，这里用了一个<code>@HystrixCommand</code>注解，Spring Cloud会为我们生成一个代理类，最终方法的执行会交给代理类，<code>fallbackMethod</code>指定了降级逻辑：</p>
+<pre><code class="lang-java">@Service
+public class SomeService {
+
+    @HystrixCommand(fallbackMethod = "defaultStores",commandProperties = {
+      @HystrixProperty(name="execution.isolation.strategy", value="SEMAPHORE")
+    })
+    public Object getStores(Map&lt;String, Object&gt; parameters) {
+        //do stuff that might fail
+    }
+
+    // 降级方法
+    public Object defaultStores(Map&lt;String, Object&gt; parameters) {
+        return /* something useful */;
+    }
+}
+</code></pre>
+<p>我们还可以通过注解中的<code>commandProperties</code>属性配置HystrixCommand的参数，比如<code>execution.isolation.strategy</code>表示配置资源隔离策略。</p>
+<h2 id="-feign">二、整合Feign</h2>
+<p>我们再来看下如何将Feign和Hystrix整合在一起。默认情况下，Hystrix的group name就是ServiceA这种服务名称，也就是说你要调用一个服务的话，那么针对每个服务就有一个线程池，然后针对服务的每个接口方法，对应有一个自动生成的HystrixCommand，CommandKey是<code>接口类#方法名</code>。</p>
+<h3 id="2-1-">2.1 配置文件</h3>
+<p>首先，需要在配置文件中开启Hystrix：</p>
+<pre><code class="lang-YML"># To enbale Hystrix in Feign
+feign:
+  hystrix:
+    enabled: true
+
+# To set thread isolation to SEMAPHORE
+hystrix:
+  command:
+    default:
+      execution:
+        isolation:
+          strategy: SEMAPHORE
+</code></pre>
+<p>然后可以通过<code>hystrix.command.XXX</code>配置Hystrix的参数，我这里用了default，表示对所有HsystrixCommand生效。我们也可以用具体的服务名称替换，比如serviceA。</p>
+<h3 id="2-2-">2.2 服务类</h3>
+<p>接着，需要在服务接口中添加fallback配置，表示降级逻辑：</p>
+<pre><code class="lang-JAVA">@FeignClient(name = "ServiceA",fallback = ServiceAClientFallback.class)    
+public interface ServiceAClient extends ServiceAInterface {
+}
+</code></pre>
+<pre><code class="lang-JAVA">static class ServiceAClientFallback implements ServiceAClient {
+    public String sayHello() {
+        // 降级机制
+    }
+}
+</code></pre>
+<p>如果我们需要知道fallback异常的原因，可以使用<code>fallbackFactory</code>：</p>
+<pre><code class="lang-JAVA">@FeignClient(name = "ServiceA",fallbackFactory = ServiceAClientFallbackFactory.class)    
+public interface ServiceAClient extends ServiceAInterface {
+}
+</code></pre>
+<pre><code class="lang-JAVA">static class ServiceAClientFallbackFactory implements FallbackFactory&lt;ServiceAClient&gt; {
+    @Override
+    public ServiceAClient create(Throwable cause) {
+        return new ServiceAClient() {
+            @Override
+            public String sayHello() {
+                return "fallback; reason was: " + cause.getMessage();
+            }
+        };
+    }
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解了Spring Cloud Netflix Hystrix的两种使用方式，事实上它们的底层原理是一样的，我后续分析源码时会详细讲解。另外，Hystrix在使用时，一般也会用它的统计仪表盘——<a href="https://docs.spring.io/spring-cloud-netflix/docs/2.2.5.RELEASE/reference/html/#circuit-breaker-hystrix-dashboard">Hystrix Dashboard</a>和 <a href="https://github.com/Netflix/Turbine">Turbine</a>，我这里就不再赘述了，它们的使用都很简单，读者可以参考Spring Cloud 官方文档。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

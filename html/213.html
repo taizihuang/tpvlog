@@ -1,0 +1,264 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（四）——原型模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（四）——原型模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>如果对象的创建成本比较大，而同一个类的不同对象之间差别不大（大部分字段都相同），在这种情况下，我们可以用对已有对象（原型）进行复制（或者叫拷贝），来创建新对象，以达到节省创建时间的目的。这种基于原型来创建对象的方式就叫作<strong>原型设计模式（Prototype Design Pattern）</strong>，简称原型模式。</p>
+<h2 id="-">一、使用场景</h2>
+<p>如果对象中的数据需要经过<strong>复杂计算</strong>才能得到（比如排序、计算哈希值），或者需要从 RPC、网络、数据库、文件系统等非常慢速的 IO 中读取，这种情况下，我们就可以利用原型模式，从其他已有对象中直接拷贝得到，而不用每次在创建新对象的时候，都重复执行这些耗时的操作。</p>
+<h3 id="1-1-">1.1 使用原型模式前</h3>
+<p>我们通过一个示例来理解下，假设我们有着这样一个需求：<br/>数据库中存储了大约 10 万条“搜索关键词”信息，每条信息包含关键词、关键词被搜索的次数、最近更新时间等。系统 A 在启动的时候需要从数据库加载一大批数据到内存中，用于处理某些其他的业务需求。<br/>我们使用HashMap来存储加载的数据，key 为关键词，value 为关键词详细信息。为了保证系统 A 中数据的实时性，系统 A 需要定期从根据数据库捞取数据，更新内存中的数据。</p>
+<p>最简单的一种实现方式是下面这样：</p>
+<pre><code class="lang-JAVA">public class Demo {
+  private HashMap&lt;String, SearchWord&gt; currentKeywords=new HashMap&lt;&gt;();
+
+  public void refresh() {
+    HashMap&lt;String, SearchWord&gt; newKeywords = new LinkedHashMap&lt;&gt;();
+
+    // 从数据库中取出所有的数据，放入到newKeywords中
+    List&lt;SearchWord&gt; toBeUpdatedSearchWords = getSearchWords();
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      newKeywords.put(searchWord.getKeyword(), searchWord);
+    }
+
+    currentKeywords = newKeywords;
+  }
+
+  private List&lt;SearchWord&gt; getSearchWords() {
+    // TODO: 从数据库中取出所有的数据
+    return null;
+  }
+}
+</code></pre>
+<p>不过，在上面的代码实现中，newKeywords 构建的成本比较高。我们需要将这 10 万条数据从数据库中读出，然后计算哈希值，构建 newKeywords。这个过程显然是比较耗时。为了提高效率，原型模式就派上用场了。</p>
+<h3 id="1-2-">1.2 使用原型模式后</h3>
+<p>使用原型模式，我们可以拷贝 currentKeywords 数据到 newKeywords 中，然后从数据库中只捞出新增或者有更新的关键词，更新到 newKeywords 中。而相对于 10 万条数据来说，每次新增或者更新的关键词个数是比较少的，所以，这种策略大大提高了数据更新的效率。</p>
+<pre><code class="lang-JAVA">public class Demo {
+  private HashMap&lt;String, SearchWord&gt; currentKeywords=new HashMap&lt;&gt;();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // 原型模式就这么简单，拷贝已有对象的数据，更新少量差值
+    HashMap&lt;String, SearchWord&gt; newKeywords = (HashMap&lt;String, SearchWord&gt;) currentKeywords.clone();
+
+    // 从数据库中取出更新时间&gt;lastUpdateTime的数据，放入到newKeywords中
+    List&lt;SearchWord&gt; toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() &gt; maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (newKeywords.containsKey(searchWord.getKeyword())) {
+        SearchWord oldSearchWord = newKeywords.get(searchWord.getKeyword());
+        oldSearchWord.setCount(searchWord.getCount());
+        oldSearchWord.setLastUpdateTime(searchWord.getLastUpdateTime());
+      } else {
+        newKeywords.put(searchWord.getKeyword(), searchWord);
+      }
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+    currentKeywords = newKeywords;
+  }
+
+  private List&lt;SearchWord&gt; getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间&gt;lastUpdateTime的数据
+    return null;
+  }
+}
+</code></pre>
+<p>上面代码中，我们利用了 Java 中的 clone() 语法来复制一个对象，这里就引出了另外两个概念：<strong>深拷贝（Deep Copy）</strong>和<strong>浅拷贝（Shallow Copy）</strong>。</p>
+<h2 id="-">二、拷贝原理</h2>
+<p>首先，我们应该明白，散列表索引中，结点存储的 key 是搜索关键词，value 是 SearchWord 对象的内存地址，SearchWord 对象本身存储在散列表之外的内存空间中。</p>
+<p>浅拷贝和深拷贝的区别在于：</p>
+<ul>
+<li>浅拷贝只会复制索引，不会复制数据本身，浅拷贝得到的对象跟原始对象共享数据；</li>
+<li>相反，深拷贝不仅仅会复制索引，还会复制数据本身。，而深拷贝得到的是一份完完全全独立的对象。</li>
+</ul>
+<p>在 Java 语言中，<strong>Object 类的 clone() 方法执行的就是浅拷贝，它只会拷贝对象中的基本数据类型的数据（比如，int、long），以及引用对象（SearchWord）的内存地址，不会递归地拷贝引用对象本身</strong>。</p>
+<h3 id="2-1-">2.1 深拷贝</h3>
+<p>那如何实现深拷贝呢？总结一下的话，有下面两种方法。</p>
+<p>第一种方法：递归拷贝对象、对象的引用对象以及引用对象的引用对象……直到要拷贝的对象只包含基本数据类型数据，没有引用对象为止。</p>
+<p>根据这个思路对之前的代码进行重构。重构之后的代码如下所示：</p>
+<pre><code class="lang-JAVA">public class Demo {
+  private HashMap&lt;String, SearchWord&gt; currentKeywords=new HashMap&lt;&gt;();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // Deep copy
+    HashMap&lt;String, SearchWord&gt; newKeywords = new HashMap&lt;&gt;();
+    for (HashMap.Entry&lt;String, SearchWord&gt; e : currentKeywords.entrySet()) {
+      SearchWord searchWord = e.getValue();
+      SearchWord newSearchWord = new SearchWord(
+              searchWord.getKeyword(), searchWord.getCount(), searchWord.getLastUpdateTime());
+      newKeywords.put(e.getKey(), newSearchWord);
+    }
+
+    // 从数据库中取出更新时间&gt;lastUpdateTime的数据，放入到newKeywords中
+    List&lt;SearchWord&gt; toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() &gt; maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (newKeywords.containsKey(searchWord.getKeyword())) {
+        SearchWord oldSearchWord = newKeywords.get(searchWord.getKeyword());
+        oldSearchWord.setCount(searchWord.getCount());
+        oldSearchWord.setLastUpdateTime(searchWord.getLastUpdateTime());
+      } else {
+        newKeywords.put(searchWord.getKeyword(), searchWord);
+      }
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+    currentKeywords = newKeywords;
+  }
+
+  private List&lt;SearchWord&gt; getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间&gt;lastUpdateTime的数据
+    return null;
+  }
+
+}
+</code></pre>
+<p>第二种方法：先将对象序列化，然后再反序列化成新的对象。具体的示例代码如下所示：</p>
+<pre><code class="lang-JAVA">public Object deepCopy(Object object) {
+  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+  ObjectOutputStream oo = new ObjectOutputStream(bo);
+  oo.writeObject(object);
+
+  ByteArrayInputStream bi = new ByteArrayInputStream(bo.toByteArray());
+  ObjectInputStream oi = new ObjectInputStream(bi);
+
+  return oi.readObject();
+}
+</code></pre>
+<p>这两种实现方法，不管采用哪种，深拷贝都要比浅拷贝耗时、耗内存空间。针对我们这个应用场景，有没有更快、更省内存的实现方式呢？</p>
+<p>我们可以先采用浅拷贝的方式创建 newKeywords。对于需要更新的 SearchWord 对象，我们再使用深度拷贝的方式创建一份新的对象，替换 newKeywords 中的老对象，毕竟需要更新的数据是很少的。这种方式既利用了浅拷贝节省时间、空间的优点，又能保证 currentKeywords 中的中数据都是老版本的数据。</p>
+<pre><code class="lang-JAVA">public class Demo {
+  private HashMap&lt;String, SearchWord&gt; currentKeywords=new HashMap&lt;&gt;();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // Shallow copy
+    HashMap&lt;String, SearchWord&gt; newKeywords = (HashMap&lt;String, SearchWord&gt;) currentKeywords.clone();
+
+    // 从数据库中取出更新时间&gt;lastUpdateTime的数据，放入到newKeywords中
+    List&lt;SearchWord&gt; toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() &gt; maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (newKeywords.containsKey(searchWord.getKeyword())) {
+        newKeywords.remove(searchWord.getKeyword());
+      }
+      newKeywords.put(searchWord.getKeyword(), searchWord);
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+    currentKeywords = newKeywords;
+  }
+
+  private List&lt;SearchWord&gt; getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间&gt;lastUpdateTime的数据
+    return null;
+  }
+}
+</code></pre>
+<h2 id="-">三、示例</h2>
+<p>实际项目中，我们一般采用CGLIB提供的工具类进行Bean的拷贝。首先，引入CGLIB的POM依赖：</p>
+<pre><code class="lang-XML">&lt;!-- cglib的BeanCopier需要的依赖 --&gt;
+&lt;dependency&gt;  
+    &lt;groupId&gt;asm&lt;/groupId&gt;  
+    &lt;artifactId&gt;asm&lt;/artifactId&gt;  
+    &lt;version&gt;3.3.1&lt;/version&gt;  
+&lt;/dependency&gt;  
+&lt;dependency&gt;  
+    &lt;groupId&gt;asm&lt;/groupId&gt;  
+    &lt;artifactId&gt;asm-commons&lt;/artifactId&gt;  
+    &lt;version&gt;3.3.1&lt;/version&gt;  
+&lt;/dependency&gt;  
+&lt;dependency&gt;  
+    &lt;groupId&gt;asm&lt;/groupId&gt;  
+    &lt;artifactId&gt;asm-util&lt;/artifactId&gt;  
+    &lt;version&gt;3.3.1&lt;/version&gt;  
+&lt;/dependency&gt;  
+&lt;dependency&gt;  
+    &lt;groupId&gt;cglib&lt;/groupId&gt;  
+    &lt;artifactId&gt;cglib-nodep&lt;/artifactId&gt;  
+    &lt;version&gt;2.2.2&lt;/version&gt;  
+&lt;/dependency&gt;
+</code></pre>
+<p>然后写一个工具类：</p>
+<pre><code class="lang-JAVA">/**
+ * BeanCopier工具类
+ */
+public class BeanCopierUtils {  
+
+    /**
+     * BeanCopier缓存
+     */
+    public static Map&lt;String, BeanCopier&gt; beanCopierCacheMap = new HashMap&lt;String, BeanCopier&gt;();  
+
+    /**
+     * 将source对象的属性拷贝到target对象中去
+     * @param source source对象
+     * @param target target对象
+     */
+    public static void copyProperties(Object source, Object target){  
+        String cacheKey = source.getClass().toString() + 
+                target.getClass().toString();  
+
+        BeanCopier beanCopier = null;  
+
+        if (!beanCopierCacheMap.containsKey(cacheKey)) {  
+            synchronized(BeanCopierUtils.class) {
+                 if (!beanCopierCacheMap.containsKey(cacheKey)) {  
+                     beanCopier = BeanCopier.create(source.getClass(), target.getClass(), false);  
+                     beanCopierCacheMap.put(cacheKey, beanCopier);  
+                 }
+            }
+        } else {  
+            beanCopier = beanCopierCacheMap.get(cacheKey);   
+        }  
+
+        beanCopier.copy(source, target, null);  
+    }  
+}
+</code></pre>
+<p>最后，我们可以实现对象的clone方法，在方法中利用该工具类实现拷贝：</p>
+<pre><code class="lang-JAVA">/**
+ * 克隆方法
+ * @param clazz 目标Class对象
+ * @return 克隆后的对象
+ */
+public &lt;T&gt; T clone(Class&lt;T&gt; clazz) {
+    T target = null;
+
+    try {
+        target = clazz.newInstance();
+    } catch (Exception e) {
+        logger.error("error", e);  
+    }
+
+    BeanCopierUtils.copyProperties(this, target); 
+
+    return target;
+}
+</code></pre>
+<h2 id="-">四、总结</h2>
+<p>原型模式可以节省创建类似对象的开销，有两种实现方法——深拷贝和浅拷贝。使用时，需要注意以下几点：</p>
+<ol>
+<li>如果要拷贝的对象是不可变对象，浅拷贝共享不可变对象是没问题的，但对于可变对象来说，浅拷贝得到的对象和原始对象会共享部分数据，就有可能出现数据被修改的风险；</li>
+<li>如果操作非常耗时，推荐使用浅拷贝，否则应当使用深拷贝。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

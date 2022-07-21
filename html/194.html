@@ -1,0 +1,86 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二三）——分布式框架之可扩展：Zookeeper分布式锁</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二三）——分布式框架之可扩展：Zookeeper分布式锁</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我在<a href="https://www.tpvlog.com/article/186">分布式框架之高性能：Redis分布式锁</a>一章中，介绍过Redis分布式锁。事实上，生产环境中，Zookeeper分布式锁更加成熟，在工业运用中也更多。</p>
+<p>本章，我将基于比较常用的Curator开源框架，来聊一聊Curator对ZooKeeper（以下简称ZK）分布式锁的实现。</p>
+<blockquote>
+<p>Curator可以看成是Zookeeper Client，类似于Jedis、Redisson之于Redis，读者可以从这里获取到Curator这个ZK客户端的更多资料：<a href="http://curator.apache.org">http://curator.apache.org</a> 。</p>
+</blockquote>
+<h2 id="-">一、基本原理</h2>
+<p>首先大家看看下面的图，如果现在有两个客户端要一起争抢ZK上的一把分布式锁，会是个什么场景？</p>
+<center><br/> <img src="./img/20200329004227591.png" style="zoom:60%"><br/></img></center>
+<p>上图中，ZK里有一把锁“my_lock”，这个锁其实就是ZK的一个znode。然后两个客户端都要来获取这个锁，具体是怎么来获取呢？</p>
+<h3 id="1-1-">1.1 创建临时顺序节点</h3>
+<p>我们假设客户端A抢先一步，对ZK发起了加分布式锁的请求，这个加锁请求其实就是在"my_lock"这个znode下，创建一个<strong>临时顺序节点</strong>，这个顺序节点有ZK内部自行维护的一个节点序号。</p>
+<p>比如说，第一个客户端来创建一个顺序节点，zk内部会给它起个名字叫做：xxx-000001。然后第二个客户端来搞创建一个同名节点，ZK会起另一个名字叫做：xxx-000002。大家注意一下，<strong>最后一个数字都是依次递增的</strong>，从1开始逐次递增，ZK会维护这个顺序。</p>
+<p>大家看下面的图，Curator框架大概会弄成如下的样子：</p>
+<center><br/> <img src="./img/20200329004236374.png" style="zoom:60%"/><br/></center>
+<p>也就是说，客户端A发起一个加锁请求，则会在要加锁的node下搞一个临时顺序节点，这一大坨长长的名字都是Curator框架自己生成出来的。注意一下，因为客户端A是第一个发起请求的，所以顺序节点的序号是"1"。</p>
+<p>客户端A创建完一个顺序节点后，他会查一下"my_lock"这个znode下的所有子节点，他大概会拿到这么一个集合：</p>
+<pre><code class="lang-JAVA">[
+    "_c_0abad917-53a6-ab12-872a-bfac2d12a20a-lock-0000000001"
+]
+</code></pre>
+<p>然后，客户端A判断自己创建的那个顺序节点是不是排在第一个的，如果是就加锁成功了：</p>
+<center><br/> <img src="./img/20200329004244028.png" style="zoom:80%"/><br/></center>
+<h3 id="1-2-">1.2 创建监听器</h3>
+<p>接着，客户端B过来想要加锁，这个时候他也会干一样的事儿：在"my_lock"这个znode下创建一个临时顺序节点：</p>
+<center><br/> <img src="./img/20200329004251447.png" style="zoom:80%"/><br/></center>
+<p>因为客户端B是第二个创建临时顺序节点的，所以ZK内部会维护序号为"2"。接着客户端B同样会走加锁判断逻辑，查询"my_lock"这个znode下的所有子节点，按序号顺序排列，此时他看到的类似于：</p>
+<pre><code class="lang-JAVA">[
+   "_c_0abad917-53a6-ab12-872a-bfac2d12a20a-lock-0000000001",
+   "_c_0abad917-18a6-ab12-872a-dac2d12a201a-lock-0000000002"
+]
+</code></pre>
+<p>客户端B还想自己创建的顺序节点不是第一个，所以加锁失败！加锁失败以后，客户端B就会通过ZK的API，<strong>对他的上一个顺序节点加一个监听器</strong>，监听这个节点是否被删除等变化。</p>
+<p>说了那么多，老规矩，给大家来一张图，直观的感受一下：</p>
+<center><br/> <img src="./img/20200329004259259.png" style="zoom:80%"/><br/></center>
+<h3 id="1-3-">1.3 删除临时顺序节点</h3>
+<p>接着，客户端A加锁成功之后，处理自身的业务逻辑，处理完后就会释放锁。释放锁其实就是把自己在ZK里创建的那个顺序节点给删除掉。删除了这个节点之后，ZK会负责通知监听该节点的监听器，也就是客户端B之前加的那个监听器：</p>
+<center><br/> <img src="./img/20200329004307150.png" style="zoom:80%"/><br/></center>
+<p>此时，客户端B的监听器感知到了上一个顺序节点被删除，就会通知客户端B重新尝试去获取锁。客户端B一判断，发现自己居然是集合中的第一个顺序节点，然后就可以加锁了。加锁成功后，执行自身业务逻辑，然后释放锁：</p>
+<center><br/> <img src="./img/20200329004314663.png" style="zoom:80%"/><br/></center>
+<hr/>
+<p>如果有客户端C、客户端D等N个客户端争抢一个ZK分布式锁，原理都是类似的。大家都是上来直接在某个znode下的一个接一个得创建临时顺序节点：</p>
+<ul>
+<li>如果自己不是第一个节点，就对自己上一个节点加监听器；</li>
+<li>只要上一个节点释放锁，自己就排到前面去了，相当于是一个排队机制。</li>
+</ul>
+<p>而且用临时顺序节点的另外一个用意是：如果某个客户端创建临时顺序节点之后，自己宕机了也没关系，因为ZK感知到那个客户端宕机后，会自动删除对应的临时顺序节点，相当于自动释放了锁。</p>
+<p>了解了Zookeeper分布式锁的基本原理，咱们来看下用Curator框架进行加锁和释放锁的一个过程：</p>
+<pre><code class="lang-JAVA">// 定义锁节点名称
+InterProcessMutex lock = InterProcessMutex(client, "/locks/my_lock");
+
+// 加锁
+lock.acquire();
+
+// 业务逻辑代码...
+
+// 释放锁
+lock.release();
+</code></pre>
+<h2 id="-">二、重复加锁问题</h2>
+<p>当使用Zookeeper来实现分布式锁时，如果网络发生分区，可能会出现“脑裂问题”。</p>
+<p>比如，客户端A加锁成功后，如果客户端A和Zookeeper之间网络断开，Zookeeper未收到客户端A的心跳，可能认为客户端A挂了，就会释放锁。此时，之前等待的客户端B就会获取到锁，导致客户端B和客户端A都认为自己获取到了同一把锁，就会出现问题。</p>
+<p>解决该问题的一个基本思路就是，Zookeeper在创建“锁”时保存对应客户端的标识，这样客户端A如果挂了，客户端B尝试来获取锁时，Zookeeper就会判断客户端A的锁还没释放，就会拒绝客户端B获取锁。</p>
+<h2 id="-">三、优缺点</h2>
+<p>我们来比较下Zookeeper分布式锁和Redis分布式锁。</p>
+<h3 id="3-1-">3.1 优点</h3>
+<p>Zookeeper分布式锁，如果客户端获取不到锁，注册个监听器即可，不需要不断主动尝试获取锁，性能开销较小；而Redis分布式锁，其实需要自己不断去尝试获取锁，比较消耗性能。</p>
+<p>另外一点，Zookeeper创建的是临时znode，只要客户端挂了，znode就没了，此时就自动释放锁；而Redis获取锁的那个客户端如果挂了，那么只能等待超时时间之后才能释放锁。</p>
+<p>最后，从分布式系统的协调语义来看，ZooKeeper做分布式锁更好一些，因为Redis本身其实是缓存。</p>
+<h3 id="3-2-">3.2 缺点</h3>
+<p>Zookeeper本身不适合大规模集群部署，其适用场景就是部署三五台机器，不是承载高并发请求的，仅仅是用作分布式系统的协调工作；而Redis本身其实是缓存，能抗高并发，在高并发场景下性能更好一些。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我介绍了Zookeeper分布式锁的基本原理，并拿它和Redis分布式锁进行了比较。一般来讲，绝大多数的公司其实很少有超高并发的业务场景，那么ZooKeeper分布式锁基本都能满足需求。对于一些大型公司的核心业务，一般也会针对实际的业务场景，对ZK分布式锁或Redis分布式锁进行定制改造，以满足自身业务需求。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,148 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（四六）—— J.U.C之补遗：ThreadLocalRandom</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（四六）—— J.U.C之补遗：ThreadLocalRandom</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-threadlocalrandom-">一、ThreadLocalRandom简介</h2>
+<p><code>ThreadLocalRandom</code>是在JDK1.7之后引入的一个类，为<code>Random</code>的一个子类，在多线程环境中相较于<code>Random</code>来说它会有更小的开销和争用。</p>
+<blockquote>
+<p>When applicable, use of <code>ThreadLocalRandom</code> rather than shared <code>Random</code> objects in concurrent programs will typically encounter much less overhead and contention.</p>
+</blockquote>
+<h2 id="-threadlocalrandom-">二、ThreadLocalRandom的原理</h2>
+<h3 id="random-">Random的介绍</h3>
+<p><code>Random</code>的部分定义如下：</p>
+<pre><code class="lang-java">public class Random implements java.io.Serializable {
+    private final AtomicLong seed;
+
+    protected int next(int bits) {
+        long oldseed, nextseed;
+        AtomicLong seed = this.seed;
+        do {
+            oldseed = seed.get();
+            nextseed = (oldseed * multiplier + addend) &amp; mask;
+        } while (!seed.compareAndSet(oldseed, nextseed)); // 若CAS置新值失败则继续循环
+        return (int)(nextseed &gt;&gt;&gt; (48 - bits));
+    }  
+    ...
+}
+</code></pre>
+<p>每一次生成随机数的时候，都会进行CAS操作重置seed，在多个线程使用同一个<code>Random</code>对象时若遇到冲突就会导致线程频繁进行自旋，性能因此受到影响。而为了解决这个问题可以考虑不同的线程有不同的seed，<code>ThreadLocalRandom</code>籍此而生。</p>
+<h3 id="threadlocalrandom-">ThreadLocalRandom代码剖析</h3>
+<p><code>ThreadLocalRandom</code>在解决<code>Random</code>问题的思路上主要是<strong>不同的线程使用不同的seed，再根据旧seed生成新seed，线程间seed互不影响</strong>，顺着这个思路，JDK团队对在1.7和1.8用了不同的方式来实现同样的目的。以JDK1.8为例，<code>Thread</code>类里面添加了和<code>Random</code>相关的字段：</p>
+<pre><code class="lang-java">public class Thread implements Runnable {
+
+    /**
+    * ThreadLocalRandom的当前seed 
+    */
+    @sun.misc.Contended("tlr")   // @sun.misc.Contended为了避免伪共享
+    long threadLocalRandomSeed;
+
+    /** 
+    * Probe hash 值; 如果初始化了则为非0
+    */
+    @sun.misc.Contended("tlr")
+    int threadLocalRandomProbe;
+
+    /** 
+    * 从ThreadLocalRandom公共序列里面分离出来的辅助seed
+    */
+    @sun.misc.Contended("tlr")
+    int threadLocalRandomSecondarySeed;
+}
+</code></pre>
+<p>下面的代码让<code>ThreadLocalRandom</code>和上面的<code>Thread</code>属性关联起来：</p>
+<pre><code class="lang-java">public class ThreadLocalRandom extends Random {
+    private static final sun.misc.Unsafe UNSAFE;
+    private static final long SEED;
+    private static final long PROBE;
+    private static final long SECONDARY;
+    static {
+        try {
+            UNSAFE = sun.misc.Unsafe.getUnsafe();
+            Class&lt;?&gt; tk = Thread.class;
+            SEED = UNSAFE.objectFieldOffset
+                (tk.getDeclaredField("threadLocalRandomSeed"));
+            PROBE = UNSAFE.objectFieldOffset
+                (tk.getDeclaredField("threadLocalRandomProbe"));
+            SECONDARY = UNSAFE.objectFieldOffset
+                (tk.getDeclaredField("threadLocalRandomSecondarySeed"));
+        } catch (Exception e) {
+            throw new Error(e);
+        }
+    }  
+}
+</code></pre>
+<p>继续拜读<code>ThreadLocalRandom</code>的代码定义：</p>
+<pre><code class="lang-java">public class ThreadLocalRandom extends Random {
+    /**
+    * 定义为私有，让外部无法直接调用构造方法初始化对象
+    */
+    private ThreadLocalRandom() {
+        initialized = true; 
+    }
+
+    static final void localInit() {
+        int p = probeGenerator.addAndGet(PROBE_INCREMENT);
+        int probe = (p == 0) ? 1 : p; // skip 0
+        long seed = mix64(seeder.getAndAdd(SEEDER_INCREMENT));
+        Thread t = Thread.currentThread();
+        UNSAFE.putLong(t, SEED, seed);
+        UNSAFE.putInt(t, PROBE, probe);
+    }
+
+    /**
+    * 定义为static final类型，所有使用ThreadLocalRandom.current()方法的时候得到的是同一个对象
+    */
+    static final ThreadLocalRandom instance = new ThreadLocalRandom();
+    public static ThreadLocalRandom current() {
+        if (UNSAFE.getInt(Thread.currentThread(), PROBE) == 0)
+            localInit();
+        return instance;
+    }
+
+    private static final AtomicLong seeder = new AtomicLong(initialSeed());
+        /**
+        * 设置初始的seed
+        */
+    private static long initialSeed() {
+        String sec = VM.getSavedProperty("java.util.secureRandomSeed"); // 可以通过设置参数来让初始的seed不被预测
+        if (Boolean.parseBoolean(sec)) {
+            byte[] seedBytes = java.security.SecureRandom.getSeed(8);
+            long s = (long)(seedBytes[0]) &amp; 0xffL;
+            for (int i = 1; i &lt; 8; ++i)
+                s = (s &lt;&lt; 8) | ((long)(seedBytes[i]) &amp; 0xffL);
+            return s;
+        }
+        return (mix64(System.currentTimeMillis()) ^
+                mix64(System.nanoTime()));
+    }
+
+    ...
+}
+</code></pre>
+<p>从代码定义中我们看到，seed已经不再是<code>AtomicLong</code>类型，而直接是在<code>Thread</code>里面定义的long型，再不用担心不同线程在seed上进行CAS操作了。</p>
+<p><code>ThreadLocalRandom</code>的<code>current</code>方法在开始时判断当前线程是否已经被初始化过，如果没有，则进行seed值的初始化，同时probe也会被置为非0值，之后同一线程再次调用<code>ThreadLocalRandom.current()</code>时发现probe非0则直接返回instance，而其他线程初次进入的时候，线程的probe仍然是0，则继续初始化。</p>
+<pre><code class="lang-java">public int nextInt() {
+    return mix32(nextSeed());
+}
+
+final long nextSeed() {
+    Thread t; long r; // 读取并更新每个线程的seed
+    UNSAFE.putLong(t = Thread.currentThread(), SEED,
+                   r = UNSAFE.getLong(t, SEED) + GAMMA);
+    return r;
+}
+</code></pre>
+<p>通过<code>nextInt</code>的代码我们可以看到，每次执行获取随机数时，都是对本线程的数据进行操作，所以线程间的seed互不影响，自然没有<code>Random</code>中存在的问题。</p>
+<h2 id="-">三、总结</h2>
+<p><code>ThreadLocalRandom</code>通过巧妙的设计，将最初<code>Random</code>共享而影响性能的seed挪到了<code>Thread</code>本身，让各个<code>Thread</code>有独立的seed来进行随机数的处理，避免了多线程对同一<code>Random</code>实例的争用。</p>
+<p>在<code>Random</code>的设计中，其seed可以是被指定的，而在此类中计算随机数的算法是固定的，在具有同等seed的情况下生成的随机序列是确定且一致的，因此<code>ThreadLocalRandom</code>不支持<code>setSeed</code>方法，且不允许通过其他方式设置seed，尽量避免随机数序列一样的情况，不过因为<code>ThreadLocalRandom</code>仍然是伪随机数生成器，即使指定了初始seed是<code>java.util.secureRandomSeed</code>，若要使用更严格的随机数，请使用<code>SecureRandom</code>，但是要面对性能损失。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

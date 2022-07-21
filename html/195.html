@@ -1,0 +1,102 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二四）——分布式框架之可扩展：分布式Session</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二四）——分布式框架之可扩展：分布式Session</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Session是一种服务端的机制，使用一种类似于散列表的结构来保存客户端的会话信息。</p>
+<p>当程序需要为某个客户端的请求创建一个session时，服务器首先检查这个客户端的请求里是否已包含了一个session标识（称为session id），如果已包含则说明以前已经为此客户端创建过session，服务器就按照session id把这个session检索出来使用；如果客户端请求不包含session id，则为此客户端创建一个session并生成一个相关联的session id，这个session id将被在本次响应中返回给客户端保存。</p>
+<p>传统的单体应用，一般会采用web容器提供的seesion机制。但是分布式环境下，对于同一个客户端的请求，可能会分配到不同的机器上，所以需要一种机制来同步客户端的会话信息，这就是分布式session。</p>
+<h2 id="-">一、实现方案</h2>
+<p>实现分布式session最简单的方式就是使用Redis，当某台机器为客户端创建了session后，就将session保存的redis中；然后下一次请求查询session时，直接从redis里查询，如下图：</p>
+<center><br/> <img src="./img/20200330132312757.png" style="zoom:60%"><br/></img></center>
+<p>接下来，我们来看下两种实现分布式session的常用方案：Tomcat+Redis、SpringSession+Redis。</p>
+<h3 id="1-1-tomcat-redis">1.1 Tomcat + Redis</h3>
+<p>这个方案还是基于tomcat原生的session支持，然后通过Tomcat RedisSessionManager这个东西，让所有我们部署的tomcat都将session数据存储到redis即可。</p>
+<p>在tomcat的配置文件中，配置一下：</p>
+<pre><code class="lang-XML">&lt;Valve className="com.orangefunction.tomcat.redissessions.RedisSessionHandlerValve" /&gt;
+
+&lt;Manager className="com.orangefunction.tomcat.redissessions.RedisSessionManager"
+host="{redis.host}" port="{redis.port}" database="{redis.dbnum}" maxInactiveInterval="60"/&gt;
+</code></pre>
+<p>如果Redis是哨兵部署的，也可以用下面这种方式：</p>
+<pre><code class="lang-XML">&lt;Valve className="com.orangefunction.tomcat.redissessions.RedisSessionHandlerValve" /&gt;
+
+&lt;Manager className="com.orangefunction.tomcat.redissessions.RedisSessionManager"
+sentinelMaster="mymaster"  sentinels="&lt;sentinel1-ip&gt;:26379,&lt;sentinel2-ip&gt;:26379,&lt;sentinel3-ip&gt;:26379" maxInactiveInterval="60"/&gt;
+</code></pre>
+<p>这种方式的优点是tomcat原生支持，配置起来也很方便。缺点是应用与web容器紧耦合，如果我们要将web容器迁移成Jetty，难道重新把Jetty都配置一遍吗？所以，这种方案其实就是一些老的应用在用，新应用不建议采用。</p>
+<h3 id="1-2-spring-session-redis">1.2 Spring Session+ Redis</h3>
+<p>目前比较主流的方案是采用Spring Session，与Spring Cloud全家桶天然无缝衔接。</p>
+<p>首先，我们为应用引入pom依赖：</p>
+<pre><code class="lang-xml">&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.session&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-session-data-redis&lt;/artifactId&gt;
+  &lt;version&gt;1.2.1.RELEASE&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;redis.clients&lt;/groupId&gt;
+  &lt;artifactId&gt;jedis&lt;/artifactId&gt;
+  &lt;version&gt;2.8.1&lt;/version&gt;
+&lt;/dependency&gt;
+</code></pre>
+<p>然后配置Jedis：</p>
+<pre><code class="lang-xml">&lt;bean id="redisHttpSessionConfiguration" class="org.springframework.session.data.redis.config.annotation.web.http.RedisHttpSessionConfiguration"&gt;
+    &lt;property name="maxInactiveIntervalInSeconds" value="600"/&gt;
+&lt;/bean&gt;
+
+&lt;bean id="jedisPoolConfig" class="redis.clients.jedis.JedisPoolConfig"&gt;
+    &lt;property name="maxTotal" value="100" /&gt;
+    &lt;property name="maxIdle" value="10" /&gt;
+&lt;/bean&gt;
+
+&lt;bean id="jedisConnectionFactory"
+      class="org.springframework.data.redis.connection.jedis.JedisConnectionFactory" destroy-method="destroy"&gt;
+    &lt;property name="hostName" value="${redis_hostname}"/&gt;
+    &lt;property name="port" value="${redis_port}"/&gt;
+    &lt;property name="password" value="${redis_pwd}" /&gt;
+    &lt;property name="timeout" value="3000"/&gt;
+    &lt;property name="usePool" value="true"/&gt;
+    &lt;property name="poolConfig" ref="jedisPoolConfig"/&gt;
+&lt;/bean&gt;
+</code></pre>
+<p>最后是<code>web.xml</code>配置：</p>
+<pre><code class="lang-XML">&lt;filter&gt;
+    &lt;filter-name&gt;springSessionRepositoryFilter&lt;/filter-name&gt;
+    &lt;filter-class&gt;org.springframework.web.filter.DelegatingFilterProxy&lt;/filter-class&gt;
+&lt;/filter&gt;
+&lt;filter-mapping&gt;
+    &lt;filter-name&gt;springSessionRepositoryFilter&lt;/filter-name&gt;
+    &lt;url-pattern&gt;/*&lt;/url-pattern&gt;
+&lt;/filter-mapping&gt;
+</code></pre>
+<p>我们可以按照下面这种方式使用Spring session：</p>
+<pre><code class="lang-JAVA">@Controller
+@RequestMapping("/test")
+public class TestController {
+
+    @RequestMapping("/putIntoSession")
+    @ResponseBody
+    public String putIntoSession(HttpServletRequest request, String username){
+        request.getSession().setAttribute("name",  “leo”);
+        return "ok";
+    }
+
+    @RequestMapping("/getFromSession")
+    @ResponseBody
+    public String getFromSession(HttpServletRequest request, Model model){
+        String name = request.getSession().getAttribute("name");
+        return name;
+    }
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我讲解了分布式Session的基本原理，这块内容其实没什么特别好说的，读者只要关注为什么需要分布式session，以及常见的几种解决方案就行了。Spring Session的官方文档非常简洁易懂，用起来也很方便： <a href="https://spring.io/projects/spring-session">https://spring.io/projects/spring-session</a>  。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

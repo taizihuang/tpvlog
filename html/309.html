@@ -1,0 +1,176 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（二十）——Broker：日志子系统——LogSegment</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（二十）——Broker：日志子系统——LogSegment</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来看下LogSegment的源码，LogSegment就是对<strong>日志段</strong>的抽象：</p>
+<pre><code class="lang-java">class LogSegment(val log: FileRecords,
+                 val index: OffsetIndex,
+                 val timeIndex: TimeIndex,
+                 val baseOffset: Long,
+                 val indexIntervalBytes: Int,
+                 val rollJitterMs: Long,
+                 time: Time) extends Logging {
+}
+</code></pre>
+<p>可以看到，LogSegment类的声明包含了以下信息：</p>
+<ul>
+<li><strong>FileRecords：</strong>实际保存 Kafka 消息的对象；</li>
+<li><strong>OffsetIndex：</strong>位移索引；</li>
+<li><strong>TimeIndex：</strong>时间戳索引；</li>
+<li><strong>baseOffset：</strong>初始偏移量，在磁盘上看到的日志段文件名就是 baseOffset 的值</li>
+<li><strong>indexIntervalBytes：</strong>Broker 端参数 <code>log.index.interval.bytes</code> 值，控制了日志段对象新增索引项的频率，默认情况下，日志段至少新写入 4KB 的消息数据才会新增一条索引项；</li>
+<li><strong>rollJitterMs</strong>：日志段新增时的一个“扰动时间值”。Broker 可能会同时创建多个日志段文件，会增加磁盘 I/O 压力，有了 rollJitterMs 值的干扰，每个日志段文件在创建时会彼此岔开一小段时间，从而缓解磁盘的 I/O 负载瓶颈。</li>
+</ul>
+<h2 id="-">一、核心方法</h2>
+<p>我们再来看下LogSegment的核心方法，在<a href="https://www.tpvlog.com/article/307">《Broker：日志子系统——整体架构》</a>中，我介绍过Broker端写日志的整体流程，其中就涉及<code>LogSegment.append()</code>方法写日志。LogSegment的核心方法一共有3个，我用下面这张图表示：</p>
+<center><br/> <img src="./img/20210616220556039.png" style="zoom:68%"><br/></img></center>
+<h3 id="1-1-append-">1.1 append写消息</h3>
+<p>我们先来看最重要的append方法，它接收 5 个参数：</p>
+<ul>
+<li>firstOffset：首位移值；</li>
+<li>largestOffset：最大位移值；</li>
+<li>largestTimestamp：最大时间戳；</li>
+<li>shallowOffsetOfMaxTimestamp：最大时间戳对应消息的位移；</li>
+<li>records：真正要写入的消息集合。</li>
+</ul>
+<pre><code class="lang-java">// LogSegment.scala
+
+def append(firstOffset: Long, largestOffset: Long, largestTimestamp: Long, 
+           shallowOffsetOfMaxTimestamp: Long, records: MemoryRecords) {
+  if (records.sizeInBytes &gt; 0) {
+    val physicalPosition = log.sizeInBytes()
+    // 1.日志段大小为0，即为空，则记录要写入消息集合的最大时间戳，并将其作为后面新增日志段倒计时的依据
+    if (physicalPosition == 0)
+      rollingBasedTimestamp = Some(largestTimestamp)
+    require(canConvertToRelativeOffset(largestOffset), "largest offset in message set can not be safely converted to relative offset.")
+    // 2.调用FileRecords.append方法执行真正的写入，将内存中的消息对象写入到操作系统的页缓存
+    val appendedBytes = log.append(records)
+
+    // 3.更新日志段的最大时间戳以及最大时间戳所属消息的位移值属性
+    if (largestTimestamp &gt; maxTimestampSoFar) {
+      maxTimestampSoFar = largestTimestamp
+      offsetOfMaxTimestamp = shallowOffsetOfMaxTimestamp
+    }
+    // 4.更新索引项和写入的字节数，日志段每写入4KB数据就要写入一个索引项
+    if(bytesSinceLastIndexEntry &gt; indexIntervalBytes) {
+      index.append(firstOffset, physicalPosition)
+      timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestamp)
+      bytesSinceLastIndexEntry = 0
+    }
+    bytesSinceLastIndexEntry += records.sizeInBytes
+  }
+}
+</code></pre>
+<p>下面这张图展示了 上述append 方法的完整执行流程：</p>
+<center><br/> <img src="./img/20210616220609261.png" style="zoom:50%"/><br/></center>
+<h3 id="1-2-read-">1.2 read读消息</h3>
+<p>LogSegment的read方法用来读消息，方法接收 4 个输入参数：</p>
+<ul>
+<li>startOffset：要读取的第一条消息的位移；</li>
+<li>maxSize：能读取的最大字节数；</li>
+<li>maxPosition ：能读到的最大文件位置；</li>
+<li>minOneMessage：是否允许在消息体过大时至少返回第一条消息。</li>
+</ul>
+<p>注意下第 4 个参数，当这个参数为 true 时，即使出现消息体字节数超过了 maxSize 的情形，read 方法依然会返回至少一条消息，这样可以确保不出现Consumer饥饿的情况：</p>
+<pre><code class="lang-java">// LogSegment.scala
+
+def read(startOffset: Long, maxOffset: Option[Long], maxSize: Int, maxPosition: Long = size,
+         minOneMessage: Boolean = false): FetchDataInfo = {
+  if (maxSize &lt; 0)
+    throw new IllegalArgumentException("Invalid max size for log read (%d)".format(maxSize))
+
+  // 1.定位要读取的起始文件位置, startOffset仅仅是位移值，Kafka 需要根据索引信息找到对应的物理文件位置才能开始读取消息
+  val logSize = log.sizeInBytes // this may change, need to save a consistent copy
+  val startOffsetAndSize = translateOffset(startOffset)
+
+  if (startOffsetAndSize == null)
+    return null
+
+  val startPosition = startOffsetAndSize.position.toInt
+  val offsetMetadata = new LogOffsetMetadata(startOffset, this.baseOffset, startPosition)
+
+  val adjustedMaxSize =
+    if (minOneMessage) math.max(maxSize, startOffsetAndSize.size)
+    else maxSize
+
+  // return a log segment but with zero size in the case below
+  if (adjustedMaxSize == 0)
+    return FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY)
+
+  // 2.计算要读取的总字节数
+  val length = maxOffset match {
+    case None =&gt;
+      min((maxPosition - startPosition).toInt, adjustedMaxSize)
+    case Some(offset) =&gt;
+      if (offset &lt; startOffset)
+        return FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY, firstEntryIncomplete = false)
+      val mapping = translateOffset(offset, startPosition)
+      val endPosition =
+        if (mapping == null)
+          logSize // the max offset is off the end of the log, use the end of the file
+        else
+          mapping.position
+      min(min(maxPosition, endPosition) - startPosition, adjustedMaxSize).toInt
+  }
+  // 3.从指定位置读取指定大小的消息集合
+  FetchDataInfo(offsetMetadata, log.read(startPosition, length),
+    firstEntryIncomplete = adjustedMaxSize &lt; startOffsetAndSize.size)
+}
+</code></pre>
+<h3 id="1-3-recover-">1.3 recover恢复日志段</h3>
+<p>最后来看LogSegment的recover方法，这方法用于<strong>恢复日志段</strong>。Broker在启动时会从磁盘上加载所有日志段文件的信息到内存中，并创建对应的 LogSegment 对象，这个过程就是<strong><em>recover</em></strong>：</p>
+<pre><code class="lang-java">// LogSegment.scala
+
+def recover(maxMessageSize: Int): Int = {
+  // 1.清空所有的索引文件
+  index.truncate()
+  index.resize(index.maxIndexSize)
+  timeIndex.truncate()
+  timeIndex.resize(timeIndex.maxIndexSize)
+  var validBytes = 0
+  var lastIndexEntry = 0
+  maxTimestampSoFar = Record.NO_TIMESTAMP
+  try {
+    // 2.遍历日志段中的所有消息集合
+    for (entry &lt;- log.shallowEntries(maxMessageSize).asScala) {
+      val record = entry.record
+      record.ensureValid()
+      if (record.timestamp &gt; maxTimestampSoFar) {
+        maxTimestampSoFar = record.timestamp
+        offsetOfMaxTimestamp = entry.offset
+      }
+
+      // Build offset index
+      if(validBytes - lastIndexEntry &gt; indexIntervalBytes) {
+        val startOffset = entry.firstOffset
+        index.append(startOffset, validBytes)
+        timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestamp)
+        lastIndexEntry = validBytes
+      }
+      validBytes += entry.sizeInBytes()
+    }
+  } catch {
+    case e: CorruptRecordException =&gt;
+      logger.warn("Found invalid messages in log segment %s at byte offset %d: %s."
+        .format(log.file.getAbsolutePath, validBytes, e.getMessage))
+  }
+  val truncated = log.sizeInBytes - validBytes
+  log.truncateTo(validBytes)
+  index.trimToValidSize()
+  timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestamp, skipFullCheck = true)
+  timeIndex.trimToValidSize()
+  truncated
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我对LogSegment这个分段日志对象进行了讲解，我们需要重点关注它的append方法，也就是写日志的方法。LogSegment会判断每写入4KB消息，就写入一个稀疏索引。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

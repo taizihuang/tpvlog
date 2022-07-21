@@ -1,0 +1,298 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（二一）——聚合分析：近似算法</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（二一）——聚合分析：近似算法</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来介绍下聚合分析底层用到的算法：<strong>近似算法</strong>。</p>
+<p><strong><em>什么是近似算法？</em></strong></p>
+<p>一般来讲，有些聚合分析的metric操作，是很容易在多个shard中并行执行的，比如<code>max</code>、<code>min</code>、<code>avg</code>这种，coordinate node拿到各个shard的返回结果后，只需要经过简单计算就能得出最终结果：</p>
+<ol>
+<li>coordinate node把请求广播到所有shard；</li>
+<li>每个分片计算本地最大的字段值，返回给coordinate node；</li>
+<li>coordinate node选出所有shard返回的最大值，这就是最终的最大值。</li>
+</ol>
+<p>上面这类算法可以随着机器数的线性增长而横向扩展，无须任何协调操作（机器之间不需要讨论中间结果），而且内存消耗很小（一个整型就能代表最大值）。 </p>
+<p>但是还有些算法，是很难并行执行的，比如说<code>count(distinct)</code>，并不是说在每个shard上直接过滤出distinct value就可以了，因为coordinate node需要拿到各个shard返回的结果，在内存中进行筛选操作，如果数据量非常大，这个过程非常耗时。</p>
+<p>所以，Elasticsearch为了提升性能，采用了近似算法，它们会提供准确但不是 100% 精确的结果， 以牺牲一点小小的估算错误为代价，这些算法可以为我们换来高速的执行效率和极小的内存消耗。 </p>
+<h2 id="-">一、近似算法</h2>
+<h3 id="1-1-">1.1 基本思想</h3>
+<p>近似算法的基本思想就是在<strong><em>大数据</em></strong>、<strong><em>精确性</em></strong>和<strong><em>实时性</em></strong>这三者之间做出权衡，一般只能选择其中的2个，有点类似于CAP。 因为对于很多应用，能够实时返回高度准确的结果要比 100% 精确结果重要得多：</p>
+<p><strong>精确 + 实时</strong></p>
+<p>数据可以存入单台机器的内存之中，我们可以随心所欲，使用任何想用的算法。结果会 100% 精确，响应会相对快速。</p>
+<p><strong>大数据 + 精确</strong></p>
+<p>传统的 Hadoop，可以处理 PB 级的数据并且为我们提供精确的答案，但它可能需要几周的时间才能为我们提供这个答案。</p>
+<p><strong>大数据 + 实时</strong></p>
+<p>近似算法为我们实时提供准确但不精确的结果。</p>
+<center><br/><img src="./img/20200316200607673.png" style="zoom:65%"><br/></img></center>
+<p>Elasticsearch 目前支持两种近似算法（ <strong>cardinality</strong>和<strong>percentiles</strong>）。 它们会提供准确但不是 100% 精确的结果，以牺牲一点小小的估算错误为代价，这些算法可以为我们换来高速的执行效率和极小的内存消耗。 </p>
+<h2 id="-cardinality-">二、Cardinality算法</h2>
+<h3 id="2-1-">2.1 基本使用</h3>
+<p>Cardinality算法用于统计某个字段的不同值的个数，也就是去重统计。比如，我们需要统计每个月销售的不同品牌数量，那么可以像下面这样构造查询：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search
+{
+  "size" : 0,
+  "aggs" : {
+      "months" : {
+        "date_histogram": {
+          "field": "sold_date",
+          "interval": "month"
+        },
+        "aggs": {
+          "distinct_brand" : {
+              "cardinality" : {
+                "field" : "brand"
+              }
+          }
+        }
+      }
+  }
+}
+</code></pre>
+<h3 id="2-2-">2.2 算法优化</h3>
+<p>Cardinality算法的统计结果并不一定精确，但是速度非常快，我们还可以通过调整参数来进一步优化。</p>
+<h4 id="precision_threshold">precision_threshold</h4>
+<p><code>precision_threshold</code>可以控制Cardinality算法的精确度和内存消耗，它接受 0–40000 之间的数字，更大的值还是会被当作 40000 来处理。</p>
+<p>比如，<code>precision_threshold</code>设置为100，那么Elasticsearch会确保当字段唯一值在 100 以内时，会得到非常准确的结果，这个准确率几乎100%。但是，如果字段唯一值的数目高于<code>precision_threshold</code>，ES就会开始节省内存而牺牲准确度。</p>
+<blockquote>
+<p>根据Elasticsearch的官方统计，<code>precision_threshold</code>设置为100时，对于100万个不同的字段值，统计结果的误差可以维持在 5% 以内。 </p>
+</blockquote>
+<pre><code class="lang-JAVA">GET /tvs/_search
+{
+    "size" : 0,
+    "aggs" : {
+        "distinct_brand" : {
+            "cardinality" : {
+              "field" : "brand",
+              "precision_threshold" : 100 
+            }
+        }
+    }
+}
+</code></pre>
+<h4 id="hyperloglog">HyperLogLog</h4>
+<p>Cardinality算法的底层是基于HyperLogLog++算法（简称HLL）实现的，HLL算法会对所有unique value取hash值，通过hash值近似求distinct count。</p>
+<p>默认情况下，如果我们的请求里包含cardinality统计，ELasticsearch会实时对所有的field value取hash值。所以，一种优化思路就是在建立索引时，就将所有字段值的hash建立好。</p>
+<p>比如，我们对brand字段再内建一个字段——名为“hash”，它的类型是<code>murmur3</code>，是一种计算hash值的算法：</p>
+<pre><code class="lang-HAVA">PUT /tvs/
+{
+  "mappings": {
+    "sales": {
+      "properties": {
+        "brand": {
+          "type": "text",
+          "fields": {
+            "hash": {
+              "type": "murmur3" 
+            }
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>当我们需要统计字段的distinct value时，直接对内置字段进行cardinality统计即可：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search
+{
+    "size" : 0,
+    "aggs" : {
+        "distinct_brand" : {
+            "cardinality" : {
+              "field" : "brand.hash",
+              "precision_threshold" : 100 
+            }
+        }
+    }
+}
+</code></pre>
+<h2 id="-percentiles-">三、Percentiles算法</h2>
+<p>Percentiles算法可以按照百分比来统计某个字段的聚合信息。</p>
+<h3 id="3-1-">3.1 基本使用</h3>
+<p>比如，我们有一个网站，记录了每次请求的访问耗时，需要统计tp50、tp90、tp99，那么用percentiles实现就非常方便。</p>
+<blockquote>
+<p>tp50：50%的请求的最长耗时<br/>    tp90：90%的请求的最长耗时<br/>    tp99：99%的请求的最长耗时</p>
+</blockquote>
+<p>我们创建一个示例来进行演示：    </p>
+<pre><code class="lang-JAVA"># 创建索引
+PUT /website
+{
+    "mappings": {
+        "properties": {
+            "latency": {
+                "type": "long"
+            },
+            "province": {
+                "type": "keyword"
+            },
+            "timestamp": {
+                "type": "date"
+            }
+        }
+    }
+}
+
+# 录入数据
+POST /website/logs/_bulk
+{ "index": {}}
+{ "latency" : 105, "province" : "江苏", "timestamp" : "2016-10-28" }
+{ "index": {}}
+{ "latency" : 83, "province" : "江苏", "timestamp" : "2016-10-29" }
+{ "index": {}}
+{ "latency" : 92, "province" : "江苏", "timestamp" : "2016-10-29" }
+{ "index": {}}
+{ "latency" : 112, "province" : "江苏", "timestamp" : "2016-10-28" }
+{ "index": {}}
+{ "latency" : 68, "province" : "江苏", "timestamp" : "2016-10-28" }
+{ "index": {}}
+{ "latency" : 76, "province" : "江苏", "timestamp" : "2016-10-29" }
+{ "index": {}}
+{ "latency" : 101, "province" : "新疆", "timestamp" : "2016-10-28" }
+{ "index": {}}
+{ "latency" : 275, "province" : "新疆", "timestamp" : "2016-10-29" }
+{ "index": {}}
+{ "latency" : 166, "province" : "新疆", "timestamp" : "2016-10-29" }
+{ "index": {}}
+{ "latency" : 654, "province" : "新疆", "timestamp" : "2016-10-28" }
+{ "index": {}}
+{ "latency" : 389, "province" : "新疆", "timestamp" : "2016-10-28" }
+{ "index": {}}
+{ "latency" : 302, "province" : "新疆", "timestamp" : "2016-10-29" }
+</code></pre>
+<p>下面的请求，按照latency字段的记录数百分比进行分组，然后统计组内的平均延时信息：</p>
+<pre><code class="lang-JAVA">GET /website/_search 
+{
+  "size": 0,
+  "aggs": {
+    "latency_percentiles": {
+      "percentiles": {
+        "field": "latency",
+        "percents": [
+          50,
+          95,
+          99
+        ]
+      }
+    },
+    "latency_avg": {
+      "avg": {
+        "field": "latency"
+      }
+    }
+  }
+}
+</code></pre>
+<p>响应如下：</p>
+<pre><code class="lang-JAVA">{
+  "took": 31,
+  "timed_out": false,
+  "_shards": {
+    "total": 5,
+    "successful": 5,
+    "failed": 0
+  },
+  "hits": {
+    "total": 12,
+    "max_score": 0,
+    "hits": []
+  },
+  "aggregations": {
+    "latency_avg": {
+      "value": 201.91666666666666
+    },
+    "latency_percentiles": {
+      "values": {
+        "50.0": 108.5,
+        "95.0": 508.24999999999983,
+        "99.0": 624.8500000000001
+      }
+    }
+  }
+}
+</code></pre>
+<h3 id="3-2-percentile_ranks">3.2 percentile_ranks</h3>
+<p>percentile_ranks可以按照字段值的区间进行分组，然后统计出每个区间的占比。</p>
+<p>比如，我们需要统计：对于每个省份，有多少请求（百分比）的延时分别在200ms以内、1000ms以内？就可以像下面这样构造请求：</p>
+<pre><code class="lang-JAVA">GET /website/_search 
+{
+  "size": 0,
+  "aggs": {
+    "group_by_province": {
+      "terms": {
+        "field": "province"
+      },
+      "aggs": {
+        "latency_percentile_ranks": {
+          "percentile_ranks": {
+            "field": "latency",
+            "values": [
+              200,
+              1000
+            ]
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>响应如下：</p>
+<pre><code class="lang-JAVA">{
+  "took": 38,
+  "timed_out": false,
+  "_shards": {
+    "total": 5,
+    "successful": 5,
+    "failed": 0
+  },
+  "hits": {
+    "total": 12,
+    "max_score": 0,
+    "hits": []
+  },
+  "aggregations": {
+    "group_by_province": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": [
+        {
+          "key": "新疆",
+          "doc_count": 6,
+          "latency_percentile_ranks": {
+            "values": {
+              "200.0": 29.40613026819923,
+              "1000.0": 100
+            }
+          }
+        },
+        {
+          "key": "江苏",
+          "doc_count": 6,
+          "latency_percentile_ranks": {
+            "values": {
+              "200.0": 100,
+              "1000.0": 100
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<h3 id="3-3-">3.3 算法优化</h3>
+<p>percentile底层采用了TDigest算法，该算法会使用很多节点来执行百分比的计算，但是存在误差，参与计算的节点越多就越精准。</p>
+<p>percentile有一个参数<code>compression</code>可以用来控制节点数量，默认值是100，所以如果想要percentile算法更精准，compression值可以设置得越大。</p>
+<blockquote>
+<p>注意：compression值越大越消耗内存，一般compression=100时，内存占用大约为：100 x 20 x 32 = 64KB。</p>
+</blockquote>
+<h2 id="-">四、总结</h2>
+<p>本章，我介绍了Elasticsearch中两种常用的近似算法：cardinality和percentile。它们的思想都是在<strong><em>大数据</em></strong>、<strong><em>精确性</em></strong>和<strong><em>实时性</em></strong>这三者之间做出权衡。Elasticsearch为了提升性能，采用近似算法，它们会提供准确但不是 100% 精确的结果， 以牺牲一点小小的估算错误为代价，这些算法可以为我们换来高速的执行效率和极小的内存消耗。 </p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

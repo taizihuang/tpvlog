@@ -1,0 +1,693 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（二三）——dubbo-cluster模块：Cluster容错策略</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（二三）——dubbo-cluster模块：Cluster容错策略</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我对 Dubbo Cluster 层的Cluster容错机制的相关内容进行了讲解，主要介绍了 Cluster 接口的定义以及其抽象实现类的核心功能。本章，我将对Cluster层各种集群容错策略的具体实现进行分析。</p>
+<h2 id="-failover-">一、Failover：失败自动切换</h2>
+<p><strong>Failover Cluster</strong>，失败自动切换。Dubbo 的默认容错机制，在请求一个 Provider 节点失败时，自动切换其他 Provider 节点，默认执行 3 次，适合幂等操作。当然，重试次数越多，在故障容错的时候带给 Provider 的压力就越大，在极端情况下甚至可能造成雪崩。</p>
+<h3 id="1-1-failovercluster">1.1 FailoverCluster</h3>
+<p>FailoverCluster的doJoin() 方法中会创建一个 FailoverClusterInvoker 对象并返回，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailoverCluster.java
+
+public class FailoverCluster extends AbstractCluster {
+
+    public final static String NAME = "failover";
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new FailoverClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="1-2-failoverclusterinvoker">1.2 FailoverClusterInvoker</h3>
+<p>FailoverClusterInvoker 会在调用失败的时候，自动切换 Invoker 进行重试。下面来看 FailoverClusterInvoker 的核心实现：</p>
+<pre><code class="lang-JAVA">// FailoverClusterInvoker.java
+
+public class FailoverClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    public Result doInvoke(Invocation invocation, final List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        List&lt;Invoker&lt;T&gt;&gt; copyInvokers = invokers;
+        // 检查copyInvokers集合是否为空，如果为空会抛出异常
+        checkInvokers(copyInvokers, invocation);
+
+        String methodName = RpcUtils.getMethodName(invocation);
+
+        // 参数重试次数，默认重试2次，总共执行3次
+        int len = getUrl().getMethodParameter(methodName, RETRIES_KEY, DEFAULT_RETRIES) + 1;
+        if (len &lt;= 0) {
+            len = 1;
+        }
+
+        // 记录已经尝试调用过的Invoker对象
+        RpcException le = null; 
+        List&lt;Invoker&lt;T&gt;&gt; invoked = new ArrayList&lt;Invoker&lt;T&gt;&gt;(copyInvokers.size());
+        Set&lt;String&gt; providers = new HashSet&lt;String&gt;(len);
+        for (int i = 0; i &lt; len; i++) {
+            // 第一次传进来的invokers已经check过了，第二次则是重试，需要重新获取最新的服务列表
+            if (i &gt; 0) {
+                checkWhetherDestroyed();
+                // 这里会重新调用Directory.list()方法，获取Invoker列表
+                copyInvokers = list(invocation);
+                // 检查copyInvokers集合是否为空，如果为空会抛出异常
+                checkInvokers(copyInvokers, invocation);
+            }
+
+            // 通过LoadBalance选择Invoker对象
+            Invoker&lt;T&gt; invoker = select(loadbalance, invocation, copyInvokers, invoked);
+            // 记录此次要尝试调用的Invoker对象，下一次重试时就会过滤这个服务
+            invoked.add(invoker);
+            RpcContext.getContext().setInvokers((List) invoked);
+            try {
+                // 调用目标Invoker对象的invoke()方法，完成远程调用
+                Result result = invoker.invoke(invocation);
+                return result;
+            } catch (RpcException e) {
+                if (e.isBiz()) {
+                    throw e;
+                }
+                le = e;
+            } catch (Throwable e) {
+                // 抛出异常，表示此次尝试失败，会进行重试
+                le = new RpcException(e.getMessage(), e);
+            } finally {
+                // 记录尝试过的Provider地址，会在警告日志中打印出来
+                providers.add(invoker.getUrl().getAddress());
+            }
+        }
+        // 达到重试次数上限之后，会抛出异常
+        throw new RpcException(le.getCode(), "Failed to invoke the method "
+                + methodName + " in the service " + getInterface().getName()
+                + ". Tried " + len + " times of the providers " + providers
+                + " (" + providers.size() + "/" + copyInvokers.size()
+                + ") from the registry " + directory.getUrl().getAddress()
+                + " on the consumer " + NetUtils.getLocalHost() + " using the dubbo version "
+                + Version.getVersion() + ". Last error is: "
+                + le.getMessage(), le.getCause() != null ? le.getCause() : le);
+    }
+}
+</code></pre>
+<h2 id="-failback-">二、Failback：失败自动恢复</h2>
+<p><strong>Failback Cluster</strong>，失败自动恢复。失败后记录到队列中，通过定时器重试。</p>
+<h3 id="2-1-failbackcluster">2.1 FailbackCluster</h3>
+<p>FailbackCluster 是 Cluster 接口的另一个扩展实现，扩展名是 <code>failback</code>，其 doJoin() 方法中创建的 Invoker 对象是 FailbackClusterInvoker 类型，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailbackCluster.java
+
+public class FailbackCluster extends AbstractCluster {
+
+    public final static String NAME = "failback";
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new FailbackClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="2-2-failbackclusterinvoker">2.2 FailbackClusterInvoker</h3>
+<p>FailbackClusterInvoker 在请求失败之后，返回一个空结果给 Consumer，同时还会添加一个定时任务对失败的请求进行重试。下面来看 FailbackClusterInvoker 的具体实现：</p>
+<pre><code class="lang-java">// FailbackClusterInvoker.java
+
+protected Result doInvoke(Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) 
+    throws RpcException {
+
+    Invoker&lt;T&gt; invoker = null;
+    try {
+        // 检测Invoker集合是否为空
+        checkInvokers(invokers, invocation);
+
+        // 调用select()方法得到此次尝试的Invoker对象
+        invoker = select(loadbalance, invocation, invokers, null);
+
+        // 调用invoke()方法完成远程调用
+        return invoker.invoke(invocation);
+    } catch (Throwable e) {
+        // 请求失败之后，会添加一个定时任务进行重试
+        addFailed(loadbalance, invocation, invokers, invoker);
+        // 请求失败时，会返回一个空结果
+        return AsyncRpcResult.newDefaultAsyncResult(null, null, invocation); 
+    }
+}
+</code></pre>
+<p>在 doInvoke() 方法中，请求失败时会调用 addFailed() 方法添加定时任务进行重试，默认每隔 5 秒执行一次，总共重试 3 次，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailbackClusterInvoker.java
+
+private void addFailed(LoadBalance loadbalance, Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, Invoker&lt;T&gt; lastInvoker) {
+    if (failTimer == null) {
+        synchronized (this) {
+            if (failTimer == null) {
+                // 初始化时间轮，这个时间轮有32个槽，每个槽代表1秒
+                failTimer = new HashedWheelTimer(
+                        new NamedThreadFactory("failback-cluster-timer", true),
+                        1,
+                        TimeUnit.SECONDS, 32, failbackTasks);
+            }
+        }
+    }
+
+    // 创建一个定时任务
+    RetryTimerTask retryTimerTask = new RetryTimerTask(loadbalance, invocation, invokers, lastInvoker, retries, RETRY_FAILED_PERIOD);
+    try {
+        // 将定时任务添加到时间轮中
+        failTimer.newTimeout(retryTimerTask, RETRY_FAILED_PERIOD, TimeUnit.SECONDS);
+    } catch (Throwable e) {
+        logger.error("...");
+    }
+}
+</code></pre>
+<p>在 RetryTimerTask 定时任务中，会重新调用 select() 方法筛选合适的 Invoker 对象，并尝试进行请求。如果请求再次失败且重试次数未达到上限，则调用 rePut() 方法再次添加定时任务，等待进行重试；如果请求成功，也不会返回任何结果：</p>
+<pre><code class="lang-java">// FailbackClusterInvoker.RetryTimerTask.java
+
+public void run(Timeout timeout) {
+    try {
+        // 重新选择Invoker对象，注意，这里会将上次重试失败的Invoker作为selected集合传入
+        Invoker&lt;T&gt; retryInvoker = select(loadbalance, invocation, invokers,
+                                         Collections.singletonList(lastInvoker));
+        lastInvoker = retryInvoker;
+        // 请求对应的Provider节点
+        retryInvoker.invoke(invocation); 
+    } catch (Throwable e) {
+        // 重试次数达到上限，输出警告日志
+        if ((++retryTimes) &gt;= retries) { 
+            logger.error("...");
+        } else {
+            // 重试次数未达到上限，则重新添加定时任务，等待重试
+            rePut(timeout); 
+        }
+    }
+}
+
+private void rePut(Timeout timeout) {
+    // 边界检查
+    if (timeout == null) { 
+        return;
+    }
+
+    Timer timer = timeout.timer();
+    // 检查时间轮状态、检查定时任务状态
+    if (timer.isStop() || timeout.isCancelled()) { 
+        return;
+    }
+    // 重新添加定时任务
+    timer.newTimeout(timeout.task(), tick, TimeUnit.SECONDS);
+}
+</code></pre>
+<h2 id="-failfast-">三、Failfast：快速失败</h2>
+<p><strong>Failfast Cluster</strong>，快速失败。请求失败后返回异常，不进行任何重试。</p>
+<h3 id="3-1-failfastcluster">3.1 FailfastCluster</h3>
+<p>FailfastCluster 的扩展名是 <code>failfast</code>，在其 doJoin() 方法中会创建 FailfastClusterInvoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailfastCluster.java
+
+public class FailfastCluster extends AbstractCluster {
+
+    public final static String NAME = "failfast";
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new FailfastClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="3-2-failfastclusterinvoker">3.2 FailfastClusterInvoker</h3>
+<p>FailfastClusterInvoker 只会进行一次请求，请求失败之后会立即抛出异常，这种策略适合非幂等的操作，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailfastClusterInvoker.java
+
+public class FailfastClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    public Result doInvoke(Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        checkInvokers(invokers, invocation);
+
+        // 调用select()得到此次要调用的Invoker对象
+        Invoker&lt;T&gt; invoker = select(loadbalance, invocation, invokers, null);
+        try {
+            // 发起请求
+            return invoker.invoke(invocation);
+        } catch (Throwable e) {
+            // 请求失败，直接抛出异常
+            if (e instanceof RpcException &amp;&amp; ((RpcException) e).isBiz()) {
+                throw (RpcException) e;
+            }
+            throw new RpcException(e instanceof RpcException ? ((RpcException) e).getCode() : 0,
+                    "Failfast invoke providers " + invoker.getUrl() + " " + loadbalance.getClass().getSimpleName()
+                            + " select from all providers " + invokers + " for service " + getInterface().getName()
+                            + " method " + invocation.getMethodName() + " on consumer " + NetUtils.getLocalHost()
+                            + " use dubbo version " + Version.getVersion()
+                            + ", but no luck to perform the invocation. Last error is: " + e.getMessage(),
+                    e.getCause() != null ? e.getCause() : e);
+        }
+    }
+}
+</code></pre>
+<h2 id="-failsafe-">四、Failsafe：失败安全</h2>
+<p><strong>Failsafe Cluster</strong>，失败安全。请求失败后忽略异常，不进行任何重试。</p>
+<h3 id="4-1-failsafecluster">4.1 FailsafeCluster</h3>
+<p>FailsafeCluster 的扩展名是 <code>failsafe</code>，在其 doJoin() 方法中会创建 FailsafeClusterInvoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailsafeClusterInvoker.java
+
+public class FailsafeCluster extends AbstractCluster {
+
+    public final static String NAME = "failsafe";
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new FailsafeClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="4-2-failsafeclusterinvoker">4.2 FailsafeClusterInvoker</h3>
+<p>FailsafeClusterInvoker 只会进行一次请求，请求失败之后会返回一个空结果，具体实现如下：</p>
+<pre><code class="lang-JAVA">// FailsafeClusterInvoker.java
+
+public class FailsafeClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    public Result doInvoke(Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        try {
+            checkInvokers(invokers, invocation);
+            // 调用select()得到此次要调用的Invoker对象
+            Invoker&lt;T&gt; invoker = select(loadbalance, invocation, invokers, null);
+            // 发起请求
+            return invoker.invoke(invocation);
+        } catch (Throwable e) {
+            // 请求失败之后，会打印一行日志并返回空结果
+            logger.error("Failsafe ignore exception: " + e.getMessage(), e);
+            return AsyncRpcResult.newDefaultAsyncResult(null, null, invocation);
+        }
+    }
+}
+</code></pre>
+<h2 id="-forking-">五、Forking：并行调用</h2>
+<p><strong>Forking Cluster</strong>，并行调用。并行调用多个 Provider 节点，只要有一个成功就返回。</p>
+<h3 id="5-1-forkingcluster">5.1 ForkingCluster</h3>
+<p>ForkingCluster 的扩展名称为 forking，在其 doJoin() 方法中，会创建一个 ForkingClusterInvoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// ForkingCluster.java
+
+public class ForkingCluster extends AbstractCluster {
+
+    public final static String NAME = "forking";
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new ForkingClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="5-2-forkingclusterinvoker">5.2 ForkingClusterInvoker</h3>
+<p>ForkingClusterInvoker 中会维护一个线程池，并发调用多个 Provider 节点，只要有一个 Provider 节点成功返回了结果，ForkingClusterInvoker 的 doInvoke() 方法就会立即结束运行。</p>
+<p>ForkingClusterInvoker 主要是为了应对一些实时性要求较高的读操作，因为没有并发控制的多线程写入，可能会导致数据不一致。</p>
+<p>ForkingClusterInvoker.doInvoke() 方法首先从 Invoker 集合中选出指定个数的 Invoker 对象，然后通过线程池并发调用这些 Invoker，并将请求结果存储到阻塞队列中，当前线程会阻塞在队列上，等待第一个请求结果返回。下面是 ForkingClusterInvoker 的具体实现：</p>
+<pre><code class="lang-JAVA">// ForkingClusterInvoker.java
+
+public Result doInvoke(final Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance)
+    throws RpcException {
+    try {
+        // 检查Invoker集合是否为空
+        checkInvokers(invokers, invocation);
+
+        final List&lt;Invoker&lt;T&gt;&gt; selected;
+
+        // 从URL中获取forks参数，作为并发请求的上限，默认值为2
+        final int forks = getUrl().getParameter(FORKS_KEY, DEFAULT_FORKS);
+        final int timeout = getUrl().getParameter(TIMEOUT_KEY, DEFAULT_TIMEOUT);
+        if (forks &lt;= 0 || forks &gt;= invokers.size()) {
+            // 如果forks为负数或是大于Invoker集合的长度，会直接并发调用全部Invoker
+            selected = invokers;
+        } else {
+            // 按照forks指定的并发度，选择此次并发调用的Invoker对象
+            selected = new ArrayList&lt;&gt;(forks);
+            while (selected.size() &lt; forks) {
+                Invoker&lt;T&gt; invoker = select(loadbalance, invocation, invokers, selected);
+                if (!selected.contains(invoker)) {
+                    // 避免重复选择
+                    selected.add(invoker); 
+                }
+            }
+        }
+
+        RpcContext.getContext().setInvokers((List) selected);
+
+        // 记录失败的请求个数
+        final AtomicInteger count = new AtomicInteger();
+
+        // 用于记录请求结果
+        final BlockingQueue&lt;Object&gt; ref = new LinkedBlockingQueue&lt;&gt;();
+
+        // 遍历 selected 列表
+        for (final Invoker&lt;T&gt; invoker : selected) {  
+            // 为每个Invoker创建一个任务，并提交到线程池中
+            executor.execute(() -&gt; { 
+                try {
+                    // 发起请求
+                    Result result = invoker.invoke(invocation);
+                    // 将请求结果写到ref队列中
+                    ref.offer(result);
+                } catch (Throwable e) {
+                    int value = count.incrementAndGet();
+                    if (value &gt;= selected.size()) {
+                        // 如果失败的请求个数超过了并发请求的个数，则向ref队列中写入异常
+                        ref.offer(e); 
+                    }
+                }
+            });
+        }
+
+        try {
+            // 当前线程会阻塞等待任意一个请求结果的出现
+            Object ret = ref.poll(timeout, TimeUnit.MILLISECONDS);
+            // 如果结果类型为Throwable，则抛出异常
+            if (ret instanceof Throwable) {             
+                Throwable e = (Throwable) ret;
+                throw new RpcException("...");
+            }
+            return (Result) ret; 
+        } catch (InterruptedException e) {
+             throw new RpcException("...");
+        }
+    } finally { 
+        // 清除上下文信息
+        RpcContext.getContext().clearAttachments();
+    }
+}
+</code></pre>
+<h2 id="-broadcast-">六、Broadcast：广播调用</h2>
+<p><strong>Broadcast Cluster</strong>，广播调用。广播多个 Provider 节点，只要有一个节点失败就失败。</p>
+<h3 id="6-1-broadcastcluster">6.1 BroadcastCluster</h3>
+<p>BroadcastCluster 这个 Cluster 实现类的扩展名为 <code>broadcast</code>，在其 doJoin() 方法中创建的是 BroadcastClusterInvoker 类型的 Invoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// BroadcastCluster.java
+
+public class BroadcastCluster extends AbstractCluster {
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new BroadcastClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="6-2-broadcastclusterinvoker">6.2 BroadcastClusterInvoker</h3>
+<p>在 BroadcastClusterInvoker 中，会逐个调用每个 Provider 节点，其中任意一个 Provider 节点报错，都会在全部调用结束之后抛出异常<strong>。BroadcastClusterInvoker</strong>通常用于通知类的操作，例如通知所有 Provider 节点更新本地缓存。</p>
+<pre><code class="lang-JAVA">// BroadcastClusterInvoker.java
+
+public class BroadcastClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    public Result doInvoke(final Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        checkInvokers(invokers, invocation);
+        RpcContext.getContext().setInvokers((List) invokers);
+        RpcException exception = null;
+        Result result = null;
+
+        // 遍历所有Invoker对象
+        for (Invoker&lt;T&gt; invoker : invokers) {
+            try {
+                // 发起请求
+                result = invoker.invoke(invocation);
+            } catch (RpcException e) {
+                exception = e;
+                logger.warn(e.getMessage(), e);
+            } catch (Throwable e) {
+                exception = new RpcException(e.getMessage(), e);
+                logger.warn(e.getMessage(), e);
+            }
+        }
+        // 出现任何异常，都会在这里抛出
+        if (exception != null) {
+            throw exception;
+        }
+        return result;
+    }
+}
+</code></pre>
+<h2 id="-available-">七、Available：可用调用</h2>
+<p><strong>Available Cluster</strong>，可用调用。遍历所有的 Provider 节点，找到每一个可用的节点，就直接调用。如果没有可用的 Provider 节点，则直接抛出异常。</p>
+<h3 id="7-1-availablecluster">7.1 AvailableCluster</h3>
+<p>AvailableCluster 这个 Cluster 实现类的扩展名为 <code>available</code>，在其 join() 方法中创建的是 AvailableClusterInvoker 类型的 Invoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// AvailableCluster.java
+
+public class AvailableCluster implements Cluster {
+
+    public static final String NAME = "available";
+
+    @Override
+    public &lt;T&gt; Invoker&lt;T&gt; join(Directory&lt;T&gt; directory) throws RpcException {
+        return new AvailableClusterInvoker&lt;&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="7-2-availableclusterinvoker">7.2 AvailableClusterInvoker</h3>
+<p>在 AvailableClusterInvoker 的 doInvoke() 方法中，会遍历整个 Invoker 集合，逐个调用对应的 Provider 节点，当遇到第一个可用的 Provider 节点时，就尝试访问该 Provider 节点，成功则返回结果；如果访问失败，则抛出异常终止遍历。</p>
+<pre><code class="lang-JAVA">// AvailableClusterInvoker.java
+
+public class AvailableClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    public Result doInvoke(Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        // 遍历Invoker
+        for (Invoker&lt;T&gt; invoker : invokers) {
+            // 检测该Invoker是否可用
+            if (invoker.isAvailable()) {
+                // 发起请求，调用失败时的异常会直接抛出
+                return invoker.invoke(invocation);
+            }
+        }
+        throw new RpcException("No provider available in " + invokers);
+    }
+}
+</code></pre>
+<h2 id="-mergeable-">八、Mergeable：合并调用</h2>
+<p><strong>Mergeable Cluster</strong>，合并调用。请求多个 Provider 节点，并将得到的结果进行合并。</p>
+<h3 id="8-1-mergeablecluster">8.1 MergeableCluster</h3>
+<p>MergeableCluster 这个 Cluster 实现类的扩展名为 <code>mergeable</code>，在其 doJoin() 方法中创建的是 MergeableClusterInvoker 类型的 Invoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// MergeableCluster.java
+
+public class MergeableCluster extends AbstractCluster {
+
+    public static final String NAME = "mergeable";
+
+    @Override
+    public &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new MergeableClusterInvoker&lt;T&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="8-2-mergeableclusterinvoker">8.2 MergeableClusterInvoker</h3>
+<p>MergeableClusterInvoker 会对多个 Provider 节点返回结果合并。如果请求的方法没有配置 Merger 合并器（即没有指定 <code>merger</code> 参数），则不会进行结果合并，而是直接将第一个可用的 Invoker 结果返回。下面来看 MergeableClusterInvoker 的具体实现：</p>
+<pre><code class="lang-JAVA">// MergeableClusterInvoker.java
+
+public class MergeableClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    protected Result doInvoke(Invocation invocation, List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        checkInvokers(invokers, invocation);
+
+        String merger = getUrl().getMethodParameter(invocation.getMethodName(), MERGER_KEY);
+
+        // 判断要调用的目标方法是否有合并器，如果没有，则不会进行合并，找到第一个可用的Invoker直接调用并返回结果
+        if (ConfigUtils.isEmpty(merger)) { 
+            for (final Invoker&lt;T&gt; invoker : invokers) {
+                if (invoker.isAvailable()) {
+                    try {
+                        return invoker.invoke(invocation);
+                    } catch (RpcException e) {
+                        if (e.isNoInvokerAvailableAfterFilter()) {
+                            log.debug("No available provider for service" + getUrl().getServiceKey() + " on group " + invoker.getUrl().getParameter(GROUP_KEY) + ", will continue to try another group.");
+                        } else {
+                            throw e;
+                        }
+                    }
+                }
+            }
+            return invokers.iterator().next().invoke(invocation);
+        }
+
+        // 确定目标方法的返回值类型
+        Class&lt;?&gt; returnType;
+        try {
+            returnType = getInterface().getMethod(
+                    invocation.getMethodName(), invocation.getParameterTypes()).getReturnType();
+        } catch (NoSuchMethodException e) {
+            returnType = null;
+        }
+
+        // 调用每个Invoker对象(异步方式)，将请求结果记录到results集合中
+        Map&lt;String, Result&gt; results = new HashMap&lt;&gt;();
+        for (final Invoker&lt;T&gt; invoker : invokers) {
+            RpcInvocation subInvocation = new RpcInvocation(invocation, invoker);
+            subInvocation.setAttachment(ASYNC_KEY, "true");
+            results.put(invoker.getUrl().getServiceKey(), invoker.invoke(subInvocation));
+        }
+
+        Object result = null;
+        List&lt;Result&gt; resultList = new ArrayList&lt;Result&gt;(results.size());
+
+        // 等待结果返回
+        for (Map.Entry&lt;String, Result&gt; entry : results.entrySet()) {
+            Result asyncResult = entry.getValue();
+            try {
+                Result r = asyncResult.get();
+                if (r.hasException()) {
+                    log.error("Invoke " + getGroupDescFromServiceKey(entry.getKey()) +
+                                    " failed: " + r.getException().getMessage(),
+                            r.getException());
+                } else {
+                    resultList.add(r);
+                }
+            } catch (Exception e) {
+                throw new RpcException("Failed to invoke service " + entry.getKey() + ": " + e.getMessage(), e);
+            }
+        }
+
+        if (resultList.isEmpty()) {
+            return AsyncRpcResult.newDefaultAsyncResult(invocation);
+        } else if (resultList.size() == 1) {
+            return resultList.iterator().next();
+        }
+
+        if (returnType == void.class) {
+            return AsyncRpcResult.newDefaultAsyncResult(invocation);
+        }
+
+        // merger如果以"."开头，后面为方法名，这个方法名是远程目标方法的返回类型中的方法
+        // 得到每个Provider节点返回的结果对象之后，会遍历每个返回对象，调用merger参数指定的方法
+        if (merger.startsWith(".")) {
+            merger = merger.substring(1);
+            Method method;
+            try {
+                method = returnType.getMethod(merger, returnType);
+            } catch (NoSuchMethodException e) {
+                throw new RpcException("Can not merge result because missing method [ " + merger + " ] in class [ " +
+                        returnType.getName() + " ]");
+            }
+            if (!Modifier.isPublic(method.getModifiers())) {
+                method.setAccessible(true);
+            }
+            // resultList集合保存了所有的返回对象，method是Method对象，也就是merger指定的方法
+            result = resultList.remove(0).getValue();    // result是最后返回调用方的结果
+            try {
+                if (method.getReturnType() != void.class
+                        &amp;&amp; method.getReturnType().isAssignableFrom(result.getClass())) {
+                    // 反射调用
+                    for (Result r : resultList) {
+                        result = method.invoke(result, r.getValue());
+                    }
+                } else {
+                    for (Result r : resultList) {
+                        method.invoke(result, r.getValue());
+                    }
+                }
+            } catch (Exception e) {
+                throw new RpcException("Can not merge result: " + e.getMessage(), e);
+            }
+        } else {
+            Merger resultMerger;
+            // merger参数为true或者default，表示使用默认的Merger扩展实现完成合并
+            if (ConfigUtils.isDefault(merger)) {
+                resultMerger = MergerFactory.getMerger(returnType);
+            } else {
+                // merger参数指定了Merger的扩展名称，则使用SPI查找对应的Merger扩展实现对象
+                resultMerger = ExtensionLoader.getExtensionLoader(Merger.class).getExtension(merger);
+            }
+            if (resultMerger != null) {
+                List&lt;Object&gt; rets = new ArrayList&lt;Object&gt;(resultList.size());
+                for (Result r : resultList) {
+                    rets.add(r.getValue());
+                }
+                // 执行合并操作
+                result = resultMerger.merge(
+                        rets.toArray((Object[]) Array.newInstance(returnType, 0)));
+            } else {
+                throw new RpcException("There is no merger to merge result.");
+            }
+        }
+        return AsyncRpcResult.newDefaultAsyncResult(result, invocation);
+    }
+}
+</code></pre>
+<h2 id="-zoneaware-">九、ZoneAware：多注册中心调用</h2>
+<p><strong>ZoneAwareCluster</strong>：多注册中心调用。在 Dubbo 中使用多个注册中心的架构如下图所示：</p>
+<center><br/> <img src="./img/20211127181709260.png" style="zoom:55%"><br/></img></center>
+<p>Consumer 可以使用 ZoneAwareClusterInvoker 先在多个注册中心之间进行选择，选定注册中心之后，再选择 Provider 节点，如下图所示：</p>
+<center><br/> <img src="./img/20211127181723971.png" style="zoom:55%"/><br/></center>
+<h3 id="9-1-zoneawarecluster">9.1 ZoneAwareCluster</h3>
+<p>这个 Cluster 实现类的扩展名为 <code>zone-aware</code>，在其 doJoin() 方法中创建的是 ZoneAwareClusterInvoker 类型的 Invoker 对象，具体实现如下：</p>
+<pre><code class="lang-JAVA">// ZoneAwareCluster.java
+
+public class ZoneAwareCluster extends AbstractCluster {
+
+    public final static String NAME = "zone-aware";
+
+    @Override
+    protected &lt;T&gt; AbstractClusterInvoker&lt;T&gt; doJoin(Directory&lt;T&gt; directory) throws RpcException {
+        return new ZoneAwareClusterInvoker&lt;T&gt;(directory);
+    }
+}
+</code></pre>
+<h3 id="9-2-zoneawareclusterinvoker">9.2 ZoneAwareClusterInvoker</h3>
+<p>ZoneAwareClusterInvoker 在多注册中心之间进行选择的策略有以下四种。</p>
+<ol>
+<li>找到<code>preferred</code>属性为 true 的注册中心，它是优先级最高的注册中心，只有该中心无可用 Provider 节点时，才会回落到其他注册中心；</li>
+<li>根据请求中的 zone key 做匹配，优先派发到相同 zone 的注册中心；</li>
+<li>根据权重（也就是注册中心配置的 <code>weight</code> 属性）进行轮询；</li>
+<li>如果上面的策略都未命中，则选择<strong>第一个可用的 Provider 节点</strong>。</li>
+</ol>
+<p>下面来看 ZoneAwareClusterInvoker 的具体实现：</p>
+<pre><code class="lang-JAVA">// ZoneAwareClusterInvoker.java
+
+public class ZoneAwareClusterInvoker&lt;T&gt; extends AbstractClusterInvoker&lt;T&gt; {
+
+    @Override
+    public Result doInvoke(Invocation invocation, final List&lt;Invoker&lt;T&gt;&gt; invokers, LoadBalance loadbalance) throws RpcException {
+        // 首先找到preferred属性为true的注册中心
+        // 它是优先级最高的注册中心，只有该中心无可用 Provider 节点时，才会回落到其他注册中心
+        for (Invoker&lt;T&gt; invoker : invokers) {
+            MockClusterInvoker&lt;T&gt; mockClusterInvoker = (MockClusterInvoker&lt;T&gt;) invoker;
+            if (mockClusterInvoker.isAvailable() &amp;&amp; mockClusterInvoker.getRegistryUrl()
+                    .getParameter(REGISTRY_KEY + "." + PREFERRED_KEY, false)) {
+                return mockClusterInvoker.invoke(invocation);
+            }
+        }
+
+        // 根据请求中的registry_zone做匹配，优先派发到相同zone的注册中心
+        String zone = (String) invocation.getAttachment(REGISTRY_ZONE);
+        if (StringUtils.isNotEmpty(zone)) {
+            for (Invoker&lt;T&gt; invoker : invokers) {
+                MockClusterInvoker&lt;T&gt; mockClusterInvoker = (MockClusterInvoker&lt;T&gt;) invoker;
+                if (mockClusterInvoker.isAvailable() &amp;&amp; zone.equals(mockClusterInvoker.getRegistryUrl().getParameter(REGISTRY_KEY + "." + ZONE_KEY))) {
+                    return mockClusterInvoker.invoke(invocation);
+                }
+            }
+            String force = (String) invocation.getAttachment(REGISTRY_ZONE_FORCE);
+            if (StringUtils.isNotEmpty(force) &amp;&amp; "true".equalsIgnoreCase(force)) {
+                throw new IllegalStateException("No registry instance in zone or no available providers in the registry, zone: "
+                        + zone
+                        + ", registries: " + invokers.stream().map(invoker -&gt; ((MockClusterInvoker&lt;T&gt;) invoker).getRegistryUrl().toString()).collect(Collectors.joining(",")));
+            }
+        }
+        // 根据权重（也就是注册中心配置的weight属性）进行轮询
+        Invoker&lt;T&gt; balancedInvoker = select(loadbalance, invocation, invokers, null);
+        if (balancedInvoker.isAvailable()) {
+            return balancedInvoker.invoke(invocation);
+        }
+
+        // 选择第一个可用的 Provider 节点
+        for (Invoker&lt;T&gt; invoker : invokers) {
+            MockClusterInvoker&lt;T&gt; mockClusterInvoker = (MockClusterInvoker&lt;T&gt;) invoker;
+            if (mockClusterInvoker.isAvailable()) {
+                return mockClusterInvoker.invoke(invocation);
+            }
+        }
+        throw new RpcException("No provider available in " + invokers);
+    }
+}
+</code></pre>
+<h2 id="-">十、总结</h2>
+<p>本章，我对 Dubbo 中 Cluster 接口的各个实现类的原理以及相关 Invoker 的实现原理进行了讲解。重点分析的 Cluster 实现有：Failover Cluster、Failback Cluster、Failfast Cluster、Failsafe Cluster、Forking Cluster、Broadcast Cluster、Available Cluster 和 Mergeable Cluster。除此之外，我还分析了多注册中心的 ZoneAware Cluster 实现。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

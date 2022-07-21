@@ -1,0 +1,108 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Java网络编程（四）——Linux IO模型</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Java网络编程（四）——Linux IO模型</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我们在进行网络编程时，必然涉及网络I/O，比较常见的两种网络I/O编程模式就是<strong>同步阻塞I/O</strong>和<strong>同步非阻塞I/O</strong>。 比如，传统的基于Socket的<code>InputStrteam/OutputStream</code>读写属于<strong>同步阻塞I/O</strong>。</p>
+<p>事实上，Linux操作系统一共包含五种I/O模型，分别是：</p>
+<ul>
+<li>同步阻塞 I/O（Blocking IO）：即传统的IO模型；</li>
+<li>同步非阻塞 I/O（Nonblocking IO）：注意这里所说的NIO并非Java中的NIO库；</li>
+<li>I/O 多路复用（IO Multiplexing）：Java NIO和Linux中的epoll/select/poll都是这种模型；</li>
+<li>信号驱动 I/O（Signal Driven IO）：实际中并不常用；</li>
+<li>异步 I/O（Asynchronous IO）：经典的Proactor设计模式，也称为<strong>异步非阻塞IO</strong>。</li>
+</ul>
+<p>本章，我将会对上述五种Linux IO模型进行讲解，作为后续Java NIO以及Netty原理剖析章节的基础。</p>
+<h2 id="-">一、基本概念</h2>
+<p>在讲网络I/O模型时，经常会提到 <strong><em>同步/异步</em></strong>，<strong><em>阻塞/非阻塞</em></strong> 这两对概念。在这里，我有必要先对它们进行解释，便于读者理解后续内容。</p>
+<p>在Linux系统中，每个进程有自己独立的缓冲区——<strong>进程缓冲区</strong>，而系统内核也有个缓冲区——<strong>内核缓冲区</strong>。Linux/Unix系统在执行I/O请求时，会经历两个阶段：</p>
+<ul>
+<li>第一个阶段：<strong>I/O 调用阶段</strong>，用户进程向内核发起系统调用。</li>
+<li>第二个阶段：<strong>I/O 执行阶段</strong>，内核等待 I/O 请求处理完成返回，该阶段又可以分为两个过程：<ul>
+<li><strong>数据准备：</strong>从磁盘读取数据至内核缓存区（或从内核缓存区写出数据到磁盘）；</li>
+<li><strong>数据复制</strong>：内核空间的数据复制回进程缓存区。</li>
+</ul>
+</li>
+</ul>
+<p>下图以操作系统的<code>write</code>命令为例，数据会先被拷贝到进程缓冲区，再拷贝到OS内核缓冲区，最后才写到磁盘中：</p>
+<center><br/> <img src="./img/20210922222703167.png" style="zoom:90%"><br/></img></center>
+<h3 id="1-1-">1.1 同步/异步</h3>
+<p>同步和异步，指的是OS内核真正进行I/O的方式，OS内核从磁盘读取数据到内核缓存区（或从内核缓存区写出数据到磁盘）。</p>
+<ul>
+<li><strong>同步：</strong>指OS内核进行I/O操作时，需要彻底完成后才返回到用户空间；</li>
+<li><strong>异步：</strong>指OS内核进行I/O操作时，被调用后立即返回给用户一个状态值，无需等到I/O操作彻底完成。</li>
+</ul>
+<h3 id="1-2-">1.2 阻塞/非阻塞</h3>
+<p>阻塞和非阻塞，指的是<strong>用户进程</strong>与<strong>OS内核</strong>的交互方式，用户进程会从内核缓存区读取数据（或写入数据到内核缓存区），这一过程涉及进程的挂起和唤醒。</p>
+<ul>
+<li><strong>阻塞：</strong>指用户进程发起IO请求后，需要等待或轮询操作系统内核的IO操作完成后，才能继续执行；</li>
+<li><strong>非阻塞：</strong>指用户进程发起IO请求后仍继续执行，当内核IO操作完成后会通知用户进程（者调用用户进程注册的回调函数）。</li>
+</ul>
+<h2 id="-linux-io-">二、Linux IO模型</h2>
+<p>接下来，我们来看Linux的五种IO模型。</p>
+<h3 id="2-1-io-blocking-io-">2.1 同步阻塞IO（blocking IO）</h3>
+<p>阻塞IO模型是最简单的IO模型，下图以操作系统的<code>read</code>命令为例：</p>
+<center><br/> <img src="./img/20210922222730149.png" style="zoom:45%"/><br/></center>
+<ol>
+<li>用户进程通过<strong><em>read</em></strong> 命令发起I/O读系统调用；</li>
+<li>用户空间切换到内核空间（<strong>此时调用进程挂起，阻塞等待，称之为阻塞</strong>）；</li>
+<li>内核等待数据准备，即从磁盘-&gt;内核缓存区（<strong>此时称之为同步</strong>）；</li>
+<li>内核接收完数据后，将数据从内核缓存区拷贝到进程缓存区中；</li>
+<li>用户进程恢复，开始从进程缓存区读取数据。</li>
+</ol>
+<blockquote>
+<p>特点：I/O操作的两个阶段都被Block了，用户进程被阻塞就不能做任何事情，对CPU的资源利用率不够。</p>
+</blockquote>
+<h3 id="2-2-io-nonblocking-io-">2.2 同步非阻塞IO（nonblocking IO）</h3>
+<p>同步非阻塞IO，用户进程可以在发起IO请求后立即返回：</p>
+<center><br/> <img src="./img/20210922222751706.png" style="zoom:49%"/><br/></center>
+<ol>
+<li>用户进程通过<strong><em>read</em></strong> 命令发起I/O读操作；</li>
+<li>用户空间切换到内核空间（<strong>此时调用进程立即返回，称之为非阻塞，然后不断轮询</strong>）；</li>
+<li>内核等待数据准备，即从磁盘-&gt;内核缓存区（<strong>此时称之为同步</strong>）；</li>
+<li>内核接收完数据后，将数据从内核缓存区拷贝到进程缓存区中；</li>
+<li>用户进程轮询发现已经有数据了，开始从进程缓存区读取数据。</li>
+</ol>
+<blockquote>
+<p>特点：用户线程没有挂起，而是不断地轮询，消耗了大量的CPU的资源。一般很少直接使用这种模型，而是在其他IO模型中使用非阻塞IO这一特性。</p>
+</blockquote>
+<h3 id="2-3-io-io-multiplexing-">2.3 IO多路复用（IO multiplexing）</h3>
+<p>IO多路复用模型，是建立在OS内核提供的多路复用函数——<code>select/poll/epoll</code>（这三个命令都实现了IO多路复用功能，不过是出现早晚和细节功能有所差异）基础之上的，它的最大特点就是：单个线程可以同时监听多个数据通道，当任何一个数据通道发生IO事件时就通知线程。</p>
+<p>在底层，多路复用函数，本质是一个线程可以监视多个文件描述符，一旦某个描述符就绪（一般是内核缓冲区可读/可写），内核能够将就绪的状态返回给应用程序。随后，应用程序根据就绪的状态，进行相应的IO系统调用：</p>
+<center><br/> <img src="./img/20210922222800853.png" style="zoom:49%"/><br/></center>
+<p>以<code>select</code>命令为例：</p>
+<ol>
+<li>用户进程调用select命令（调用时传入需要监听的通道集合），此时用户进程被阻塞；</li>
+<li>内核会“监视”所有select负责的所有文件描述符集合；</li>
+<li>当任一一个等待数据到达后，select会返回，用户进程恢复运行；</li>
+<li>这时，用户进程可以调用read操作，将数据从内核缓存区拷贝到用户进程。</li>
+</ol>
+<blockquote>
+<p>与多线程技术相比，IO多路复用技术的最大优势是系统开销小，一个选择器查询线程可以同时处理成千上万个连接（Connection）。系统不必创建大量的线程，也不必维护这些线程 。</p>
+</blockquote>
+<h3 id="2-4-i-o-signal-driven-io-">2.4 信号驱动 I/O（Signal Driven IO）</h3>
+<p>信号驱动 I/O 并不常用，它是一种半异步的 I/O 模型。在使用信号驱动 I/O 时，当数据准备就绪后，内核通过发送一个 SIGIO 信号通知应用进程，应用进程就可以开始读取数据了：</p>
+<center><br/> <img src="./img/20210922222817972.png" style="zoom:49%"/><br/></center>
+<h3 id="2-5-io-asynchronous-io-">2.5 异步IO（asynchronous IO）</h3>
+<p>异步IO，其执行的两个阶段都是异步的：从内核缓冲区拷贝数据到用户态缓冲区的过程由OS异步完成，应用进程只需要在指定的数组中引用数据即可。异步 I/O 与信号驱动 I/O 这种半异步模式的主要区别，在于信号驱动 I/O 由内核通知何时可以开始一个 I/O 操作，而异步 I/O 由内核通知 I/O 操作何时已经完成。</p>
+<center><br/> <img src="./img/20210922222835811.png" style="zoom:49%"/><br/></center>
+<ol>
+<li>用户进程发起read操作之后，立刻就可以开始去做其它的事；</li>
+<li>另一方面，操作系统开启独立的内核线程去处理真正的IO操作；</li>
+<li>当等待数据到达后，内核负责读取数据，并写入用户进程缓冲区；</li>
+<li>内核通知用户进程，告诉它可以去读数据了。</li>
+</ol>
+<blockquote>
+<p>异步IO并不十分常用，不少高性能并发应用使用<strong>IO多路复用+多线程处理</strong>的架构，基本可以满足需求。目前操作系统对异步IO的支持并非特别完善，更多的是采用IO多路复用+模拟异步IO的方式（IO事件触发时不直接通知用户线程，而是将数据读写完毕后放到用户指定的缓冲区中）。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>本章，我对Linux系统的IO模型进行了讲解，特别是对<strong>同步/异步</strong>和<strong>阻塞/非阻塞</strong>这两对容易混淆的概念进行了讲解。这两对概念本质上是对应了Linux系统继续IO读写的两个阶段，<strong>同步/异步</strong>用于描述内核空间中的磁盘读写，<strong>阻塞/非阻塞</strong>用于描述用户空间与内核空间的数据交换操作。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Java网络编程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/67">Java网络编程</a></div>
+</div></body>
+        </html>
+        

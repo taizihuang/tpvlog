@@ -1,0 +1,82 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（29）——模拟栈内存溢出</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（29）——模拟栈内存溢出</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>本章，我们将通过示例代码演示Java虚拟机栈区域是如何发生内存溢出的，并根据内存快照进行分析。</p>
+<p>我们回顾下栈内存溢出的一个场景：每个线程的栈内存是固定的，如果某个线程不停的无限制调用方法，每次方法调用都会有一个栈帧入栈，此时就会导致线程的栈内存被耗尽。</p>
+<h2 id="-">二、示例程序</h2>
+<h3 id="2-1-">2.1 程序源码</h3>
+<pre><code class="lang-JAVA">package com.ressmix.jvm;
+
+public class Demo2 {
+    public static long counter = 0L;
+
+    public static void main(String[] args) {
+        work();
+    }
+
+    private static void work() {
+        System.out.println("第" + ++counter + "次调用work方法");
+        work();
+    }
+}
+</code></pre>
+<p>上述代码非常简单，就是无限制的递归调用work方法。</p>
+<h3 id="2-2-jvm-">2.2 JVM参数</h3>
+<p>我们设置JVM栈内存大小为1MB：<code>-XX:ThreadStackSize=1m</code>，然后执行程序，输出打印日志如下：</p>
+<pre><code class="lang-JAVA">第6226次调用work方法
+Exception in thread "main" java.lang.StackOverflowError
+    at sun.nio.cs.UTF_8$Encoder.encodeLoop(UTF_8.java:691)
+    at java.nio.charset.CharsetEncoder.encode(CharsetEncoder.java:579)
+    at sun.nio.cs.StreamEncoder.implWrite(StreamEncoder.java:271)
+    at sun.nio.cs.StreamEncoder.write(StreamEncoder.java:125)
+    at java.io.OutputStreamWriter.write(OutputStreamWriter.java:207)
+    at java.io.BufferedWriter.flushBuffer(BufferedWriter.java:129)
+    at java.io.PrintStream.write(PrintStream.java:526)
+    at java.io.PrintStream.print(PrintStream.java:669)
+    at java.io.PrintStream.println(PrintStream.java:806)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:11)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+    at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+</code></pre>
+<p>可以看到，当执行到第5931次递归调用时，发生了栈内存溢出——<code>java.lang.StackOverflowError</code>。</p>
+<h2 id="-">三、问题分析</h2>
+<p>首先明确一点，GC日志和dump快照仅仅对Java堆内存的问题分析有效，就线程的栈内存和栈帧而言，是不存在所谓的GC的。所以，分析栈内存溢出最直接有效的方法就是看程序的本地日志：</p>
+<pre><code class="lang-JAVA">at com.ressmix.jvm.Demo2.work(Demo2.java:11)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+at com.ressmix.jvm.Demo2.work(Demo2.java:12)
+</code></pre>
+<p>程序日志大量报错<code>at com.ressmix.jvm.Demo2.work(Demo2.java:12)</code>，其实已经告诉我们了程序的问题所在——无限次调用work方法。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我们通过代码示例模拟了栈内存溢出的场景，大家可以看到1MB的栈内存大约可以支撑5000次的递归调用，这个数量已经很高了，一般的方法根本不可能出现连续几千次的调用。所以，栈内存溢出在生产环境是很少出现的，即使有，一般都是程序bug导致的。</p>
+<p>我们在给Java虚拟机栈分配内存的时候，要根据JVM的线程数合理分配，一般来说每个线程1MB的栈内存是足够了，剩下的就是合理预估总线程数。基本上，线程主要来自以下几部分：</p>
+<ul>
+<li>JVM进程自带的一些后台线程</li>
+<li>程序依赖的第三方组件创建的后台线程</li>
+<li>Web容器的工作线程</li>
+<li>程序自己创建的一些额外线程</li>
+</ul>
+<p>一般来说，一个JVM中上述这些线程总数不会超过1000个，我们以1000个来算，每个线程1MB栈内存，总共分配1G的空间给JVM栈内存就足够了。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

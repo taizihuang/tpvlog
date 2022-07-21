@@ -1,0 +1,336 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（五）——Producer：RecordAccumulator缓冲区</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（五）——Producer：RecordAccumulator缓冲区</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>KafkaProducer在通过<code>send</code>方法发送消息时，会首先将消息追加到一个名为<strong>RecordAccumulator</strong>的组件中。RecordAccumulator又名消息累加器，可以看成是KafkaProducer的一块消息缓冲区，主要用来按批次缓存消息，以便 Sender 线程可以批量发送，进而减少网络传输的资源消耗以提升性能。  </p>
+<pre><code class="lang-JAVA">// KafkaProducer.java
+
+RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey, serializedValue, interceptCallback, remainingWaitMs);
+</code></pre>
+<p>本章，我就来讲解RecordAccumulator的内部结构，以及它是如何对消息进行按批次缓存处理的。</p>
+<h2 id="-recordaccumulator">一、RecordAccumulator</h2>
+<p>我们先来看下RecordAccumulator的基本构造：</p>
+<pre><code class="lang-JAVA">// RecordAccumulator.java
+
+public final class RecordAccumulator {
+
+    private volatile boolean closed;
+    private final AtomicInteger flushesInProgress;
+    private final AtomicInteger appendsInProgress;
+    private final int batchSize;
+    private final CompressionType compression;
+    private final long lingerMs;
+    private final long retryBackoffMs;
+    // 缓冲池，里面是一个个ByteBuffer
+    private final BufferPool free;
+    private final Time time;
+    // 分区和一批次消息的映射Map
+    private final ConcurrentMap&lt;TopicPartition, Deque&lt;RecordBatch&gt;&gt; batches;
+    private final IncompleteRecordBatches incomplete;
+    private final Set&lt;TopicPartition&gt; muted;
+    private int drainIndex;
+
+    public RecordAccumulator(int batchSize, long totalSize, CompressionType compression,
+                             long lingerMs, long retryBackoffMs, Metrics metrics, Time time) {
+        this.drainIndex = 0;
+        this.closed = false;
+        this.flushesInProgress = new AtomicInteger(0);
+        this.appendsInProgress = new AtomicInteger(0);
+        this.batchSize = batchSize;
+        this.compression = compression;
+        this.lingerMs = lingerMs;
+        this.retryBackoffMs = retryBackoffMs;
+        this.batches = new CopyOnWriteMap&lt;&gt;();
+        String metricGrpName = "producer-metrics";
+        // 创建内部的BufferPool
+        this.free = new BufferPool(totalSize, batchSize, metrics, time, metricGrpName);
+        this.incomplete = new IncompleteRecordBatches();
+        this.muted = new HashSet&lt;&gt;();
+        this.time = time;
+        registerMetrics(metrics, metricGrpName);
+    }
+}
+</code></pre>
+<p>上述有两个比较重要的地方：</p>
+<ul>
+<li><strong>BufferPool：</strong>这是一块保存ByteBuffer的缓冲池，用来控制消息缓存的大小，消息的数据最终就是写到它的ByteBuffer中；</li>
+<li><strong>CopyOnWriteMap：</strong>这是一个”写时复制“的Map，保存分区和批次消息的映射关系：<code>&lt;TopicPartition, Deque&lt;RecordBatch&gt;&gt;</code>，因为对分区的操作基本都是并发且读多写少的，所以适合”写时复制“算法。</li>
+</ul>
+<h3 id="1-1-bufferpool">1.1 BufferPool</h3>
+<p>我们先来看BufferPool，这是一块内存缓冲区，默认大小32MB，可以通过参数<code>buffer.memory</code>控制：</p>
+<pre><code class="lang-JAVA">// BufferPool.java
+
+public final class BufferPool {
+    // 缓冲池大小，默认32MB，通过参数buffer.memory控制
+    private final long totalMemory;    
+
+    // batch大小，也就是一个ByteBuffer的大小，默认16KB，通过batch.size控制
+    private final int poolableSize;    
+    private final ReentrantLock lock;
+    // 可用
+    private final Deque&lt;ByteBuffer&gt; free;
+    private final Deque&lt;Condition&gt; waiters;
+    private long availableMemory;
+    private final Metrics metrics;
+    private final Time time;
+    private final Sensor waitTime;
+
+    public BufferPool(long memory, int poolableSize, Metrics metrics, Time time, String metricGrpName) {
+        this.poolableSize = poolableSize;
+        this.lock = new ReentrantLock();
+        this.free = new ArrayDeque&lt;ByteBuffer&gt;();
+        this.waiters = new ArrayDeque&lt;Condition&gt;();
+        this.totalMemory = memory;
+        this.availableMemory = memory;
+        this.metrics = metrics;
+        this.time = time;
+        this.waitTime = this.metrics.sensor("bufferpool-wait-time");
+        MetricName metricName = metrics.metricName("bufferpool-wait-ratio",
+                                                   metricGrpName,
+                                                   "The fraction of time an appender waits for space allocation.");
+        this.waitTime.add(metricName, new Rate(TimeUnit.NANOSECONDS));
+    }
+    //...
+}
+</code></pre>
+<p>对BufferPool的操作，本质就是对它内部的ByteBuffer的操作。BufferPool内部有一个Deque队列，缓存了可用的ByteBuffer，也就是缓存了一批内存空间，每个ByteBuffer都是16kb，即默认的batch大小。</p>
+<p>Deque里<code>ByteBuffer数量 * 16kb</code> 就是已使用的缓存空间大小，<code>availableMemory</code>就是剩余可使用的缓存空间大小，最大32mb，每用掉一个batch，就要减去batchSize的大小，即<code>132mb - 16kb</code>。</p>
+<p>另外，当调用方想要获取可用ByteBuffer，但是BufferPool可用空间又不足时，调用线程会阻塞，由参数<code>max.block.ms</code>控制：</p>
+<pre><code class="lang-JAVA">// BufferPool.java
+
+public ByteBuffer allocate(int size, long maxTimeToBlockMs) throws InterruptedException {
+    if (size &gt; this.totalMemory)
+        throw new IllegalArgumentException("Attempt to allocate " + size
+                                           + " bytes, but there is a hard limit of "
+                                           + this.totalMemory
+                                           + " on memory allocations.");
+    this.lock.lock();
+    try {
+        // 有可用空间，且要分配的ByteBuffer块大小就是poolableSize
+        if (size == poolableSize &amp;&amp; !this.free.isEmpty())
+            return this.free.pollFirst();
+
+        // 计算剩余可用空间
+        int freeListSize = this.free.size() * this.poolableSize;
+        if (this.availableMemory + freeListSize &gt;= size) {
+            freeUp(size);
+            this.availableMemory -= size;
+            lock.unlock();
+            return ByteBuffer.allocate(size);
+        } else {
+            //...
+        }
+    } finally {
+        if (lock.isHeldByCurrentThread())
+            lock.unlock();
+    }
+}
+</code></pre>
+<h3 id="1-2-recordbatch">1.2 RecordBatch</h3>
+<p>RecordAccumulator会按照分区，将同一个分区的消息打包成一个个<strong>RecordBatch</strong>，每一个RecordBatch可能包含多条消息，这些消息在内存里是按照一定的格式紧凑拼接的：</p>
+<pre><code class="lang-JAVA">// RecordBatch.java
+
+public final class RecordBatch {
+
+    final long createdMs;
+    final TopicPartition topicPartition;
+    final ProduceRequestResult produceFuture;
+
+    private final List&lt;Thunk&gt; thunks = new ArrayList&lt;&gt;();
+
+    // 内存消息构建器，这个很重要，最终是它将消息拼接
+    private final MemoryRecordsBuilder recordsBuilder;
+
+    volatile int attempts;
+    int recordCount;
+    int maxRecordSize;
+    long drainedMs;
+    long lastAttemptMs;
+    long lastAppendTime;
+    private String expiryErrorMessage;
+    private AtomicBoolean completed;
+    private boolean retry;
+
+    public RecordBatch(TopicPartition tp, MemoryRecordsBuilder recordsBuilder, long now) {
+        this.createdMs = now;
+        this.lastAttemptMs = now;
+        this.recordsBuilder = recordsBuilder;
+        this.topicPartition = tp;
+        this.lastAppendTime = createdMs;
+        this.produceFuture = new ProduceRequestResult(topicPartition);
+        this.completed = new AtomicBoolean();
+    }
+
+    // 在内存里拼接消息
+    public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value,
+                                          Callback callback, long now) {
+        // 空间不足
+        if (!recordsBuilder.hasRoomFor(key, value)) {
+            return null;
+        } else {
+            // 通过MemoryRecordsBuilder，追加消息到内存
+            long checksum = this.recordsBuilder.append(timestamp, key, value);
+            this.maxRecordSize = Math.max(this.maxRecordSize, Record.recordSize(key, value));
+            this.lastAppendTime = now;
+            FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount, timestamp, checksum, key == null ? -1 : key.length, value == null ? -1 : value.length);
+            if (callback != null)
+                thunks.add(new Thunk(callback, future));
+            this.recordCount++;
+            return future;
+        }
+    }
+
+    //...
+}
+</code></pre>
+<p>可以看到，消息追加的操作最终是通过<strong>MemoryRecordsBuilder</strong>完成的，每一条消息都是以crc|magic|attribute|timestamp...这样的格式最终追加到分配到ByteBuffer中：</p>
+<center><br/> <img src="./img/20210527220535639.png" style="zoom:70%"><br/></img></center>
+<pre><code class="lang-JAVA">// MemoryRecordsBuilder.java
+
+public long append(long timestamp, byte[] key, byte[] value) {
+    return appendWithOffset(lastOffset &lt; 0 ? baseOffset : lastOffset + 1, timestamp, key, value);
+}
+
+public long appendWithOffset(long offset, long timestamp, byte[] key, byte[] value) {
+    try {
+        if (lastOffset &gt;= 0 &amp;&amp; offset &lt;= lastOffset)
+            throw new IllegalArgumentException(String.format("Illegal offset %s following previous offset %s (Offsets must increase monotonically).", offset, lastOffset));
+
+        int size = Record.recordSize(magic, key, value);
+
+        // LogEntry日志项，appendStream就是由ByteBuffer转化而来
+        LogEntry.writeHeader(appendStream, toInnerOffset(offset), size);
+
+        if (timestampType == TimestampType.LOG_APPEND_TIME)
+            timestamp = logAppendTime;
+        long crc = Record.write(appendStream, magic, timestamp, key, value, CompressionType.NONE, timestampType);
+        recordWritten(offset, timestamp, size + Records.LOG_OVERHEAD);
+        return crc;
+    } catch (IOException e) {
+        throw new KafkaException("I/O exception when writing to the append stream, closing", e);
+    }
+}
+</code></pre>
+<h2 id="-">二、消息缓存</h2>
+<p>了解了RecordAccumulator内部的几个重要组件，我们再来看消息缓存的整体流程。</p>
+<p>KafkaProducer发送消息时，内部调用了<code>RecordAccumulator.append</code>方法，消息会被追加到 RecordAccumulator 内部的某个双端队列（ Deque ）中，并且多个消息会被打包成一个批次——RecordBatch： </p>
+<p><center><br/> <img src="./img/20210527220547427.png" style="zoom:70%"/><br/></center></p>
+<h3 id="2-1-">2.1 整体流程</h3>
+<p>消息追加的整体流程是通过<code>RecordAccumulator.append()</code>方法完成的：</p>
+<ol>
+<li>首先，根据消息的分区，从CopyOnWriteMap中找到一个已有的或新建一个<code>Deque&lt;RecordBatch&gt;</code>；</li>
+<li>每个RecordBatch可用的缓存块默认大小为16KB，如果消息超过这个大小，就单独作为一个自定义大小的batch入队；</li>
+<li>如果消息没有超过16kb，就将多个消息打包成一个batch入队。</li>
+</ol>
+<pre><code class="lang-JAVA">// RecordAccumulator.java
+
+public RecordAppendResult append(TopicPartition tp, long timestamp, byte[] key, byte[] value,
+                                 Callback callback, long maxTimeToBlock) throws InterruptedException {
+    appendsInProgress.incrementAndGet();
+    try {
+        // 1.根据分区，从内部的CopyOnWriteMap获取或新建一个双端队列
+        Deque&lt;RecordBatch&gt; dq = getOrCreateDeque(tp);
+        synchronized (dq) {
+            if (closed)
+                throw new IllegalStateException("Cannot send after the producer is closed.");
+            // 尝试往Dequeue中追加消息，不存在可用Batch或Batch可用空间不足会追加失败
+            RecordAppendResult appendResult = tryAppend(timestamp, key, value, callback, dq);
+            if (appendResult != null)
+                // 追加成功
+                return appendResult;
+        }
+
+        // 2.执行到这里，说明Dequeue队尾没有可用batch，或有batch但可用空间不足
+        // 计算待新建的batch大小
+        int size = Math.max(this.batchSize, Records.LOG_OVERHEAD + Record.recordSize(key, value));
+        log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+        // 从BufferPool中获取一块可用的ByteBuffer，如果空间不足会阻塞
+        ByteBuffer buffer = free.allocate(size, maxTimeToBlock);
+        synchronized (dq) {
+            if (closed)
+                throw new IllegalStateException("Cannot send after the producer is closed.");
+            // 再次追加消息，不存在可用Batch会追加失败
+            RecordAppendResult appendResult = tryAppend(timestamp, key, value, callback, dq);
+            // 这里用了一个双重锁检查，主要针对多个线程同时获取多个ByteBuffer的情况进行处理
+            if (appendResult != null) {
+                // 归还buffer
+                free.deallocate(buffer);
+                return appendResult;
+            }
+
+            // 3.执行到这里，说明是首次往Deque存入batch
+            // MemoryRecordsBuilder负责真正的消息往ByteBuffer写入
+            MemoryRecordsBuilder recordsBuilder = MemoryRecords.builder(buffer, compression, TimestampType.CREATE_TIME, this.batchSize);
+            // 创建一个RecordBatch并入队，持有MemoryRecordsBuilder
+            RecordBatch batch = new RecordBatch(tp, recordsBuilder, time.milliseconds());
+            FutureRecordMetadata future = Utils.notNull(batch.tryAppend(timestamp, key, value, callback, time.milliseconds()));
+            dq.addLast(batch);
+            incomplete.add(batch);
+            return new RecordAppendResult(future, dq.size() &gt; 1 || batch.isFull(), true);
+        }
+    } finally {
+        appendsInProgress.decrementAndGet();
+    }
+}
+</code></pre>
+<pre><code class="lang-JAVA">// RecordAccumulator.java
+
+// 新建或获取已存在的Deque&lt;RecordBatch&gt;
+private Deque&lt;RecordBatch&gt; getOrCreateDeque(TopicPartition tp) {
+    // 从内部的CopyOnWriteMap获取
+    Deque&lt;RecordBatch&gt; d = this.batches.get(tp);
+    if (d != null)
+        return d;
+    // 如果不存在，则新建一个
+    d = new ArrayDeque&lt;&gt;();
+    Deque&lt;RecordBatch&gt; previous = this.batches.putIfAbsent(tp, d);
+    if (previous == null)
+        return d;
+    else
+        return previous;
+}
+
+
+// 尝试向Deque&lt;RecordBatch&gt;中追加消息
+private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Callback callback, Deque&lt;RecordBatch&gt; deque) {
+    // 拿出队尾的Batch
+    RecordBatch last = deque.peekLast();
+    if (last != null) {
+        FutureRecordMetadata future = last.tryAppend(timestamp, key, value, callback, time.milliseconds());
+        if (future == null)
+            last.close();
+        else
+            return new RecordAppendResult(future, deque.size() &gt; 1 || last.isFull(), false);
+    }
+    return null;
+}
+</code></pre>
+<p>一个RecordBatch内部持有一个ByteBuffer，里面可能存放好几条消息，可以通过<code>batch.size</code>参数可以控制batch的大小，默16KB。所以在实际生产环境中，以下参数都是必须经过调优的：</p>
+<ul>
+<li><strong>request.max.size：</strong>每条消息的最大大小，默认1MB；</li>
+<li><strong>batch.size：</strong>每个RecordBatch的大小，默认16KB；</li>
+<li><strong>buffer.memory：</strong>消息缓冲区的大小，默认32MB。</li>
+</ul>
+<p>你必须要根据自己实际发送的消息大小来设置<code>request.max.size</code>和<code>batch.size</code>，否则如果消息大小频繁超过了<code>batch.sizse</code>的话，那就是一条消息一个批次，起不到提升吞吐量的效果。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我对RecordAccumulator的内存结构和消息缓存的底层原理进行了讲解。这里总结一下：</p>
+<ul>
+<li><p>RecordAccumulator会按照分区维度将消息缓存，底层采用了一个CopyOnWriteMap来保存这种映射关系；</p>
+</li>
+<li><p>RecordAccumulator会将多个消息打成一个RecordBatch，目的是后续Sender线程可以按批次发送消息，减少网络传输的开销，提升整体吞吐量；</p>
+</li>
+<li><p>RecordAccumulator内部有一个缓冲池BufferPool，缓冲池里面划分了一块块固定大小的ByteBuffer，每一个RecordBatch都会使用一个ByteBuffer来写入多条消息，如果某条消息的大小超过单个ByteBuffer的默认大小（16KB），就会自定义一块ByteBuffer；</p>
+</li>
+<li><p>消息最终是以一种紧凑的二进制格式<code>offset | size | crc | magic | attibutes | timestamp | key size | key | value size | value</code>写入到底层的ByteBuffer里去。</p>
+</li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

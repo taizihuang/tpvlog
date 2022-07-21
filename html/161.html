@@ -1,0 +1,160 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十五）——相关度分数调优</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十五）——相关度分数调优</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我对Elasticsearch中的整个相关度分数算法的核心思想和原理进行了讲解，包括TF/IDF，vector space model，boolean model等等。<br/>本章，我们就来看看，实际在使用Elasticsearch的过程中，如何对相关度分数进行调优。综合来讲，主要有如下四种方法，我们一一来看下：</p>
+<ul>
+<li>query-time boost</li>
+<li>negative boost</li>
+<li>constant_score</li>
+<li>function_score</li>
+</ul>
+<h2 id="-query-time-boost">一、query-time boost</h2>
+<p>query-time boost就是利用<code>boost</code>增强某个query的权重，比如下面的查询有两个搜索条件，针对title字段的查询由于添加了<code>boost</code>参数，使其权重更大，所以title在匹配doc中分数占比会更大：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "bool": {
+      "should": [
+        {
+          "match": {
+            "title": {
+              "query": "java spark",
+              "boost": 2
+            }
+          }
+        },
+        {
+          "match": {
+            "content": "java spark"
+          }
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<h2 id="-negative-boost">二、negative boost</h2>
+<p>negative boost，主要用于减少某些字段的权重，可以看成是query-time boost的反向参数。</p>
+<p>比如我们有这样一个查询需求：搜索content字段中包含"java"，但不包含spark的"document"。那么，可能会像下面这样构造查询请求：</p>
+<pre><code class="lang-JAVA">GET /forum/_search 
+{
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "match": {
+            "content": "java"
+          }
+        }
+      ],
+      "must_not": [
+        {
+          "match": {
+            "content": "spark"
+          }
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<p>但是有时候，我们不希望完全排除某个关键字，可能只是希望如果字段中包含某个关键字，就降低它的分数，比如上面的spark。</p>
+<p>对于这种需求，可以使用<code>negative_boost</code>，包含了negative term的document，其分数会乘以<code>negative boost</code>：</p>
+<pre><code class="lang-JAVA">GET /forum/_search 
+{
+  "query": {
+    "boosting": {
+      "positive": {
+        "match": {
+          "content": "java"
+        }
+      },
+      "negative": {
+        "match": {
+          "content": "spark"
+        }
+      },
+      "negative_boost": 0.2
+    }
+  }
+}
+</code></pre>
+<h2 id="-constant_score">三、constant_score</h2>
+<p>如果我们压根不需要相关度评分，就直接用<code>constant_score</code>加filter，这样所有的doc分数都是1，没有评分的概念：</p>
+<pre><code class="lang-JAVA">GET /forum/_search 
+{
+  "query": {
+    "bool": {
+      "should": [
+        {
+          "constant_score": {
+            "query": {
+              "match": {
+                "title": "java"
+              }
+            }
+          }
+        },
+        {
+          "constant_score": {
+            "query": {
+              "match": {
+                "title": "spark"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<h2 id="-function_score">四、function_score</h2>
+<p>我们还可以使用<code>function_score</code>，自定义相关度分数的算法。</p>
+<p>比如我们有这样一个需求：希望看某个帖子的人越多，那么该帖子的分数就越高，帖子浏览数可以定义为一个<code>follower_num</code>字段。那么可以像下面这样使用<code>function_score</code>：</p>
+<pre><code class="lang-JAVA">GET /forum/_search
+{
+  "query": {
+    "function_score": {
+      "query": {
+        "multi_match": {
+          "query": "java spark",
+          "fields": ["tile", "content"]
+        }
+      },
+      "field_value_factor": {
+        "field": "follower_num",
+        "modifier": "log1p",
+        "factor": 0.5
+      },
+      "boost_mode": "sum",
+      "max_boost": 2
+    }
+  }
+}
+</code></pre>
+<p>上述请求中：</p>
+<ul>
+<li><code>log1p</code>是一个函数，用于对字段分数进行修正：<code>new_score = old_score * log(1 + factor * follower_num)</code>；</li>
+<li><code>boost_mode</code>，用于决定最终doc分数与指定字段的值如何计算：multiply，sum，min，max，replace；</li>
+<li><code>max_boost</code>，用于限制计算出来的分数不要超过max_boost指定的值。</li>
+</ul>
+<h2 id="-">五、总结</h2>
+<p>本章，我介绍了如何对相关度分数进行调优。综合来讲，主要有如下四种方法：</p>
+<ul>
+<li>query-time boost</li>
+<li>negative boost</li>
+<li>constant_score</li>
+<li>function_score</li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

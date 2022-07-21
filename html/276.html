@@ -1,0 +1,83 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将带领大家进入Spring Cloud系列内容的学习。Spring Cloud技术栈作为微服务架构的一站式解决方案，在大量的互联网公司都有运用。许多大型互联网公司更是在Spring Cloud的基础上进行了功能定制和二次开发，以满足海量交易和服务化的需求。</p>
+<p>目前Spring Cloud作为一套与Spring技术栈融合的标准微服务框架体系，已包含了很多组件，许多公司针对Spring Cloud够有自己的组件，目前比较主流的是Spring Cloud Netflix和Spring Cloud Alibaba。Spring Cloud Netflix是最为程数稳定的，所以我这个系列就是讲解Spring Cloud Netflix，以后有空可能会讲解Spring Cloud Alibaba。</p>
+<p>Spring Cloud Netflix主要包含以下核心组件：</p>
+<ul>
+<li><strong>服务注册发现：</strong>Eureka </li>
+<li><strong>负载均衡：</strong>Ribbon</li>
+<li><strong>服务调用：</strong>Feign</li>
+<li><strong>限流熔断：</strong>Hystrix</li>
+<li><strong>服务网关：</strong>Zuul</li>
+</ul>
+<p>我将从Eureka开始，介绍每一个核心组件的基本使用，接着会深入源码，抽丝拨茧，带领大家深入理解每一个组件的设计思想和底层原理。对于每一个组件，我将按照<code>Demo示例 -&gt; 核心功能介绍 -&gt; 系统整体结构 -&gt; 模块源码分析</code>的顺序，由浅入深进行讲解。</p>
+<h2 id="-eureka">一、Eureka</h2>
+<p>本部分包含以下内容：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/239">透彻理解Spring Cloud系列（1）——Eureka介绍</a></li>
+<li><a href="https://www.tpvlog.com/article/240">透彻理解Spring Cloud系列（2）——Eureka基本使用</a></li>
+<li><a href="https://www.tpvlog.com/article/241">透彻理解Spring Cloud系列（3）——Eureka源码环境搭建</a></li>
+<li><a href="https://www.tpvlog.com/article/242">透彻理解Spring Cloud系列（4）——Eureka启动：整体流程</a></li>
+<li><a href="https://www.tpvlog.com/article/243">透彻理解Spring Cloud系列（5）——Eureka启动：配置加载</a></li>
+<li><a href="https://www.tpvlog.com/article/244">透彻理解Spring Cloud系列（6）——Eureka启动：InstanceInfo应用实例构造</a></li>
+<li><a href="https://www.tpvlog.com/article/245">透彻理解Spring Cloud系列（7）——Eureka启动：EurekaClient初始化</a></li>
+<li><a href="https://www.tpvlog.com/article/246">透彻理解Spring Cloud系列（8）——Eureka启动：PeerAwareInstanceRegistry注册表构造</a></li>
+<li><a href="https://www.tpvlog.com/article/247">透彻理解Spring Cloud系列（9）——Eureka Server：PeerEurekaNodes集群节点集合构造</a></li>
+<li><a href="https://www.tpvlog.com/article/248">透彻理解Spring Cloud系列（10）——Eureka Server：EurekaServerContext构造</a></li>
+<li><a href="https://www.tpvlog.com/article/249">透彻理解Spring Cloud系列（11）——服务注册发现：Eureka-Client发起注册（register）</a></li>
+<li><a href="https://www.tpvlog.com/article/250">透彻理解Spring Cloud系列（12）——服务注册发现：Eureka-Server接受注册（register）</a></li>
+<li><a href="https://www.tpvlog.com/article/251">透彻理解Spring Cloud系列（13）——服务注册发现：全量拉取注册表及多级缓存</a></li>
+<li><a href="https://www.tpvlog.com/article/252">透彻理解Spring Cloud系列（14）——服务注册发现：增量拉取注册表及Hash比对</a></li>
+<li><a href="https://www.tpvlog.com/article/253">透彻理解Spring Cloud系列（15）——服务注册发现：心跳续租（renew）机制</a></li>
+<li><a href="https://www.tpvlog.com/article/254">透彻理解Spring Cloud系列（16）——服务注册发现：服务下线（cancel）机制</a></li>
+<li><a href="https://www.tpvlog.com/article/255">透彻理解Spring Cloud系列（17）——服务注册发现：服务剔除（eviction）机制</a></li>
+<li><a href="https://www.tpvlog.com/article/256">透彻理解Spring Cloud系列（18）——服务注册发现：自我保护机制</a></li>
+<li><a href="https://www.tpvlog.com/article/257">透彻理解Spring Cloud系列（19）——服务发现注册：集群同步原理</a></li>
+<li><a href="https://www.tpvlog.com/article/258">透彻理解Spring Cloud系列（20）——Spring Cloud Eureka：注解式启动Eureka原理</a></li>
+</ul>
+<h2 id="-ribbon">二、Ribbon</h2>
+<p>本部分包含以下内容：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/259">透彻理解Spring Cloud系列（21）——Ribbon基本使用</a></li>
+<li><a href="https://www.tpvlog.com/article/260">透彻理解Spring Cloud系列（22）——Ribbon初始化流程：客户端配置原理</a></li>
+<li><a href="https://www.tpvlog.com/article/261">透彻理解Spring Cloud系列（23）——Ribbon初始化流程：整合Eureka</a></li>
+<li><a href="https://www.tpvlog.com/article/262">透彻理解Spring Cloud系列（24）——Ribbon工作流程：工作流程分析</a></li>
+<li><a href="https://www.tpvlog.com/article/263">透彻理解Spring Cloud系列（25）——Ribbon工作流程：核心组件分析</a></li>
+</ul>
+<h2 id="-feign">三、Feign</h2>
+<p>本部分包含以下内容：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/264">透彻理解Spring Cloud系列（26）——Feign基本使用</a></li>
+<li><a href="https://www.tpvlog.com/article/265">透彻理解Spring Cloud系列（27）——Feign初始化流程：客户端配置原理</a></li>
+<li><a href="https://www.tpvlog.com/article/266">透彻理解Spring Cloud系列（28）——FeignClient动态代理：创建代理对象</a></li>
+<li><a href="https://www.tpvlog.com/article/267">透彻理解Spring Cloud系列（29）——FeignClient动态代理：请求流程</a></li>
+</ul>
+<h2 id="-hystrix">四、Hystrix</h2>
+<p>本部分包含以下内容：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/268">透彻理解Spring Cloud系列（30）——Hystrix基本原理</a></li>
+<li><a href="https://www.tpvlog.com/article/269">透彻理解Spring Cloud系列（31）——Hystrix基本使用</a></li>
+<li><a href="https://www.tpvlog.com/article/270">透彻理解Spring Cloud系列（32）——Hystrix初始化：整合Feign</a></li>
+<li><a href="https://www.tpvlog.com/article/271">透彻理解Spring Cloud系列（33）——Hystrix初始化：独立使用</a></li>
+<li><a href="https://www.tpvlog.com/article/272">透彻理解Spring Cloud系列（34）——Hystrix工作流程：HystrixCommand整体分析</a></li>
+<li><a href=""></a></li>
+</ul>
+<h2 id="-zuul">五、Zuul</h2>
+<p>本部分包含以下内容：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/273">透彻理解Spring Cloud系列（35）——Zuul基本原理</a></li>
+<li><a href="https://www.tpvlog.com/article/274">透彻理解Spring Cloud系列（36）——Zuul初始化和执行流程</a></li>
+<li><a href="https://www.tpvlog.com/article/275">透彻理解Spring Cloud系列（37）——过滤器（Filter）详解</a></li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

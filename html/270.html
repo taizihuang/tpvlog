@@ -1,0 +1,360 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（三二）——Hystrix初始化：整合Feign</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（三二）——Hystrix初始化：整合Feign</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将讲解Hystix与Feign组合使用时的初始化流程。通过Feign系列的学习，大家已经知道Feign在自动装配的时候，如果项目中有Hystrix相关的依赖，就会引入两个核心的Hystrix相关组件：</p>
+<ul>
+<li>HystrixTargeter</li>
+<li>HystrixFeign.builder()</li>
+</ul>
+<p>下图为Feign的公共组件的默认装配流程：</p>
+<p><img alt="" src="./img/20210307184904569.png"/></p>
+<p>在使用Feign时，最终就是生成一个动态代理类，那么可以猜想，当引入了Hystrix，这个动态代理类一定是集成了Hystrix的某些组件。</p>
+<h2 id="-">一、初始化流程</h2>
+<p>我用下面这张图表述集成Hystrix后，Feign的初始化流程：</p>
+<p><img alt="" src="./img/20210307184921587.png"/></p>
+<p>可以看到，与之前Feign系列中讲解的初始化流程最大区别有以下几点：</p>
+<ol>
+<li>使用了HystrixFeign.Builder来完成动态代理对象的构建，HystrixFeign.Builder内部封装了很多Hystrix需要的组件，比如SetterFactory.Default用来设置HystrixCommand，默认的groupKey为<strong>服务名称，commandKey为接口+方法名称</strong>；</li>
+<li>最终使用JDK动态代理创建代理对象时，使用了<code>HystrixInvocationHandler</code>，这个InvocationHandler包含了Hystrix的特殊处理逻辑，比如降级。</li>
+</ol>
+<h3 id="1-1-hystrixtargeter">1.1 HystrixTargeter</h3>
+<p><code>@FeignClient</code>注解的接口的动态代理对象是通过<code>FeignClientFactoryBean.getObject()</code>生成的。而FeignClientFactoryBean内部则利用了Targeter组件，当引入Hystrix时，这个组件的具体实现类为<strong>HystrixTargeter</strong>，代理对象最终通过<code>Targeter.target()</code>生成：</p>
+<pre><code class="lang-JAVA">// FeignClientFactoryBean.java
+
+&lt;T&gt; T getTarget() {
+    FeignContext context = applicationContext.getBean(FeignContext.class);
+    // 这里获取到的是HystrixFeign.Builder
+    Feign.Builder builder = feign(context);
+    //...
+    // 这里获取到的是HystrixTargeter
+    Targeter targeter = get(context, Targeter.class);
+    // 创建代理对象
+    return (T) targeter.target(this, builder, context,
+                               new HardCodedTarget&lt;&gt;(type, name, url));
+}
+</code></pre>
+<p>我们来看下HystrixTargeter的具体实现：</p>
+<pre><code class="lang-JAVA">class HystrixTargeter implements Targeter {
+
+    @Override
+    public &lt;T&gt; T target(FeignClientFactoryBean factory, Feign.Builder feign,
+            FeignContext context, Target.HardCodedTarget&lt;T&gt; target) {
+        if (!(feign instanceof feign.hystrix.HystrixFeign.Builder)) {
+            return feign.target(target);
+        }
+        feign.hystrix.HystrixFeign.Builder builder = (feign.hystrix.HystrixFeign.Builder) feign;
+        // name为服务名称
+        String name = StringUtils.isEmpty(factory.getContextId()) ? factory.getName()
+                : factory.getContextId();
+
+        // HystrixCommand配置工厂
+        SetterFactory setterFactory = getOptional(name, context, SetterFactory.class);
+        if (setterFactory != null) {
+            builder.setterFactory(setterFactory);
+        }
+        // fallback是@FeignClient上的注解属性值
+        Class&lt;?&gt; fallback = factory.getFallback();
+        if (fallback != void.class) {
+            return targetWithFallback(name, context, target, builder, fallback);
+        }
+        // fallbackFactory是@FeignClient上的注解属性值
+        Class&lt;?&gt; fallbackFactory = factory.getFallbackFactory();
+        if (fallbackFactory != void.class) {
+            return targetWithFallbackFactory(name, context, target, builder,
+                    fallbackFactory);
+        }
+        return feign.target(target);
+    }
+}
+</code></pre>
+<p>可以看到，相比默认的DefaultTargeter，就是多了对Fallback和FallbackFactory的处理，它们的内部处理逻辑是类似的，我以fallbackFactory为例讲解下。</p>
+<h3 id="1-2-fallbackfactory">1.2 FallbackFactory</h3>
+<p>FallbackFactory就是降级逻辑的工厂类，可以在<code>@FeignClient</code>注解中配置，比如：</p>
+<pre><code class="lang-JAVA">@FeignClient(name = "ServiceA",fallbackFactory = ServiceAClientFallbackFactory.class)    
+public interface ServiceAClient extends ServiceAInterface {
+}
+</code></pre>
+<p>我们来看下HystrixTargeter如何整合FallbackFactory，并创建最终的代理对象的：</p>
+<pre><code class="lang-JAVA">// HystrixTargeter.java
+
+private &lt;T&gt; T targetWithFallbackFactory(String feignClientName, FeignContext context,
+                                        Target.HardCodedTarget&lt;T&gt; target, HystrixFeign.Builder builder,
+                                        Class&lt;?&gt; fallbackFactoryClass) {
+    // FallbackFactory接口实现类的对象（会被注入到FeignClient自身的ApplicationContext中）
+    FallbackFactory&lt;? extends T&gt; fallbackFactory = (FallbackFactory&lt;? extends T&gt;) getFromContext(
+        "fallbackFactory", feignClientName, context, fallbackFactoryClass,
+        FallbackFactory.class);
+    // 构建代理对象
+    return builder.target(target, fallbackFactory);
+}
+</code></pre>
+<p>上述代码调用了<code>HystrixFeign.target</code>：</p>
+<pre><code class="lang-JAVA">// HystrixFeign.java
+
+public &lt;T&gt; T target(Target&lt;T&gt; target, FallbackFactory&lt;? extends T&gt; fallbackFactory) {
+    // 这里的target是Target.HardCodedTarget，就是个包装类而已
+    return build(fallbackFactory).newInstance(target);
+}
+</code></pre>
+<h3 id="1-3-hystrixinvocationhandler">1.3 HystrixInvocationHandler</h3>
+<p>我们继续看HystrixFeign.build()：</p>
+<ol>
+<li>首先设置了一个InvocationHandlerFactory，顾名思义就是用来创建JDK动态代理中的InvocationHandler对象的，可以看到这里的InvocationHandler具体实现是HystrixInvocationHandler；</li>
+<li>接着，<code>super.contract(new HystrixDelegatingContract(contract));</code>就是设置一个HystrixDelegatingContract对象，这个Contract是用来解析Hystrix原生的一些注解的，比如@HystrixCommand等；</li>
+</ol>
+<pre><code class="lang-JAVA">// HystrixFeign.Builder.java
+
+// 集成Hystrix相关组件
+Feign build(final FallbackFactory&lt;?&gt; nullableFallbackFactory) {
+    // 1.设置一个生成HystrixInvocationHandler的工厂
+    super.invocationHandlerFactory(new InvocationHandlerFactory() {
+        @Override
+        public InvocationHandler create(Target target,
+                                        Map&lt;Method, MethodHandler&gt; dispatch) {
+            return new HystrixInvocationHandler(target, dispatch, setterFactory,
+                                                nullableFallbackFactory);
+        }
+    });
+    // 2.设置一个HystrixDelegatingContract对象，解析Hystrix原生注解
+    super.contract(new HystrixDelegatingContract(contract));
+    // 3.调用HystrixFeign.Builder完成构建
+    return super.build();
+}
+</code></pre>
+<p>HystrixInvocationHandler是需要我们重点关注的，后面实际执行代理对象的方法时，会触发这个类的方法的执行。可以看到，它包含了Hystrix的降级组件：</p>
+<pre><code class="lang-JAVA">// HystrixInvocationHandler.java
+
+final class HystrixInvocationHandler implements InvocationHandler {
+  private final Target&lt;?&gt; target;
+  private final Map&lt;Method, MethodHandler&gt; dispatch;
+  private final FallbackFactory&lt;?&gt; fallbackFactory; // Nullable
+  private final Map&lt;Method, Method&gt; fallbackMethodMap;
+  private final Map&lt;Method, Setter&gt; setterMethodMap;
+
+  HystrixInvocationHandler(Target&lt;?&gt; target, Map&lt;Method, MethodHandler&gt; dispatch,
+      SetterFactory setterFactory, FallbackFactory&lt;?&gt; fallbackFactory) {
+    this.target = checkNotNull(target, "target");
+    this.dispatch = checkNotNull(dispatch, "dispatch");
+    this.fallbackFactory = fallbackFactory;
+    this.fallbackMethodMap = toFallbackMethod(dispatch);
+    this.setterMethodMap = toSetters(setterFactory, target, dispatch.keySet());
+  }
+  //...
+}
+</code></pre>
+<p>我们再来看下父类的构建，就是创建一个ReflectiveFeign，后面的流程就完全和Feign一样了：</p>
+<pre><code class="lang-JAVA">// Feign.Builder
+
+public Feign build() {
+    Client client = Capability.enrich(this.client, capabilities);
+    Retryer retryer = Capability.enrich(this.retryer, capabilities);
+    List&lt;RequestInterceptor&gt; requestInterceptors = this.requestInterceptors.stream()
+        .map(ri -&gt; Capability.enrich(ri, capabilities))
+        .collect(Collectors.toList());
+    Logger logger = Capability.enrich(this.logger, capabilities);
+    Contract contract = Capability.enrich(this.contract, capabilities);
+    Options options = Capability.enrich(this.options, capabilities);
+    Encoder encoder = Capability.enrich(this.encoder, capabilities);
+    Decoder decoder = Capability.enrich(this.decoder, capabilities);
+    InvocationHandlerFactory invocationHandlerFactory =
+        Capability.enrich(this.invocationHandlerFactory, capabilities);
+    QueryMapEncoder queryMapEncoder = Capability.enrich(this.queryMapEncoder, capabilities);
+
+    SynchronousMethodHandler.Factory synchronousMethodHandlerFactory =
+        new SynchronousMethodHandler.Factory(client, retryer, requestInterceptors, logger,
+                                             logLevel, decode404, closeAfterDecode, propagationPolicy, forceDecoding);
+    ParseHandlersByName handlersByName =
+        new ParseHandlersByName(contract, options, encoder, decoder, queryMapEncoder,
+                                errorDecoder, synchronousMethodHandlerFactory);
+    return new ReflectiveFeign(handlersByName, invocationHandlerFactory, queryMapEncoder);
+}
+</code></pre>
+<h2 id="-hystrixinvocationhandler-">二、HystrixInvocationHandler分析</h2>
+<p>默认情况下，Feign生成的InvocationHandler是<code>ReflectiveFeign.FeignInvocationHandler</code>，但是当使用了Hystrix以后，则是<code>HystrixInvocationHandler</code>，也就是说，当我调用代理对象的接口方法时，都会触发<code>HystrixInvocationHandler.invoke()</code>的执行：</p>
+<p><center><br/> <img src="./img/png" style="zoom:90%"><br/></img></center></p>
+<h3 id="2-1-">2.1 构建</h3>
+<p>我们先来回顾下通过JDK动态代理创建代理对象时，是如何构建HystrixInvocationHandler的：</p>
+<pre><code class="lang-JAVA">final class HystrixInvocationHandler implements InvocationHandler {
+
+  private final Target&lt;?&gt; target;
+  private final Map&lt;Method, MethodHandler&gt; dispatch;
+  private final FallbackFactory&lt;?&gt; fallbackFactory; // Nullable
+  private final Map&lt;Method, Method&gt; fallbackMethodMap;
+  private final Map&lt;Method, Setter&gt; setterMethodMap;
+
+  HystrixInvocationHandler(Target&lt;?&gt; target, Map&lt;Method, MethodHandler&gt; dispatch,
+      SetterFactory setterFactory, FallbackFactory&lt;?&gt; fallbackFactory) {
+    this.target = checkNotNull(target, "target");
+    this.dispatch = checkNotNull(dispatch, "dispatch");
+    this.fallbackFactory = fallbackFactory;
+    this.fallbackMethodMap = toFallbackMethod(dispatch);
+    this.setterMethodMap = toSetters(setterFactory, target, dispatch.keySet());
+  }
+}
+</code></pre>
+<p>构造器中就是一些属性设置，关键注意<code>toFallbackMethod</code>和<code>toSetters</code>这两个方法。</p>
+<p>首先看toFallbackMethod，这块代码就是遍历dispatch（里面包含了<code>&lt;方法元数据,MethodHandler&gt;</code>，MethodHandler的实现类是SynchronousMethodHandler，里面包含了Feign的处理流程），将Key存放到一个Map中：</p>
+<pre><code class="lang-JAVA">// HystrixInvocationHandler.java
+
+static Map&lt;Method, Method&gt; toFallbackMethod(Map&lt;Method, MethodHandler&gt; dispatch) {
+    Map&lt;Method, Method&gt; result = new LinkedHashMap&lt;Method, Method&gt;();
+    for (Method method : dispatch.keySet()) {
+        method.setAccessible(true);
+        // key为方法
+        result.put(method, method);
+    }
+    return result;
+}
+</code></pre>
+<p>再来看toSetters方法，也是生成一个Map，key是方法元数据，value是一个<code>HystrixCommand.Setter</code>对象，它的核心作用是设置HystrixCommand的分组：</p>
+<pre><code class="lang-JAVA">// HystrixInvocationHandler.java
+
+static Map&lt;Method, Setter&gt; toSetters(SetterFactory setterFactory, Target&lt;?&gt; target, Set&lt;Method&gt; methods) {
+    Map&lt;Method, Setter&gt; result = new LinkedHashMap&lt;Method, Setter&gt;();
+    for (Method method : methods) {
+        method.setAccessible(true);
+        result.put(method, setterFactory.create(target, method));
+    }
+    return result;
+}
+</code></pre>
+<p>HystrixCommand.Setter：</p>
+<pre><code class="lang-JAVA">// SetterFactory.java
+
+public interface SetterFactory {
+  HystrixCommand.Setter create(Target&lt;?&gt; target, Method method);
+
+  final class Default implements SetterFactory {
+    @Override
+    public HystrixCommand.Setter create(Target&lt;?&gt; target, Method method) {
+      // 服务名称
+      String groupKey = target.name();
+      // @FeignClient标记的接口类+方法组合成一个字符串，比如 ServiceAClient#sayHello(String)
+      String commandKey = Feign.configKey(target.type(), method);
+      // 这是Hystrix原生的使用
+      return HystrixCommand.Setter
+          .withGroupKey(HystrixCommandGroupKey.Factory.asKey(groupKey))
+          .andCommandKey(HystrixCommandKey.Factory.asKey(commandKey));
+    }
+  }
+}
+</code></pre>
+<blockquote>
+<p>关于groupKey和commandKey，不熟悉的童鞋可以去看我写的<a href="">《分布式系统从理论到实战系列》</a>。</p>
+</blockquote>
+<h3 id="2-2-">2.2 执行</h3>
+<p>接着来看HystrixInvocationHandler的执行，本质就是生成一个HystrixCommand对象，然后将Feign的调用逻辑封装到它内部，最后调用它：</p>
+<pre><code class="lang-JAVA">// HystrixInvocationHandler.java
+
+@Override
+public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
+    // 1.如果是调用的Object类的方法，直接返回
+    if ("equals".equals(method.getName())) {
+        try {
+            Object otherHandler =
+                args.length &gt; 0 &amp;&amp; args[0] != null ? Proxy.getInvocationHandler(args[0]) : null;
+            return equals(otherHandler);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    } else if ("hashCode".equals(method.getName())) {
+        return hashCode();
+    } else if ("toString".equals(method.getName())) {
+        return toString();
+    }
+
+    // 2.创建一个HystrixCommand对象
+    HystrixCommand&lt;Object&gt; hystrixCommand =
+        new HystrixCommand&lt;Object&gt;(setterMethodMap.get(method)) {
+        @Override
+        protected Object run() throws Exception {
+            try {
+                // 关键：根据Method元数据，从dispatch找到SynchronousMethodHandler，然后执行
+                return HystrixInvocationHandler.this.dispatch.get(method).invoke(args);
+            } catch (Exception e) {
+                throw e;
+            } catch (Throwable t) {
+                throw (Error) t;
+            }
+        }
+
+        // 降级逻辑
+        @Override
+        protected Object getFallback() {
+            if (fallbackFactory == null) {
+                // 没有做降级处理，直接抛出异常
+                return super.getFallback();
+            }
+            try {
+                // getExecutionException()用于解析异常，返回的fallback就是降级对象
+                Object fallback = fallbackFactory.create(getExecutionException());
+                // 执行降级逻辑
+                Object result = fallbackMethodMap.get(method).invoke(fallback, args);
+
+                // 根据方法返回类型作不同处理
+                if (isReturnsHystrixCommand(method)) {
+                    return ((HystrixCommand) result).execute();
+                } else if (isReturnsObservable(method)) {
+                    // Create a cold Observable
+                    return ((Observable) result).toBlocking().first();
+                } else if (isReturnsSingle(method)) {
+                    // Create a cold Observable as a Single
+                    return ((Single) result).toObservable().toBlocking().first();
+                } else if (isReturnsCompletable(method)) {
+                    ((Completable) result).await();
+                    return null;
+                } else if (isReturnsCompletableFuture(method)) {
+                    return ((Future) result).get();
+                } else {
+                    return result;
+                }
+            } catch (IllegalAccessException e) {
+                // shouldn't happen as method is public due to being an interface
+                throw new AssertionError(e);
+            } catch (InvocationTargetException | ExecutionException e) {
+                // Exceptions on fallback are tossed by Hystrix
+                throw new AssertionError(e.getCause());
+            } catch (InterruptedException e) {
+                // Exceptions on fallback are tossed by Hystrix
+                Thread.currentThread().interrupt();
+                throw new AssertionError(e.getCause());
+            }
+        }
+    };
+
+    // 根据方法返回类型的不同，对command执行不同调用操作
+    if (Util.isDefault(method)) {
+        return hystrixCommand.execute();
+    } else if (isReturnsHystrixCommand(method)) {
+        return hystrixCommand;
+    } else if (isReturnsObservable(method)) {
+        // Create a cold Observable
+        return hystrixCommand.toObservable();
+    } else if (isReturnsSingle(method)) {
+        // Create a cold Observable as a Single
+        return hystrixCommand.toObservable().toSingle();
+    } else if (isReturnsCompletable(method)) {
+        return hystrixCommand.toObservable().toCompletable();
+    } else if (isReturnsCompletableFuture(method)) {
+        return new ObservableCompletableFuture&lt;&gt;(hystrixCommand);
+    }
+    return hystrixCommand.execute();
+}
+</code></pre>
+<blockquote>
+<p>注意：由于Hystrix本身的源码大量使用了RxJava这个响应式编程框架，所以可读性非常差，我后续对其源码的分析只专注于HystrixCommand.execute()这个同步方法执行的逻辑。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>本章，我针对Hystrix整合Feign时，动态代理对象的构建流程进行了讲解。Spring Cloud支持通过<code>@HystrixCommand</code>使用原生的Hystrix，也支持在Feign中使用Hystrix。我在本章讲解的主要是后者（核心原理都是一样的，后面章节会讲到）。</p>
+<p>Feign结合Hystrix一起使用时，核心思路就是针对Hystrix引入一些Feign的特殊组件，然后在最终构建代理对象时，创建一个HystrixInvocationHandler，里面包含了Hystrix的处理逻辑，这样就可以透明的将Hystrix的熔断、降级、资源隔离等功能引入到声明式方法调用中了。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

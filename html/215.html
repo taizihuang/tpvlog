@@ -1,0 +1,200 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（六）——桥接模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（六）——桥接模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>桥接模式（Bridge Design Pattern）</strong>，也是一种结构型模式。桥接模式的代码实现非常简单，但是理解起来稍微有点难度，并且应用场景也比较局限。相对于代理模式来说，桥接模式在实际的项目中并没有那么常用，所以只需要简单了解即可。</p>
+<h2 id="-">一、基本原理</h2>
+<p>GoF 对桥接模式的定义非常简短：“Decouple an abstraction from its implementation so that the two can vary independently”。翻译成中文就是：“将抽象和实现解耦，让它们可以独立变化”。</p>
+<h3 id="1-1-jdbc-">1.1 JDBC示例</h3>
+<p>估计没几个人能看懂是什么意思。所以，我们通过 JDBC 驱动的例子来解释一下。JDBC 驱动是桥接模式的经典应用。我们先来看一下，如何利用 JDBC 驱动来查询数据库。</p>
+<pre><code class="lang-JAVA">Class.forName("com.mysql.jdbc.Driver");//加载及注册JDBC驱动程序
+String url = "jdbc:mysql://localhost:3306/sample_db?user=root&amp;password=your_password";
+Connection con = DriverManager.getConnection(url);
+Statement stmt = con.createStatement()；
+String query = "select * from test";
+ResultSet rs=stmt.executeQuery(query);
+while(rs.next()) {
+  rs.getString(1);
+  rs.getInt(2);
+}
+</code></pre>
+<p>如果我们想要把 MySQL 数据库换成 Oracle 数据库，只需要把第一行代码中的 com.mysql.jdbc.Driver 换成 oracle.jdbc.driver.OracleDriver 就可以了，获取直接从配置文件中加载，这样在切换数据库的时候，我们都不需要修改代码，只需要修改配置文件就可以了。</p>
+<p>那么JDBC底层到底是如何实现的呢？我们首先必须要搞明白一点，JDBC其实是一整套Java数据库访问api，有点类似于servlet。JDK自身定义了数据库访问的API和一整套操作逻辑，而数据库厂商们要做的就是负责实现相应的驱动类：</p>
+<center><br/> <img src="./img/20200419220904274.png" style="zoom:40%"><br/></img></center>
+<p>比如，下面是MySQL实现的Driver驱动，按照JDBC规范实现java.sql.Driver接口，并注册到java.sql.DriverManager中：</p>
+<pre><code class="lang-JAVA">package com.mysql.jdbc;
+import java.sql.SQLException;
+
+public class Driver extends NonRegisteringDriver implements java.sql.Driver {
+  static {
+    try {
+      java.sql.DriverManager.registerDriver(new Driver());
+    } catch (SQLException E) {
+      throw new RuntimeException("Can't register driver!");
+    }
+  }
+
+  /**
+   * Construct a new driver and register it with DriverManager
+   * @throws SQLException if a database error occurs.
+   */
+  public Driver() throws SQLException {
+    // Required for Class.forName().newInstance()
+  }
+}
+</code></pre>
+<p>java.sql.DriverManager 负责执行所有对 JDBC 接口的调用：</p>
+<pre><code class="lang-JAVA">public class DriverManager {
+  private final static CopyOnWriteArrayList&lt;DriverInfo&gt; registeredDrivers = new CopyOnWriteArrayList&lt;DriverInfo&gt;();
+
+  //...
+  static {
+    loadInitialDrivers();
+    println("JDBC DriverManager initialized");
+  }
+  //...
+
+  public static synchronized void registerDriver(java.sql.Driver driver) throws SQLException {
+    if (driver != null) {
+      registeredDrivers.addIfAbsent(new DriverInfo(driver));
+    } else {
+      throw new NullPointerException();
+    }
+  }
+
+  public static Connection getConnection(String url, String user, String password) throws SQLException {
+    java.util.Properties info = new java.util.Properties();
+    if (user != null) {
+      info.put("user", user);
+    }
+    if (password != null) {
+      info.put("password", password);
+    }
+    return (getConnection(url, info, Reflection.getCallerClass()));
+  }
+  //...
+}
+</code></pre>
+<p>不知道看到这里，读者有没有明白些了，桥接模式的定义是“将抽象和实现解耦，让它们可以独立变化”。在 JDBC 这个例子中，JDBC 规范和自身的相应操作，就相当于“抽象”，具体的 Driver（比如，com.mysql.jdbc.Driver）就相当于“实现”。JDBC 和 Driver 独立开发，通过对象之间的组合关系，组装在一起。JDBC 的所有逻辑操作，最终都委托给 Driver 来执行。</p>
+<h2 id="-">二、使用示例</h2>
+<p>我们再来通过一个示例更好的理解下桥接模式。假设，我们需要做一个API 接口监控告警框架，根据不同的紧急程度，触发不同通知渠道的告警。</p>
+<h3 id="2-1-">2.1 使用桥接模式前</h3>
+<p>首先，告警的紧急程度有多种类型，包括：SEVERE（严重）、URGENCY（紧急）、NORMAL（普通）、TRIVIAL（无关紧要）：</p>
+<pre><code class="lang-JAVA">public enum NotificationEmergencyLevel {
+  SEVERE, URGENCY, NORMAL, TRIVIAL
+}
+</code></pre>
+<p>然后，不同的紧急程度对应着不同的通知渠道：</p>
+<pre><code class="lang-JAVA">public class Notification {
+  private List&lt;String&gt; emailAddresses;
+  private List&lt;String&gt; telephones;
+  private List&lt;String&gt; wechatIds;
+
+  public Notification() {}
+
+  public void setEmailAddress(List&lt;String&gt; emailAddress) {
+    this.emailAddresses = emailAddress;
+  }
+
+  public void setTelephones(List&lt;String&gt; telephones) {
+    this.telephones = telephones;
+  }
+
+  public void setWechatIds(List&lt;String&gt; wechatIds) {
+    this.wechatIds = wechatIds;
+  }
+
+  public void notify(NotificationEmergencyLevel level, String message) {
+    if (level.equals(NotificationEmergencyLevel.SEVERE)) {
+      //...自动语音电话
+    } else if (level.equals(NotificationEmergencyLevel.URGENCY)) {
+      //...发微信
+    } else if (level.equals(NotificationEmergencyLevel.NORMAL)) {
+      //...发邮件
+    } else if (level.equals(NotificationEmergencyLevel.TRIVIAL)) {
+      //...发邮件
+    }
+  }
+}
+</code></pre>
+<p>我们可以像下面这样来使用这个框架：</p>
+<pre><code class="lang-JAVA">public class ErrorAlertHandler extends AlertHandler {
+
+  @Override
+  public void check(ApiStatInfo apiStatInfo) {
+    if (apiStatInfo.getErrorCount() &gt; rule.getMatchedRule(apiStatInfo.getApi()).getMaxErrorCount()) {
+      // 触发告警
+      notification.notify(NotificationEmergencyLevel.SEVERE, "...");
+    }
+  }
+}
+</code></pre>
+<p>上面这种实现方式，有一个最明显的问题，那就是有很多 if-else 分支逻辑，即发送通知的所有逻辑都扎堆在 Notification 类中。另外，如果我们想要改动紧急程度和通知渠道的关系，也必须显示修改Notification。</p>
+<h3 id="2-2-">2.2 使用桥接模式后</h3>
+<p>我们可以将不同渠道的通知逻辑剥离出来，形成独立的消息发送接口MsgSender ：</p>
+<pre><code class="lang-JAVA">public interface MsgSender {
+  void send(String message);
+}
+</code></pre>
+<p>然后委托给Notification，由Notification定义通用的消息发送规范：</p>
+<pre><code class="lang-JAVA">public abstract class Notification {
+  protected MsgSender msgSender;
+
+  public Notification(MsgSender msgSender) {
+    this.msgSender = msgSender;
+  }
+
+  public abstract void notify(String message);
+}
+</code></pre>
+<p>这样，Notification就相当于桥接模式中的“抽象”，MsgSender的各个实现类就相当于桥接模式中的“实现”：</p>
+<pre><code class="lang-JAVA">public class TelephoneMsgSender implements MsgSender {
+  private List&lt;String&gt; telephones;
+
+  public TelephoneMsgSender(List&lt;String&gt; telephones) {
+    this.telephones = telephones;
+  }
+
+  @Override
+  public void send(String message) {
+    //...
+  }
+
+}
+
+public class EmailMsgSender implements MsgSender {
+  // 与TelephoneMsgSender代码结构类似，所以省略...
+}
+
+public class WechatMsgSender implements MsgSender {
+  // 与TelephoneMsgSender代码结构类似，所以省略...
+}
+</code></pre>
+<p>两者可以独立开发，通过组合关系（也就是桥梁）任意组合在一起。所谓任意组合，就是不同紧急程度的消息和发送渠道之间的对应关系，不是在代码中固定写死的，我们可以动态地去指定（比如，通过读取配置来获取对应关系）：</p>
+<pre><code class="lang-JAVA">public class UrgencyNotification extends Notification {
+  // 与SevereNotification代码结构类似，所以省略...
+}
+public class NormalNotification extends Notification {
+  // 与SevereNotification代码结构类似，所以省略...
+}
+public class TrivialNotification extends Notification {
+  // 与SevereNotification代码结构类似，所以省略...
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>桥接模式的代码实现并不复杂，关键是弄懂定义中“抽象”和“实现”两个概念：</p>
+<ul>
+<li>定义中的“抽象”，指的并非“抽象类”或“接口”，而是被抽象出来的一套“类库”，它只包含骨架代码，真正的业务逻辑需要委派给定义中的“实现”来完成；</li>
+<li>定义中的“实现”，也并非“接口的实现类”，而是一套独立的“类库”。</li>
+</ul>
+<p>桥接模式的目的是将接口部分和实现部分分离，从而让它们可以较为容易、也相对独立地加以改变。“抽象”和“实现”独立开发，通过对象之间的组合关系，组装在一起。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

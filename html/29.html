@@ -1,0 +1,184 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（十三）——  J.U.C之atomic框架：AtomicInteger</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（十三）——  J.U.C之atomic框架：AtomicInteger</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-atomicinteger-">一、AtomicInteger简介</h2>
+<p>AtomicInteger，应该是atomic框架中用得最多的原子类了。顾名思义，AtomicInteger是Integer类型的线程安全原子类，可以在应用程序中以原子的方式更新int值。</p>
+<h3 id="1-atomicinteger-">1. 创建AtomicInteger对象</h3>
+<p>先来看下AtomicInteger对象的创建。</p>
+<p>AtomicInteger提供了两个构造器，使用默认构造器时，内部int类型的value值为0：<br/><code>AtomicInteger atomicInt = new AtomicInteger();</code></p>
+<p>AtomicInteger类的内部并不复杂，所有的操作都针对内部的int值——value，并通过Unsafe类来实现线程安全的CAS操作：<br/><img alt="img" src="./img/20191027151707159.png" style="zoom:80%;"/></p>
+<h3 id="2-atomicinteger-">2. AtomicInteger的使用</h3>
+<p>来看下面这个示例程序：</p>
+<pre><code class="lang-java">public class Main {
+    public static void main(String[] args) throws InterruptedException {
+        AtomicInteger ai = new AtomicInteger();
+
+        List&lt;Thread&gt; list = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 10; i++) {
+            Thread t = new Thread(new Accumlator(ai), "thread-" + i);
+            list.add(t);
+            t.start();
+        }
+
+        for (Thread t : list) {
+            t.join();
+        }
+
+        System.out.println(ai.get());
+    }
+
+    static class Accumlator implements Runnable {
+        private AtomicInteger ai;
+
+        Accumlator(AtomicInteger ai) {
+            this.ai = ai;
+        }
+
+        @Override
+        public void run() {
+            for (int i = 0, len = 1000; i &lt; len; i++) {
+                ai.incrementAndGet();
+            }
+        }
+    }
+}
+</code></pre>
+<p>上述代码使用了AtomicInteger的<strong>incrementAndGet</strong>方法，以原子的操作对int值进行自增，该段程序执行的最终结果为10000（10个线程，每个线程对AtomicInteger增加1000），如果不使用AtomicInteger，使用原始的int或Integer，最终结果值可能会小于10000（并发时读到了过时的数据或存在值覆盖的问题）。</p>
+<p>我们来看下<strong>incrementAndGet</strong>内部：<br/><img alt="img" src="./img/20191027151713625.png" style="zoom:80%;"/></p>
+<p>内部调用了Unsafe类的<strong>getAndAddInt</strong>方法，以原子方式将value值增加1，然后返回增加前的原始值。</p>
+<p><strong>注意，上述是JDK1.8的实现，在JDK1.8之前，上述方法采用了自旋+CAS操作的方式：</strong></p>
+<pre><code class="lang-java">public final int getAndIncrement() {
+    for (;;) {
+        int current = get();
+        int next = current + 1;
+        if (compareAndSet(current, next))
+            return current;
+    }
+}
+</code></pre>
+<h3 id="3-atomicinteger-">3. AtomicInteger的特殊方法说明</h3>
+<p>AtomicInteger中有一个比较特殊的方法——<strong>lazySet</strong>：<br/><img alt="img" src="./img/20191027151719408.png" style="zoom:80%;"/></p>
+<p><strong>lazySet</strong>方法是<strong>set</strong>方法的不可见版本。什么意思呢？</p>
+<p>我们知道通过volatile修饰的变量，可以保证在多处理器环境下的“可见性”。也就是说当一个线程修改一个共享变量时，其它线程能立即读到这个修改的值。volatile的实现最终是加了内存屏障：</p>
+<ol>
+<li><p>保证写volatile变量会强制把CPU写缓存区的数据刷新到内存</p>
+</li>
+<li><p>读volatile变量时，使缓存失效，强制从内存中读取最新的值</p>
+</li>
+<li><p>由于内存屏障的存在，volatile变量还能阻止重排序</p>
+</li>
+</ol>
+<p><strong>lazySet</strong>内部调用了Unsafe类的<strong>putOrderedInt</strong>方法，通过该方法对共享变量值的改变，不一定能被其他线程立即看到。也就是说以普通变量的操作方式来写变量。</p>
+<p>为什么会有这种奇怪方法？什么情况下需要使用lazySet呢？</p>
+<p>考虑下面这样一个场景：</p>
+<pre><code class="lang-java">private AtomicInteger ai = new AtomicInteger();
+lock.lock();
+try
+{
+    // ai.set(1);
+}
+finally
+{
+    lock.unlock();
+}
+</code></pre>
+<p>由于锁的存在：</p>
+<ul>
+<li><strong>lock()</strong>方法获取锁时，和volatile变量的读操作一样，会强制使CPU缓存失效，强制从内存读取变量。</li>
+<li><strong>unlock()</strong>方法释放锁时，和volatile变量的写操作一样，会强制刷新CPU写缓冲区，把缓存数据写到主内存</li>
+</ul>
+<p>所以，上述<code>ai.set(1)</code>可以用<code>ai.lazySet(1)</code>方法替换：</p>
+<p>由锁来保证共享变量的可见性，以设置普通变量的方式来修改共享变量，减少不必要的内存屏障，从而提高程序执行的效率。</p>
+<h2 id="-">二、类/接口说明</h2>
+<h3 id="-">类声明</h3>
+<p><img alt="img" src="./img/20191027151725251.png" style="zoom:80%;"/></p>
+<h3 id="-">构造器</h3>
+<p><img alt="img" src="./img/20191027151731328.png" style="zoom:80%;"/></p>
+<h3 id="-">接口声明</h3>
+<table>
+<thead>
+<tr>
+<th>方法声明</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>int accumulateAndGet(int x, IntBinaryOperator accumulatorFunction)</td>
+<td>使用IntBinaryOperator 对当前值和x进行计算，并更新当前值，返回计算后的新值</td>
+</tr>
+<tr>
+<td>int addAndGet(int delta)</td>
+<td>以原子方式将给定值与当前值相加，返回相加后的新值</td>
+</tr>
+<tr>
+<td>boolean compareAndSet(int expect, int update)</td>
+<td>如果当前值 == expect，则以原子方式将该值设置为给定的更新值（update）</td>
+</tr>
+<tr>
+<td>int decrementAndGet()</td>
+<td>以原子方式将当前值减 1，返回新值</td>
+</tr>
+<tr>
+<td>int get()</td>
+<td>获取当前值</td>
+</tr>
+<tr>
+<td>int getAndAccumulate(int x, IntBinaryOperator accumulatorFunction)</td>
+<td>使用IntBinaryOperator 对当前值和x进行计算，并更新当前值，返回计算前的旧值</td>
+</tr>
+<tr>
+<td>int getAndAdd(int delta)</td>
+<td>以原子方式将给定值与当前值相加，返回旧值</td>
+</tr>
+<tr>
+<td>int getAndDecrement()</td>
+<td>以原子方式将当前值减 1，返回旧值</td>
+</tr>
+<tr>
+<td>int getAndIncrement()</td>
+<td>以原子方式将当前值加 1，返回旧值</td>
+</tr>
+<tr>
+<td>int getAndSet(int newValue)</td>
+<td>以原子方式设置为给定值，并返回旧值</td>
+</tr>
+<tr>
+<td>int getAndUpdate(IntUnaryOperator updateFunction)</td>
+<td>使用IntBinaryOperator 对当前值进行计算，并更新当前值，返回计算前的旧值</td>
+</tr>
+<tr>
+<td>int incrementAndGet()</td>
+<td>以原子方式将当前值加 1，返回新值</td>
+</tr>
+<tr>
+<td>void lazySet(int newValue)</td>
+<td>设置为给定值，但不保证值的改变被其他线程立即看到</td>
+</tr>
+<tr>
+<td>void set(int newValue)</td>
+<td>设置为给定值</td>
+</tr>
+<tr>
+<td>int updateAndGet(IntUnaryOperator updateFunction)</td>
+<td>使用IntBinaryOperator 对当前值进行计算，并更新当前值，返回计算后的新值</td>
+</tr>
+<tr>
+<td>boolean weakCompareAndSet(int expect, int update)</td>
+<td>weakCompareAndSet无法保证除操作目标外的其他变量的执行顺序( 编译器和处理器为了优化程序性能而对指令序列进行重新排序 )，同时也无法保证这些变量的可见性。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="-">三、其它原子类</h2>
+<p>与<strong>AtomicInteger</strong>类似的原子类还有<strong>AtomicBoolean</strong>和<strong>AtomicLong</strong>，底层都是通过Unsafe类做CAS操作，来原子的更新状态值。可以参考Oracle官方文档：<a href="http://https://docs.oracle.com/javase/8/docs/api/">https://docs.oracle.com/javase/8/docs/api/</a> ，不再赘述。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

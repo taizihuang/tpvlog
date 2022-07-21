@@ -1,0 +1,48 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（27）——内存溢出概述</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（27）——内存溢出概述</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>从本章开始，我们将介绍JVM中的内存溢出异常——Out of Memory。我们运行Java程序时，本质是创建了一个JVM进程，然后在里面执行Java字节码。既然是进程，就一定有内存限制，当Java程序使用的内存空间超过限制时，就可能发生内存溢出异常。</p>
+<p>在JVM中，一共有三种可能出现OOM的地方：方法区（元数据区）、Java栈内存、Java堆内存。本章，我们就来一一看一下各个区域内存溢出的情况。</p>
+<h2 id="-">二、方法区溢出</h2>
+<p>在<a href="https://www.tpvlog.com/article/86">JVM内存模型</a>中，我们介绍过JVM内存模型，JVM中有一块区域叫“方法区”，里面主要保存着从”.class“文件里加载进来的类，包括<strong>类的名称</strong>、<strong>方法信息</strong>、<strong>字段信息</strong>、<strong>静态变量</strong>、<strong>常量</strong>以及<strong>编译器编译后的代码</strong>等。</p>
+<blockquote>
+<p>JDK1.8及以后这块区域叫做“元数据区"，元数据区直接使用本地内存。默认情况下，元数据区会根据使用情况动态调整，避免了在JDK1.8以前由于加载类过多从而出现 <code>java.lang.OutOfMemoryError: PermGen</code>。但也不能无限扩展，因此可以使用<code>-XX:MaxMetaspaceSize</code>来控制最大内存。</p>
+</blockquote>
+<p>既然元数据区有大小，那这里就可能发生内存溢出。</p>
+<h3 id="2-1-">2.1 溢出原因</h3>
+<p>元数据区中对象一般是不会被回收的，JVM进行Full GC时，会尝试对元数据区中的垃圾对象进行回收。但是元数据区中的对象回收的条件是相当苛刻的：比如加载这个类的类加载器先要被回收、这个类的所有对象实例都要被回收等等。所以，即使Full GC针对元数据区进行垃圾回收，也未必能够回收掉很多垃圾对象。</p>
+<p>JVM启动时，元数据区默认情况只会分配几十MB空间，所以生产环境一定要显式指定该区域的大小，一般512MB就足够了：</p>
+<p><code>--XX:MetaspaceSize=512m --XX:MaxMetaspaceSize=512m</code></p>
+<p>针对元数据区，避免内存溢出的最好办法就是预估系统运行模型，然后合理分配Metaspace区域的内存大小，同时避免无限制的通过动态代理生成类。</p>
+<h2 id="-">三、栈溢出</h2>
+<p>JVM中，每个线程都有自己的虚拟机栈，就是所谓的<strong>栈内存</strong>。线程只要执行某个方法，就会为该方法创建一个栈帧，然后将栈帧入栈到虚拟机栈中。这个栈帧中存放着方法的各种局部变量。</p>
+<p>我们通过参数JVM启动的<code>-Xss</code>参数设置栈内存的大小，比如我们之前的示例中，一般栈内存大小都指定为1MB——<code>-Xss1M</code>。所以，既然栈内存有大小，那这里也可能发生内存溢出，我们通过示例来看下。</p>
+<h3 id="3-1-">3.1 溢出原因</h3>
+<p>Java虚拟机栈的内存大小是有限的，如果一个线程不停的层层调用方法，每次调用就会创建栈帧入栈，因为栈帧是有大小的，所以当虚拟机栈满了以后，就会出现栈内存溢出。</p>
+<p>一般来说，除非是一些递归调用，否则线程不会一直只入栈不出栈，而且1MB的栈大小也足够容纳递归调用所需的栈内存。所以，引发栈内存溢出的往往都是程序bug，比如递归调用时没有终结条件等。</p>
+<h2 id="-">四、堆溢出</h2>
+<p>Java堆内存，应该是我们进行JVM调优接触最多的一部分区域了。这里存放着我们程序代码里创建的各种各样的对象。一般来说，我们给Java堆内存分配空间时，是固定的大小，所以这里也是最容易出现内存溢出的区域。</p>
+<h3 id="4-1-">4.1 溢出原因</h3>
+<p>我们知道，Young GC过后的存活对象首先会先尝试进行一块Survivor区，如果Survivor区无法容纳，则尝试进入老年代，如果此时老年代也满了就会触发Full GC。但是，<strong>如果Full GC之后，老年代的空间还是不够呢？</strong>这时只能抛出内存溢出异常了。</p>
+<p>所以，堆内存溢出的原因，总结起来就是一句话：有限的内存中放了过多的对象，而且大多数对象是存活的，此时要继续放入更多对象已经不可能了，只能抛出内存溢出异常。</p>
+<p>通常，能引发堆内存溢出的场景主要有两种：</p>
+<ul>
+<li>系统承载高并发请求，因为请求量过大，导致大量对象都是存活的，所以要继续放入新的对象实在是不行了，只能抛OOM。</li>
+<li>程序存在bug导致内存泄漏，这即使触发GC也无法回收掉这些泄漏的对象，导致内存占用越来越多，直到OOM。</li>
+</ul>
+<h2 id="-">五、总结</h2>
+<p>本章我们介绍了JVM中可能出现内存溢出的几个区域，以及引发OOM的基本原因。一般来说，元数据区和Java虚拟机栈是不会出现OOM的，而Java堆内存则是最容易出现内存溢出的区域。</p>
+<p>针对各类内存溢出问题，生产环境的系统需要有配套的监控系统对OS、JVM的状态进行监控，重点关注CPU、内存、JVM的GC频率这三个指标，一般来说成熟的公司都会有Zabbix、Open-Falcon之类的监控平台，小型公司则可以通过日志结合jhat进行内存快照分析的方式来排查。</p>
+<p>后续章节，我们将通过实际案例和代码来分析和解决各类常见的内存溢出问题。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

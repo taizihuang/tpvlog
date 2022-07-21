@@ -1,0 +1,82 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程基础（十二）—— Two-phase Termination模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程基础（十二）—— Two-phase Termination模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、定义</h2>
+<p>我们将线程的正常处理状态称为“作业中”，当希望结束这个线程时，则送出“终止请求”。接着，这个线程并不会立刻结束，而是进入“终止处理中”状态，此时线程还是运行着的，可能处理一些释放资源等操作。直到终止处理完毕，才会真正结束。</p>
+<p>Two-phase Termination主要考虑以下问题：</p>
+<ul>
+<li>安全地结束（安全性）；</li>
+<li>一定会进行终止处理（生命性）；</li>
+<li>收到“终止请求”后，要尽快进行终止处理（响应性）；</li>
+</ul>
+<center><br/> <img src="./img/20191022011714490.png"><br/></img></center>
+<h2 id="-">二、模式案例</h2>
+<p>该案例中，线程每隔500ms将计数器增加1，在大约10s后结束。</p>
+<p><em>计数线程类：</em></p>
+<pre><code class="lang-java">public class CountupThread extends Thread {
+    private long counter = 0;
+    private volatile boolean shutdownRequested = false;
+    public void shutdownRequest() {
+        shutdownRequested = true;
+        interrupt();
+    }
+    public boolean isShutdownRequested() {
+        return shutdownRequested;
+    }
+    public final void run() {
+        try {
+            while (!shutdownRequested) {
+                doWork();
+            }
+        } catch (InterruptedException e) {
+        } finally {
+            doShutdown();
+        }
+    }
+    private void doWork() throws InterruptedException {
+        counter++;
+        System.out.println("doWork: counter = " + counter);
+        Thread.sleep(500);
+    }
+    private void doShutdown() {
+        System.out.println("doShutdown: counter = " + counter);
+    }
+}
+</code></pre>
+<p><em>执行：</em></p>
+<pre><code class="lang-java">public class Main {
+    public static void main(String[] args) {
+        System.out.println("main: BEGIN");
+        try {
+            CountupThread t = new CountupThread();
+            t.start();
+            Thread.sleep(10000);
+            System.out.println("main: shutdownRequest");
+            t.shutdownRequest();
+            System.out.println("main: join");
+            t.join();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        System.out.println("main: END");
+    }
+}
+</code></pre>
+<h2 id="-">三、模式讲解</h2>
+<p>Two-phase Termination模式的角色如下：</p>
+<ul>
+<li>TerminationRequester参与者<br/>TerminationRequester参与者用于调用终止请求。（案例中的Main类）</li>
+<li>Terminator参与者<br/>Terminator参与者接受终止请求，进行实际的终止处理，提供shutdownRequest终止方法供外界调用。<br/>Terminator参与者拥有一个标识（门闩）表示是否已经收到终止请求</li>
+</ul>
+<center><br/> <img src="./img/20191022011724643.png"/><br/></center>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

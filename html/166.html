@@ -1,0 +1,232 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（二十）——聚合分析：Aggregation Scope</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（二十）——聚合分析：Aggregation Scope</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Elasticsearch的聚合分析是有范围的，这个作用范围叫做Aggregation Scope。默认情况下，这个scope就是检索出的所有记录。如果我们希望对部分记录进行聚合分析，就要结合query来使用。</p>
+<h2 id="-aggregation-scope">一、Aggregation Scope</h2>
+<h3 id="1-1-query">1.1 结合普通query</h3>
+<p>我们可以将聚合分析与全文检索结合起来使用，Elasticsearch中的所有聚合都会在一个scope下执行，结合普通搜索请求后，这个scope就是检索出的结果。</p>
+<p>比如，我们需要统计指定品牌下每个颜色的销量：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search 
+{
+  "size": 0,
+  "query": {
+    "term": {
+      "brand": {
+        "value": "小米"
+      }
+    }
+  },
+  "aggs": {
+    "group_by_color": {
+      "terms": {
+        "field": "color"
+      }
+    }
+  }
+}
+</code></pre>
+<p>结果如下：</p>
+<pre><code class="lang-JAVA">{
+  "took" : 34,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 2,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [ ]
+  },
+  "aggregations" : {
+    "group_by_color" : {
+      "doc_count_error_upper_bound" : 0,
+      "sum_other_doc_count" : 0,
+      "buckets" : [
+        {
+          "key" : "绿色",
+          "doc_count" : 1
+        },
+        {
+          "key" : "蓝色",
+          "doc_count" : 1
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<h3 id="1-2-">1.2 结合过滤</h3>
+<p>除了和query结合外，聚合分析还可以跟filter结合使用。比如下面的请求是统计价格大于1200的所有电视机的平均价格。</p>
+<pre><code class="lang-JAVA">GET /tvs/_search 
+{
+  "size": 0,
+  "query": {
+    "constant_score": {
+      "filter": {
+        "range": {
+          "price": {
+            "gte": 1200
+          }
+        }
+      }
+    }
+  },
+  "aggs": {
+    "avg_price": {
+      "avg": {
+        "field": "price"
+      }
+    }
+  }
+}
+</code></pre>
+<p>有时候，我们可能不想进行全局的filter，而是针对某个bucket进行精细化的filter，那么就可以使用<code>aggs.filter</code>。比如下面的请求，我们统计长虹电视最近1个月、最近3个月、最近6个月的平均值：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search 
+{
+  "size": 0,
+  "query": {
+    "term": {
+      "brand": {
+        "value": "长虹"
+      }
+    }
+  },
+  "aggs": {
+    "recent_1m": {
+      "filter": {
+        "range": {
+          "sold_date": {
+            "gte": "now-1m"
+          }
+        }
+      },
+      "aggs": {
+        "recent_1m_avg_price": {
+          "avg": {
+            "field": "price"
+          }
+        }
+      }
+    },
+    "recent_3m": {
+      "filter": {
+        "range": {
+          "sold_date": {
+            "gte": "now-3m"
+          }
+        }
+      },
+      "aggs": {
+        "recent_3m_avg_price": {
+          "avg": {
+            "field": "price"
+          }
+        }
+      }
+    },
+    "recent_6m": {
+      "filter": {
+        "range": {
+          "sold_date": {
+            "gte": "now-6m"
+          }
+        }
+      },
+      "aggs": {
+        "recent_6m_avg_price": {
+          "avg": {
+            "field": "price"
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<h3 id="1-3-global-bucket">1.3 global bucket</h3>
+<p>有时候，我们可能有下面这样的聚合分析需求，对于一次聚合分析请求，我们希望给出两个结果：</p>
+<ol>
+<li>指定scope范围内的聚合结果；</li>
+<li>不限定范围的聚合结果。</li>
+</ol>
+<p>对于这种需求，就要用到global bucket了。比如，我们希望对比长虹牌电视机的平均销售额和所有品牌电视机的平均销售额：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search 
+{
+  "size": 0, 
+  "query": {
+    "term": {
+      "brand": {
+        "value": "长虹"
+      }
+    }
+  },
+  "aggs": {
+    "single_brand_avg_price": {
+      "avg": {
+        "field": "price"
+      }
+    },
+    "all": {
+      "global": {},
+      "aggs": {
+        "all_brand_avg_price": {
+          "avg": {
+            "field": "price"
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>上述请求中的“query”用于限定scope，对该scope范围内的doc执行聚合分析，而内部的“global”关键字会将聚合分析的范围指定为所有doc。</p>
+<p>请求结果如下：</p>
+<pre><code class="lang-JAVA\">{
+  "took" : 35,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 3,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [ ]
+  },
+  "aggregations" : {
+    "all" : {
+      "doc_count" : 8,
+      "all_brand_avg_price" : {
+        "value" : 2650.0
+      }
+    },
+    "single_brand_avg_price" : {
+      "value" : 1666.6666666666667
+    }
+  }
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我们介绍了聚合分析中的Aggregation Scope，其实就是限定进行聚合分析的doc范围。此外，聚合分析也可以和query、filter结合使用。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

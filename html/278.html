@@ -1,0 +1,74 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Kafka系列</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Kafka系列</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本专栏开始，我将对Kafka这一分布式消息中间件的底层源码进行详细讲解，我主要分<strong>Producer</strong>、<strong>Consumer</strong>、<strong>Broker</strong>三部分进行讲解。作为一款优秀的消息引擎，Kafka 的架构设计有很多为人称道的地方，掌握了这些原理将极大地提升我们自身的系统架构能力和代码功力。即使你不使用 Kafka，也可以借鉴其优秀的设计理念，提升你在其他框架上的系统架构能力。</p>
+<p>通常来说，阅读大型项目的源码无外乎两种方法。</p>
+<ul>
+<li><strong>自上而下（Top-Down）：</strong>从最顶层或最外层的代码一步步深入。通俗地说，就是从 main 函数开始阅读，逐渐向下层层深入，直到抵达最底层代码。这个方法的好处在于，你遍历的是完整的顶层功能路径，这对于你了解各个功能的整体流程极有帮助。</li>
+<li><strong>自下而上（Bottom-Up）：</strong>跟自上而下相反，是指先独立地阅读和搞懂每个组件的代码和实现机制，然后不断向上延展，并最终把它们组装起来。该方法不是沿着功能的维度向上溯源的，相反地，它更有助于你掌握底层的基础组件代码。</li>
+</ul>
+<p>这两种方法各有千秋，我阅读源码一般会将两者结合起来，即先弄明白最细小单位组件的用途，然后再把它们拼接组合起来，掌握组件组合之后的功能。</p>
+<p>此外，开源框架的官方文档也是一个非常好的学习资源，便于我们从整体上理解框架的功能，然后围绕功能点再深入到源码中，理解底层原理。</p>
+<p>本专栏的主要参考资料如下：</p>
+<ul>
+<li><a href="https://book.douban.com/subject/30221096/">《Apache Kafka实战》 胡夕</a></li>
+<li><a href="https://book.douban.com/subject/30437872/">《深入理解Kafka：核心设计与实践原理》  朱忠华 </a></li>
+</ul>
+<h2 id="-">实战篇</h2>
+<p>实战篇主要从功能上Kafka进行介绍，本部分包含以下文章：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/279">透彻理解Kafka（1）——整体架构</a></li>
+<li><a href="https://www.tpvlog.com/article/280">透彻理解Kafka（2）——消息存储：日志格式</a></li>
+<li><a href="https://www.tpvlog.com/article/281">透彻理解Kafka（3）——消息存储：零拷贝</a></li>
+<li><a href="https://www.tpvlog.com/article/282">透彻理解Kafka（4）——ISR机制</a></li>
+<li><a href="https://www.tpvlog.com/article/283">透彻理解Kafka（5）——通信机制：多路复用</a></li>
+<li><a href="https://www.tpvlog.com/article/284">透彻理解Kafka（6）——集群控制：Controller</a></li>
+<li><a href="https://www.tpvlog.com/article/285">透彻理解Kafka（7）——Producer：核心原理</a></li>
+<li><a href="https://www.tpvlog.com/article/286">透彻理解Kafka（8）——Consumer：核心原理</a></li>
+<li><a href="https://www.tpvlog.com/article/287">透彻理解Kafka（9）——Consumer：协调器</a></li>
+<li><a href="https://www.tpvlog.com/article/288">透彻理解Kafka（10）——时间轮调度</a></li>
+<li><a href="https://www.tpvlog.com/article/289">透彻理解Kafka（11）——实战案例：集群规划</a></li>
+</ul>
+<h2 id="-">源码篇</h2>
+<p>源码篇主要通过分析Kafka的源码，本部分包含以下文章：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/290">Kafka源码分析（1）——源码环境搭建</a></li>
+<li><a href="https://www.tpvlog.com/article/291">Kafka源码分析（2）——Producer：初始化</a></li>
+<li><a href="https://www.tpvlog.com/article/292">Kafka源码分析（3）——Producer：Metadata集群元数据</a></li>
+<li><a href="https://www.tpvlog.com/article/293">Kafka源码分析（4）——Producer：Partitioner分区器</a></li>
+<li><a href="https://www.tpvlog.com/article/294">Kafka源码分析（5）——Producer：RecordAccumulator缓冲区</a></li>
+<li><a href="https://www.tpvlog.com/article/295">Kafka源码分析（6）——Producer：Sender线程——Batch筛选</a></li>
+<li><a href="https://www.tpvlog.com/article/296">Kafka源码分析（7）——Producer：Sender线程——Broker连接检查</a></li>
+<li><a href="https://www.tpvlog.com/article/297">Kafka源码分析（8）——Producer：Sender线程——ClientRequest请求缓存</a></li>
+<li><a href="https://www.tpvlog.com/article/298">Kafka源码分析（9）——Producer：Sender线程——Selector轮询</a></li>
+<li><a href="https://www.tpvlog.com/article/299">Kafka源码分析（10）——Producer：NIO通讯——写请求拆包</a></li>
+<li><a href="https://www.tpvlog.com/article/300">Kafka源码分析（11）——Producer：NIO通讯——读响应拆包和粘包</a></li>
+<li><a href="https://www.tpvlog.com/article/301">Kafka源码分析（12）——Producer：超时问题</a></li>
+<li><a href="https://www.tpvlog.com/article/302">Kafka源码分析（13）——Broker：整体架构</a></li>
+<li><a href="https://www.tpvlog.com/article/303">Kafka源码分析（14）——Broker：网络层——Acceptor线程</a></li>
+<li><a href="https://www.tpvlog.com/article/304">Kafka源码分析（15）——Broker：网络层——Processor线程</a></li>
+<li><a href="https://www.tpvlog.com/article/305">Kafka源码分析（16）——Broker：网络层——RequestChannel和RequestHandler</a></li>
+<li><a href="https://www.tpvlog.com/article/306">Kafka源码分析（17）——Broker：API层——KafkaApis</a></li>
+<li><a href="https://www.tpvlog.com/article/307">Kafka源码分析（18）——Broker：日志子系统——整体架构</a></li>
+<li><a href="https://www.tpvlog.com/article/308">Kafka源码分析（19）——Broker：日志子系统——Log</a></li>
+<li><a href="https://www.tpvlog.com/article/309">Kafka源码分析（20）——Broker：日志子系统——LogSegment</a></li>
+<li><a href="https://www.tpvlog.com/article/310">Kafka源码分析（21）——Broker：日志子系统——索引</a></li>
+<li><a href="https://www.tpvlog.com/article/311">Kafka源码分析（22）——Broker：副本同步——Follower侧整体流程</a></li>
+<li><a href="https://www.tpvlog.com/article/312">Kafka源码分析（23）——Broker：副本同步——Leader侧整体流程</a></li>
+<li><a href="https://www.tpvlog.com/article/313">Kafka源码分析（24）——Broker：副本同步——延迟读写</a></li>
+<li><a href="https://www.tpvlog.com/article/314">Kafka源码分析（25）——Broker：集群管理——KafkaController</a></li>
+<li><a href="https://www.tpvlog.com/article/315">Kafka源码分析（26）——Broker：集群管理——Topic创建</a></li>
+<li><a href="https://www.tpvlog.com/article/316">Kafka源码分析（27）——Broker：集群管理——分区重分配</a></li>
+<li><a href="https://www.tpvlog.com/article/317">Kafka源码分析（28）——Consumer：GroupCoordinator协调器</a></li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

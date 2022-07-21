@@ -1,0 +1,428 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Java网络编程（二二）——Netty实战：通信协议设计</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Java网络编程（二二）——Netty实战：通信协议设计</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我先对 RPC 请求调用和结果响应两个过程分别进行详细分析，然后基于Netty完成整个RPC框架的通信协议设计和开发。</p>
+<p>RPC 请求的过程对于服务消费者来说是出站操作，对于服务提供者来说是入站操作：</p>
+<ul>
+<li>服务消费者将 RPC 请求信息封装成 Protocol 对象，然后通过编码器 Encoder 进行二进制编码，最后直接发送至远端即可；</li>
+<li>服务提供者收到请求后，将二进制数据交给解码器 Decoder，解码后再次生成 Protocol 对象，然后传递给 Handler 执行真正的请求执行。</li>
+</ul>
+<p>RPC 响应的过程对于服务消费者来说是入站操作，对于服务提供者来说是出站操作：</p>
+<ul>
+<li>服务提供者将响应结果封装成 Protocol 对象，然后通过 Encoder 编码发送给服务消费者；</li>
+<li>服务消费者对响应结果进行解码，然后由 Handler 根据响应结果找到之前的对应请求，最后将响应结果返回。</li>
+</ul>
+<center><br/> <img src="./img/20211107134528532.png" style="zoom:100%"><br/></img></center>
+<h2 id="-">一、协议设计</h2>
+<p>本节，我们来看RPC框架的协议设计，主流的 RPC 框架都会自定义通信协议，相比于 HTTP、HTTPS、JSON 等通用的协议，自定义协议可以实现更好的性能、扩展性以及安全性。</p>
+<p>我们把协议分为<strong>协议头 Header </strong>和<strong>协议体 Body </strong>两个部分：</p>
+<ul>
+<li>协议头 Header 包含魔数、协议版本号、序列化算法、报文类型、状态、消息 ID、数据长度；</li>
+<li>协议体 Body 只包含数据内容部分，数据内容的长度是不固定的。</li>
+</ul>
+<pre><code class="lang-TXT">+---------------------------------------------------------------+
+| 魔数 2byte | 协议版本号 1byte | 序列化算法 1byte | 报文类型 1byte  |
++---------------------------------------------------------------+
+| 状态 1byte |        消息 ID 8byte     |      数据长度 4byte     |
++---------------------------------------------------------------+
+|                   数据内容 （长度不定）                          |
++---------------------------------------------------------------+
+</code></pre>
+<h3 id="1-1-">1.1 协议实体类</h3>
+<p>RPC 请求和响应都可以使用上述协议进行通信，对应协议实体类的定义如下：</p>
+<pre><code class="lang-JAVA">public class RpcProtocol&lt;T&gt; implements Serializable {
+    // 协议头
+    private MsgHeader header; 
+    // 协议体
+    private T body; 
+}
+</code></pre>
+<h4 id="-">协议头</h4>
+<pre><code class="lang-JAVA">public class MsgHeader implements Serializable {
+    // 魔数
+    private short magic;     
+    // 协议版本号
+    private byte version; 
+    // 序列化算法
+    private byte serialization; 
+    // 报文类型
+    private byte msgType; 
+    // 状态
+    private byte status; 
+    // 消息 ID
+    private long requestId; 
+    // 数据长度
+    private int msgLen; 
+}
+</code></pre>
+<h4 id="-">协议体</h4>
+<p>在 RPC 请求调用的场景下，RpcProtocol 中泛型 T 对应 RpcRequest 类型，RpcRequest 主要包含 RPC 远程调用需要的必要参数，定义如下：</p>
+<pre><code class="lang-JAVA">public class RpcRequest implements Serializable {
+    /**
+     * 服务版本号
+     */
+    private String serviceVersion;
+    /**
+     * 服务类全限定名
+     */
+    private String className;
+    /**
+     * 服务接口全限定名
+     */
+    private String methodName;
+    /**
+     * 接口参数值
+     */
+    private Object[] params;
+    /**
+     * 接口参数类型
+     */
+    private Class&lt;?&gt;[] parameterTypes;
+}
+</code></pre>
+<p>在 RPC 结果响应的场景下，RpcProtocol 中泛型 T 对应 RpcResponse 类型，RpcResponse 实体类的定义如下：</p>
+<pre><code class="lang-JAVA">public class RpcResponse implements Serializable {
+    // 请求结果
+    private Object data;
+    // 错误信息
+    private String message;
+}
+</code></pre>
+<h3 id="1-2-">1.2 序列化</h3>
+<p>上述我们定义的都是Java Bean，数据在底层以字节形式传输，所以我们需要使用序列化工具完成Java Bean和二进制数据之间的转换。目前比较常用的序列化算法包括 Json、Kryo、Hessian、Protobuf 等。</p>
+<p>首先，我们定义一个通用的序列化接口 RpcSerialization，所有序列化算法扩展都必须实现该接口，RpcSerialization 接口分别提供了序列化 <code>serialize()</code> 和反序列化 <code>deserialize()</code> 方法：</p>
+<pre><code class="lang-JAVA">public interface RpcSerialization {
+    &lt;T&gt; byte[] serialize(T obj) throws IOException;
+    &lt;T&gt; T deserialize(byte[] data, Class&lt;T&gt; clz) throws IOException;
+}
+</code></pre>
+<p>接下来，我为 RpcSerialization 提供 Hessian 和 Json 两种序列化算法的实现类。以 HessianSerialization 为例，实现逻辑如下：</p>
+<pre><code class="lang-JAVA">@Component
+public class HessianSerialization implements RpcSerialization {
+
+    @Override
+    public &lt;T&gt; byte[] serialize(T object) {
+        if (object == null) {
+            throw new NullPointerException();
+        }
+        byte[] results;
+
+        HessianSerializerOutput hessianOutput;
+        try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+            hessianOutput = new HessianSerializerOutput(os);
+            hessianOutput.writeObject(object);
+            hessianOutput.flush();
+            results = os.toByteArray();
+        } catch (Exception e) {
+            throw new SerializationException(e);
+        }
+
+        return results;
+    }
+
+    @Override
+    public &lt;T&gt; T deserialize(byte[] bytes, Class&lt;T&gt; clz) {
+        if (bytes == null) {
+            throw new NullPointerException();
+        }
+        T result;
+
+        try (ByteArrayInputStream is = new ByteArrayInputStream(bytes)) {
+            HessianSerializerInput hessianInput = new HessianSerializerInput(is);
+            result = (T) hessianInput.readObject(clz);
+        } catch (Exception e) {
+            throw new SerializationException(e);
+        }
+
+        return result;
+    }
+}
+</code></pre>
+<p>为了能够支持不同序列化算法，我采用<strong>简单工厂模式</strong>来实现不同序列化算法之间的切换，具体实现如下：</p>
+<pre><code class="lang-JAVA">public class SerializationFactory {
+
+    public static RpcSerialization getRpcSerialization(byte serializationType) {
+        SerializationTypeEnum typeEnum = SerializationTypeEnum.findByType(serializationType);
+
+        switch (typeEnum) {
+            case HESSIAN:
+                return new HessianSerialization();
+            case JSON:
+                return new JsonSerialization();
+            default:
+                throw new IllegalArgumentException("serialization type is illegal, " + serializationType);
+        }
+    }
+}
+</code></pre>
+<h2 id="-">二、编解码器</h2>
+<p>设计完协议之后，我们需要利用Netty中的Encoder和Decoder自动对字节数据进行编解码。</p>
+<h3 id="2-1-rpcencoder">2.1 RpcEncoder</h3>
+<p>先来看编码器，RpcEncoder用于将Java Bean对象自动编码成字节数据，使用在两个场景：</p>
+<ul>
+<li>服务消费者组装完成<code>RpcProtocol&lt;RpcRequest&gt;</code>对象后，调用<code>writeAndFlush()</code>方法发起请求；</li>
+<li>服务提供者组装完成<code>RpcProtocol&lt;RpcResponse&gt;</code>对象后，调用<code>writeAndFlush()</code>方法返回响应。</li>
+</ul>
+<p>RpcEncoder 继承 MessageToByteEncoder，并重写 encode() 方法：</p>
+<pre><code class="lang-JAVA">public class RpcEncoder extends MessageToByteEncoder&lt;RpcProtocol&lt;Object&gt;&gt; {
+    @Override
+    protected void encode(ChannelHandlerContext ctx,RpcProtocol&lt;Object&gt; msg, ByteBuf byteBuf) throws IOException {
+        MsgHeader header = msg.getHeader();
+        byteBuf.writeShort(header.getMagic());
+        byteBuf.writeByte(header.getVersion());
+        byteBuf.writeByte(header.getSerialization());
+        byteBuf.writeByte(header.getMsgType());
+        byteBuf.writeByte(header.getStatus());
+        byteBuf.writeLong(header.getRequestId());
+
+        RpcSerialization rpcSerialization = SerializationFactory.getRpcSerialization(header.getSerialization());
+        byte[] data = rpcSerialization.serialize(msg.getBody());
+        byteBuf.writeInt(data.length);
+        byteBuf.writeBytes(data);
+    }
+}
+</code></pre>
+<h3 id="2-2-rpcdecoder">2.2 RpcDecoder</h3>
+<p>再来看解码器，RpcDecoder用于将字节数据自动解码成Java Bean对象，并传递给下一个 Inbound 处理器，使用在两个场景：</p>
+<ul>
+<li>服务消费者获取到响应后，将响应字节数据解码成<code>RpcProtocol&lt;RpcResponse&gt;</code>对象；</li>
+<li>服务提供者获取到请求后，将请求字节数据解码成<code>RpcProtocol&lt;RpcRequest&gt;</code>对象。</li>
+</ul>
+<p>RpcDecoder 继承 MessageToByteDecoder，并重写 decode() 方法：</p>
+<pre><code class="lang-JAVA">public class RpcDecoder extends ByteToMessageDecoder {
+    @Override
+    public final void decode(ChannelHandlerContext ctx, ByteBuf in, List&lt;Object&gt; out) throws IOException {
+        // 保证读到完整协议头
+        if (in.readableBytes() &lt; ProtocolConstants.HEADER_TOTAL_LEN) {
+            return;
+        }
+        // mark读指针
+        in.markReaderIndex();
+        // 魔数
+        short magic = in.readShort();
+        if (magic != ProtocolConstants.MAGIC) {
+            throw new IllegalArgumentException("magic number is illegal, " + magic);
+        }
+        // 协议版本号
+        byte version = in.readByte();
+        // 序列号
+        byte serializeType = in.readByte();
+        // 报文类型
+        byte msgType = in.readByte();
+        // 状态
+        byte status = in.readByte();
+        // 请求ID
+        long requestId = in.readLong();
+        // 协议体长度
+        int dataLength = in.readInt();
+
+        // 协议体是否足够读取
+        if (in.readableBytes() &lt; dataLength) {
+            // 重置读指针
+            in.resetReaderIndex();
+            return;
+        }
+        byte[] data = new byte[dataLength];
+        in.readBytes(data);
+
+        MsgType msgTypeEnum = MsgType.findByType((int)msgType);
+        if (msgTypeEnum == null) {
+            return;
+        }
+        // 封装协议头对象
+        MsgHeader header = new MsgHeader();
+        header.setMagic(magic);
+        header.setVersion(version);
+        header.setSerialization(serializeType);
+        header.setStatus(status);
+        header.setRequestId(requestId);
+        header.setMsgType(msgType);
+        header.setMsgLen(dataLength);
+
+        RpcSerialization rpcSerialization = SerializationFactory.getRpcSerialization(serializeType);
+        switch (msgTypeEnum) {
+            case REQUEST:
+                RpcRequest request = rpcSerialization.deserialize(data, RpcRequest.class);
+                if (request != null) {
+                    RpcProtocol&lt;RpcRequest&gt; protocol = new RpcProtocol&lt;&gt;();
+                    protocol.setHeader(header);
+                    protocol.setBody(request);
+                    out.add(protocol);
+                }
+                break;
+            case RESPONSE:
+               RpcResponse response = rpcSerialization.deserialize(data, RpcResponse.class);
+                if (response != null) {
+                    RpcProtocol&lt;RpcResponse&gt; protocol = new RpcProtocol&lt;&gt;();
+                    protocol.setHeader(header);
+                    protocol.setBody(response);
+                    out.add(protocol);
+                }
+                break;
+            case HEARTBEAT:
+                // TODO
+                break;
+        }
+    }
+}
+</code></pre>
+<h2 id="-">三、请求/响应处理</h2>
+<h3 id="3-1-">3.1 请求处理</h3>
+<p>在 RPC 请求调用的场景下，服务提供者的 RpcDecoder 将二进制数据解码成 RpcProtocol<code>&lt;RpcRequest&gt;</code> 对象后，然后交给 RpcRequestHandler 执行 RPC 请求调用。</p>
+<p>RpcRequestHandler 是一个 Inbound 处理器，继承 SimpleChannelInboundHandler 并重写 <code>channelRead0()</code> 方法，具体实现如下：</p>
+<pre><code class="lang-JAVA">/**
+ * RPC请求处理Handler
+ */
+public class RpcRequestHandler extends SimpleChannelInboundHandler&lt;RpcProtocol&lt;RpcRequest&gt;&gt; {
+
+    private static final Logger LOG = LoggerFactory.getLogger(RpcRequestHandler.class );
+
+    private final Map&lt;String, Object&gt; rpcServiceMap;
+
+    public RpcRequestHandler(Map&lt;String, Object&gt; rpcServiceMap) {
+        this.rpcServiceMap = rpcServiceMap;
+    }
+
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, RpcProtocol&lt;RpcRequest&gt; protocol) {
+
+        // 异步处理RPC请求
+        RpcRequestProcessor.submitRequest(() -&gt; {
+            // 封装响应
+            RpcProtocol&lt;RpcResponse&gt; resProtocol = new RpcProtocol&lt;&gt;();
+
+            MsgHeader header = protocol.getHeader();
+            header.setMsgType(MsgType.RESPONSE.getType().byteValue());
+            resProtocol.setHeader(header);
+
+            RpcResponse response = new RpcResponse();
+            resProtocol.setBody(response);
+
+            try {
+                // 处理请求（同步调用）
+                Object result = handle(protocol.getBody());
+                response.setData(result);
+                header.setStatus(MsgStatus.SUCCESS.getCode().byteValue());
+            } catch (Throwable throwable) {
+                header.setStatus( MsgStatus.FAIL.getCode().byteValue());
+                response.setMessage(throwable.toString());
+                LOG.error("process request {} error", header.getRequestId(), throwable);
+            }
+            ctx.writeAndFlush(resProtocol);
+        });
+    }
+
+    /**
+     * RPC请求处理
+     */
+    private Object handle(RpcRequest request) throws Throwable {
+        String serviceKey = RpcServiceHelper.buildServiceKey(request.getClassName(), request.getServiceVersion());
+        // 获取服务类
+        Object serviceBean = rpcServiceMap.get(serviceKey);
+
+        if (serviceBean == null) {
+            throw new RuntimeException(String.format("service not exist: %s:%s", request.getClassName(), request.getMethodName()));
+        }
+
+        // 通过CGLIB的FastClass机制，执行方法
+        Class&lt;?&gt; serviceClass = serviceBean.getClass();
+        String methodName = request.getMethodName();
+        Class&lt;?&gt;[] parameterTypes = request.getParameterTypes();
+        Object[] parameters = request.getParams();
+
+        FastClass fastClass = FastClass.create(serviceClass);
+        int methodIndex = fastClass.getIndex(methodName, parameterTypes);
+        return fastClass.invoke(methodIndex, serviceBean, parameters);
+    }
+}
+</code></pre>
+<p>RPC 请求调用是比较耗时的，所以将 RPC 请求提交到自定义的业务线程池中执行。上述的 handle() 方法是真正执行 RPC 调用的地方，我会在后续章节讲解。根据 handle() 的执行情况，<code>RpcProtocol&lt;RpcResponse&gt;</code> 最终会被设置成功或者失败的状态，以及相应的请求结果或者错误信息，最终通过 writeAndFlush() 方法将数据写回服务消费者。</p>
+<h3 id="3-2-">3.2 响应处理</h3>
+<p>在 RPC 响应处理的场景下，服务消费者的 RpcDecoder 将二进制数据解码成 RpcProtocol<code>&lt;RpcResponse&gt;</code> 对象后，然后交给 RpcResponseHandler 处理。</p>
+<pre><code class="lang-JAVA">/**
+ * RPC响应处理Handler
+ */
+public class RpcResponseHandler extends SimpleChannelInboundHandler&lt;RpcProtocol&lt;RpcResponse&gt;&gt; {
+
+    @Override
+    protected void channelRead0(ChannelHandlerContext ctx, RpcProtocol&lt;RpcResponse&gt; msg) {
+        long requestId = msg.getHeader().getRequestId();
+        // 获取与请求关联的响应对象
+        RpcFuture&lt;RpcResponse&gt; future = RpcServiceHelper.REQUEST_MAP.remove(requestId);
+        // 设置结果
+        future.getPromise().setSuccess(msg.getBody());
+    }
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+ * RPC服务工具类
+ */
+public class RpcServiceHelper {
+    /**
+     * 请求ID生成器
+     */
+    public static final AtomicLong REQUEST_ID_GEN = new AtomicLong(0);
+
+    /**
+     * 请求/响应映射缓存
+     */
+    public static final Map&lt;Long, RpcFuture&lt;RpcResponse&gt;&gt; REQUEST_MAP = new ConcurrentHashMap&lt;&gt;();
+
+    /**
+     * 根据服务名和版本号生成Key
+     *
+     * @param serviceName    服务名称
+     * @param serviceVersion 服务版本号
+     * @return
+     */
+    public static String buildServiceKey(String serviceName, String serviceVersion) {
+        return String.join("#", serviceName, serviceVersion);
+    }
+}
+</code></pre>
+<p>服务消费者在发起调用时，维护了请求编号 <code>requestId</code> 和 <code>RpcFuture&lt;RpcResponse&gt;</code> 的映射关系，RpcResponseHandler 会根据请求的 <code>requestId</code> 找到对应发起调用的 <code>RpcFuture</code>，然后为 <code>RpcFuture</code> 设置响应结果。</p>
+<pre><code class="lang-JAVA">/**
+ * RPC请求异步封装
+ *
+ * @param &lt;T&gt;
+ */
+public class RpcFuture&lt;T&gt; {
+    private Promise&lt;T&gt; promise;
+    private long timeout;
+
+    public RpcFuture(Promise&lt;T&gt; promise, long timeout) {
+        this.promise = promise;
+        this.timeout = timeout;
+    }
+
+    public Promise&lt;T&gt; getPromise() {
+        return promise;
+    }
+
+    public void setPromise(Promise&lt;T&gt; promise) {
+        this.promise = promise;
+    }
+
+    public long getTimeout() {
+        return timeout;
+    }
+
+    public void setTimeout(long timeout) {
+        this.timeout = timeout;
+    }
+}
+</code></pre>
+<p>上述代码，我采用了 Netty 提供的 Promise 工具实现 RPC 请求的同步等待，Promise 模式本质是一种异步编程模型，我们可以先拿到一个查看任务执行结果的凭证，不必等待任务执行完毕，当我们需要获取任务执行结果时，再使用凭证提供的相关接口进行获取。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我对我们的RPC 框架的协议设计以及请求响应的编解码进行了讲解，自定义协议、编解码、序列化/反序列化都是实现远程通信的必备基础知识。下一章，我将对 RPC 框架的负载均衡机制进行讲解。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Java网络编程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/67">Java网络编程</a></div>
+</div></body>
+        </html>
+        

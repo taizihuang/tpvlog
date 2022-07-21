@@ -1,0 +1,52 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十六）——fuzzy模糊搜索</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十六）——fuzzy模糊搜索</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来介绍下Elasticsearch中的fuzzy模糊搜索。什么是模糊搜索？举个例子，我们输入的搜索关键字可能会出现拼写错误的情况，比如在下面的documents中搜索“hello world”，结果拼写成了“hallo world”：</p>
+<pre><code class="lang-JAVA"># doc1 
+hello world
+# doc2
+hello java
+</code></pre>
+<p>fuzzy模糊搜索技术，会自动将拼写错误的搜索文本进行纠正，纠正以后去尝试匹配索引中的数据。</p>
+<h2 id="-">一、使用示例</h2>
+<p>我们可以像下面这样构造模糊搜索请求：</p>
+<pre><code class="lang-JAVA">GET /my_index/_search 
+{
+  "query": {
+    "fuzzy": {
+      "text": {
+        "value": "surprize",
+        "fuzziness": 2
+      }
+    }
+  }
+}
+</code></pre>
+<p><code>fuzziness</code>表示模糊度，其数值就是最多可以纠正几个字母。</p>
+<p>另一种使用fuzzy模糊搜索的语法如下，也是比较常用的语法：</p>
+<pre><code class="lang-JAVA">GET /my_index/_search 
+{
+  "query": {
+    "match": {
+      "text": {
+        "query": "SURPIZE ME",
+        "fuzziness": "AUTO",
+        "operator": "and"
+      }
+    }
+  }
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我们介绍了Elasticsearch中的fuzzy模糊搜索，主要有两种使用的方式。一般来说，实际更多的是直接在match query中使用fuzziness。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

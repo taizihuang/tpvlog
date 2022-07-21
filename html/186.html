@@ -1,0 +1,133 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（十六）——分布式框架之高性能：Redis分布式锁</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（十六）——分布式框架之高性能：Redis分布式锁</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在分布式系统中，为了保证集群的数据一致性，我们经常会有使用分布式锁的需求。生产环境实现分布式锁，最常用的还是基于Zookeeper，或者使用Redis来实现。本章，我就来讲讲Redis分布式锁的原理。</p>
+<h2 id="-redlock">一、RedLock</h2>
+<p>Redis官方支持原生的分布式锁，采用了RedLock算法。这个分布式锁有3个重要的考量点：</p>
+<ul>
+<li>互斥（只能有一个客户端获取锁）；</li>
+<li>不能死锁；</li>
+<li>容错（<strong>大部分Redis节点</strong>获得这个锁，就认为加锁成功）。</li>
+</ul>
+<h3 id="1-1-">1.1 使用方法</h3>
+<p>可以通过以下命令来加锁：</p>
+<pre><code class="lang-JAVA">SET [key] [value] NX PX [30000]
+</code></pre>
+<blockquote>
+<p><code>NX</code>的意思是只有key不存在的时候才会设置成功，别人创建的时候如果发现已经有了就不能加锁了；<code>PX 30000</code>的意思是30秒后锁自动释放。</p>
+</blockquote>
+<p>释放锁其实就是删除key，一般是通过Lua脚本删除，客户端会传送<code>[key]</code>和<code>[value]</code>给服务端，服务端执行Lua脚本比较客户端传过来的值与自己保存的是否一致，一致则删除<code>[key]</code>：</p>
+<pre><code class="lang-java">// redis.call("get",KEYS[1])保存的是Redis侧的Key对应的值；ARGV[1]是客户端保存的值
+if redis.call("get",KEYS[1]) == ARGV[1] then
+    return redis.call("del",KEYS[1])
+else
+    return 0
+end
+</code></pre>
+<p>这里思考一个问题：<em>为啥客户端释放锁时，除了上送[key]，还必须上送[value]呢？</em></p>
+<p>因为如果某个客户端获取到了锁，但是自身执行了很长时间才执行完，此时服务端可能已经自动释放锁了，然后别的客户端已经获取到了这个锁。如果这个时候直接删除key的话会有问题，所以得在Lua脚本中进行[value]的判断。</p>
+<h3 id="1-2-">1.2 缺点</h3>
+<p>如果是普通的Redis主从架构，由于主从异步复制，当主节点挂了时，key还没同步到从节点，此时从节点切换为主节点，就可能导致重复加锁，出现问题。</p>
+<h2 id="-redisson-">二、Redisson客户端</h2>
+<p>使用Redis分布式锁，最常用的还是直接使用Redisson客户端，非常简便易用。</p>
+<p>下面给大家看一段简单的使用代码片段，先直观的感受一下：</p>
+<pre><code class="lang-java">RLock lock = redission.getLock("mylock");
+try{
+   lock.lock();
+   // TODO
+}finally{
+   lock.unlock(); 
+}
+</code></pre>
+<p>接下来，我们来看看Redisson这个开源框架对Redis分布式锁的实现原理。</p>
+<h3 id="2-1-">2.1 加锁原理</h3>
+<p>我们假设现在有一个Redis Cluster集群，如果某个Redisson客户端1要加锁，它会首先根据hash算法，选择一个Redis节点。然后，发送一段Lua脚本到该节点上，Lua脚本如下所示：</p>
+<pre><code class="lang-JAVA">// CASE1：如果服务端不存在锁KEY[1]，就加锁，并设置key的过期时间为ARGV[2]
+if (redis.call("exist", KEYS[1]) == 0) then
+    redis.call("hset", KEYS[1], ARGV[2], 1);
+    redis.call("pexpire", KEYS[1], ARGV[1]);
+    return nil;
+end;
+// CASE2：如果服务端存在锁KEY[1]，且客户端ID也相同，就重入下锁，然后更新过期时间
+if (redis.call("hexists", KEYS[1], ARGV[2]) == 1) then
+    redis.call("hincrby", KEYS[1], ARGV[2], 1);
+    redis.call("pexpire", KEYS[1], ARGV[1]);
+    return nil;
+end;
+// CASE3：加锁失败，返回key剩余过期时间
+return redis.call("ptt;", KEY[1]);
+</code></pre>
+<p>上述Lua脚本，第一个 if 就是判断一下，如果你要加锁的key不存在的话，就进行加锁。</p>
+<ul>
+<li><p><code>KEYS[1]</code>代表你加锁的那个key，比如说：<code>RLock lock = redisson.getLock("myLock");</code>那加锁的key就是“myLock”；</p>
+</li>
+<li><p><code>ARGV[1]</code>代表的是锁key的生存时间，默认30秒；</p>
+</li>
+<li><p><code>ARGV[2]</code>代表的是加锁的客户端ID，类似于下面这样：8743c9c0-0795-4907-87fd-6c719a6b4586:1，Redisson客户端加锁时都会上送自己的客户端ID。</p>
+</li>
+</ul>
+<p>具体如何加锁呢？很简单，用下面的命令：</p>
+<pre><code>hset myLock "8743c9c0-0795-4907-87fd-6c719a6b4586:1" 1
+</code></pre><p>Redis服务端通过这个命令设置了一个hash数据结构：</p>
+<pre><code class="lang-JAVA">myLock:
+{
+    "8743c9c0-0795-4907-87fd-6c719a6b4586:1" 1
+}
+</code></pre>
+<p>上述的“8743c9c0-0795-4907-87fd-6c719a6b4586:1”就代表了：8743c9c0-0795-4907-87fd-6c719a6b4586这个客户端，对“myLock”这个锁，完成了1次加锁。</p>
+<p>接着会执行<code>pexpire myLock 30000</code>命令，设置myLock这个锁key的生存时间是30秒。</p>
+<blockquote>
+<p>为啥要用Lua脚本呢？因为一大坨复杂的业务逻辑，可以通过封装在Lua脚本中发送给Redis，Redis会保证这段复杂业务逻辑执行的原子性。</p>
+</blockquote>
+<h3 id="2-2-">2.2  锁互斥机制</h3>
+<p>那么如果此时，另一个客户端2来尝试加锁，执行了同样的一段Lua脚本，会怎么样呢？很简单：</p>
+<ul>
+<li>首先，第一个if判断会执行“exists myLock”，发现myLock这个锁key已经存在了；</li>
+<li>接着，第二个if判断，判断一下，myLock锁key的hash数据结构中，是否包含客户端2的ID？但是明显不是的，因为那里包含的是客户端1的ID；</li>
+<li>最后，客户端2会获取到<code>pttl myLock</code>返回的一个数字，这个数字代表了myLock这个锁key的剩余生存时间。此时客户端2会进入一个while循环，不停的尝试加锁。</li>
+</ul>
+<h3 id="2-3-watch-dog-">2.3  watch dog锁延期</h3>
+<p>客户端1加锁的key默认生存时间才30秒，如果超过了30秒，客户端1还想一直持有这把锁，怎么办呢？</p>
+<p>简单！客户端1一旦加锁成功，它就会启动一个watch dog后台线程，会每隔10秒检查一下，如果客户端1还持有锁key，那么就会不断的延长锁key的生存时间。</p>
+<h3 id="2-4-">2.4 可重入锁</h3>
+<p>那如果客户端1都已经持有了这把锁了，还可以重复加锁吗？比如下面这种代码：</p>
+<pre><code class="lang-JAVA">RLock lock = redission.getLock("mylock");
+
+lock.lock();
+// DO SOMETHING...
+lock.lock();
+
+lock.unlock();
+lock.unlock();
+</code></pre>
+<p>这时我们来分析一下最开头那段Lua脚本：</p>
+<ul>
+<li>第一个if判断肯定不成立，“exists myLock”会显示锁key已经存在了；</li>
+<li>第二个if判断会成立，因为myLock的hash数据结构中包含的那个ID，就是客户端1的那个ID，也就是“8743c9c0-0795-4907-87fd-6c719a6b4586:1”；</li>
+</ul>
+<p>此时就会执行可重入加锁的逻辑，通过下面这个命令，对客户端1的加锁次数累加1：</p>
+<pre><code class="lang-JAVA">incrby myLock "8743c9c0-0795-4907-87fd-6c71a6b4586:1" 1
+</code></pre>
+<p>最终，myLock的数据结构变为下面：</p>
+<pre><code class="lang-JAVA">myLock:
+{
+    "8743c9c0-0795-4907-87fd-6c719a6b4586:1" 2
+}
+</code></pre>
+<h3 id="2-5-">2.5 释放锁原理</h3>
+<p>如果执行<code>lock.unlock()</code>，就可以释放分布式锁，此时的业务逻辑也是非常简单的。说白了就是每次都对myLock数据结构中的那个加锁次数减1。如果发现加锁次数是0了，说明这个客户端已经不再持有锁了，此时就会用<code>del myLock</code>命令删除这个key。这样其它客户端就可以尝试完成加锁了。</p>
+<h3 id="2-6-">2.6 缺点</h3>
+<p>上面这种方案最大的问题在于：就是如果你对某个redis master节点加了锁，当redis master宕机时，key还没同步到slave节点，此时slave切换为master，就可能导致重复加锁，也就是多个客户端同时获取了同一把锁。</p>
+<h2 id="-">三、总结</h2>
+<p>采用Redis分布锁时，其实很难解决因为Master节点宕机而造成的重复加锁问题。所以，生产环境，如果对数据一致性要求不高，可以用Redisson客户端来实现Redis的分布式锁。但是，我们更常用Zookeeper来实现分布式锁，这块内容我将在后续章节详细讲解。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

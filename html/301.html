@@ -1,0 +1,184 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（十二）——Producer：超时问题</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（十二）——Producer：超时问题</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>KafkaProducer发送消息的过程中可能会出现<strong>消息超时</strong>的问题。本章，我会从Kafka客户端的底层对该问题进行讲解。</p>
+<h2 id="-">一、超时场景</h2>
+<p>我们先来看下，哪些情况下会出现超时问题：</p>
+<ul>
+<li>RecordBatch长时间停留在<strong>BufferPool</strong>缓冲区中，压根没有被Sender线程获取；</li>
+<li>Sender线程将消息发送出去了，但是一直没有收到响应，NetworkSend请求长时间积压在<strong>InFlightRequests</strong>中。</li>
+</ul>
+<h3 id="1-1-bufferpool-">1.1 BufferPool超时</h3>
+<p>我们先来看第一种情况。Sender线程的运行主流程中有这么一行代码：</p>
+<pre><code class="lang-JAVA">// Sender.java
+
+void run(long now) {
+       //...
+
+    // 5.剔除超时的batch（默认60s）
+    List&lt;RecordBatch&gt; expiredBatches = this.accumulator.abortExpiredBatches(this.requestTimeout, now);
+}
+</code></pre>
+<p>我们来看RecordAccumulator的<code>abortExpiredBatches</code>方法，它的处理逻辑如下：</p>
+<pre><code class="lang-JAVA">// RecordAccumulator.java
+
+private final ConcurrentMap&lt;TopicPartition, Deque&lt;RecordBatch&gt;&gt; batches;
+public List&lt;RecordBatch&gt; abortExpiredBatches(int requestTimeout, long now) {
+    List&lt;RecordBatch&gt; expiredBatches = new ArrayList&lt;&gt;();
+    int count = 0;
+    // 1.遍历查找超时RecordBatch
+    for (Map.Entry&lt;TopicPartition, Deque&lt;RecordBatch&gt;&gt; entry : this.batches.entrySet()) {
+        Deque&lt;RecordBatch&gt; dq = entry.getValue();
+        TopicPartition tp = entry.getKey();
+        if (!muted.contains(tp)) {
+            synchronized (dq) {
+                RecordBatch lastBatch = dq.peekLast();
+                Iterator&lt;RecordBatch&gt; batchIterator = dq.iterator();
+                while (batchIterator.hasNext()) {
+                    RecordBatch batch = batchIterator.next();
+                    boolean isFull = batch != lastBatch || batch.isFull();
+                    // 判断是否超时
+                    if (batch.maybeExpire(requestTimeout, retryBackoffMs, now, this.lingerMs, isFull)) {
+                        expiredBatches.add(batch);
+                        count++;
+                        batchIterator.remove();    //移除
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // 2.触发回调函数
+    if (!expiredBatches.isEmpty()) {
+        log.trace("Expired {} batches in accumulator", count);
+        for (RecordBatch batch : expiredBatches) {
+            // 回调
+            batch.expirationDone();
+            // 回收分配的Buffer
+            deallocate(batch);
+        }
+    }
+
+    return expiredBatches;
+}
+</code></pre>
+<p>RecordBatch的<code>expirationDone</code>方法最终会调用内部的<code>done</code>方法，也就是触发回调函数的执行：</p>
+<pre><code class="lang-JAVA">// RecordBatch.java
+
+void expirationDone() {
+    if (expiryErrorMessage == null)
+        throw new IllegalStateException("Batch has not expired");
+    this.done(-1L, Record.NO_TIMESTAMP,
+              new TimeoutException("Expiring " + recordCount + " record(s) for " + topicPartition + ": " + expiryErrorMessage));
+}
+
+public void done(long baseOffset, long logAppendTime, RuntimeException exception) {
+    //...
+    // execute callbacks
+    for (Thunk thunk : thunks) {
+        try {
+            if (exception == null) {
+                RecordMetadata metadata = thunk.future.value();
+                thunk.callback.onCompletion(metadata, null);
+            } else {
+                thunk.callback.onCompletion(null, exception);
+            }
+        } catch (Exception e) {
+            log.error("Error executing user-provided callback on message for topic-partition '{}'", topicPartition, e);
+        }
+    }
+    produceFuture.done();
+}
+</code></pre>
+<h3 id="1-2-inflightrequests-">1.2 InFlightRequests超时</h3>
+<p>再来看另一种超时的场景，Sender线程的主流程中调用了NetworkClient的<code>poll</code>方法：</p>
+<pre><code class="lang-JAVA">// Sender.java
+
+void run(long now) {
+    //...
+    this.client.poll(pollTimeout, now);
+}
+</code></pre>
+<p>NetworkClient的<code>poll</code>方法内部有一段超时逻辑的判断，也就是说如果发现有对Broker的请求超时了，即超过<code>request.timeout.ms</code>（默认60s）还没响应，此时会关闭掉跟那个Broker的连接，认为那个Broker已经故障了 。同时，进行内存数据结构的清理，并再次标记为需要去重新拉取元数据：</p>
+<pre><code class="lang-JAVA">// NetworkClient.java
+
+public List&lt;ClientResponse&gt; poll(long timeout, long now) {
+    long metadataTimeout = metadataUpdater.maybeUpdate(now);
+    try {
+        this.selector.poll(Utils.min(timeout, metadataTimeout, requestTimeoutMs));
+    } catch (IOException e) {
+        log.error("Unexpected error during I/O", e);
+    }
+
+    //处理超时请求
+    handleTimedOutRequests(responses, updatedNow);
+
+    return responses;
+}
+
+private void handleTimedOutRequests(List&lt;ClientResponse&gt; responses, long now) {
+    // 获取超时的目标Broker
+    List&lt;String&gt; nodeIds = this.inFlightRequests
+        .getNodesWithTimedOutRequests(now, this.requestTimeoutMs);
+    for (String nodeId : nodeIds) {
+        // 关闭与该Broker的连接
+        this.selector.close(nodeId);
+        processDisconnection(responses, nodeId, now);
+    }
+
+    // 标记更新元数据
+    if (!nodeIds.isEmpty())
+        metadataUpdater.requestUpdate();
+}
+
+private void processDisconnection(List&lt;ClientResponse&gt; responses, String nodeId, long now) {
+    connectionStates.disconnected(nodeId, now);
+    nodeApiVersions.remove(nodeId);
+    nodesNeedingApiVersionsFetch.remove(nodeId);
+    // 清理InFlightRequests中缓存的针对该Broker的请求
+    for (InFlightRequest request : this.inFlightRequests.clearAll(nodeId)) {    
+        if (request.isInternalRequest &amp;&amp; request.header.apiKey() == ApiKeys.METADATA.id)
+            metadataUpdater.handleDisconnection(request.destination);
+        else
+            responses.add(request.disconnected(now));
+    }
+}
+</code></pre>
+<p>超时逻辑判断：</p>
+<pre><code class="lang-JAVA">// InFlightRequests.java
+
+public List&lt;String&gt; getNodesWithTimedOutRequests(long now, int requestTimeout) {
+    List&lt;String&gt; nodeIds = new LinkedList&lt;&gt;();
+    for (Map.Entry&lt;String, Deque&lt;NetworkClient.InFlightRequest&gt;&gt; requestEntry : requests.entrySet()) {
+        String nodeId = requestEntry.getKey();
+        Deque&lt;NetworkClient.InFlightRequest&gt; deque = requestEntry.getValue();
+        if (!deque.isEmpty()) {
+            NetworkClient.InFlightRequest request = deque.peekLast();
+            // 当前事件-请求发送事件超过了`request.timeout.ms`
+            long timeSinceSend = now - request.sendTimeMs;
+            if (timeSinceSend &gt; requestTimeout)
+                nodeIds.add(nodeId);
+        }
+    }
+    return nodeIds;
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我对KafkaProducer发送消息的过程中可能会出现的<strong>消息超时</strong>问题进行讲解，整体分为两种情况：</p>
+<ol>
+<li>请求积压在BufferPool；</li>
+<li>请求积压在InFlightRequests。</li>
+</ol>
+<p>无论哪种情况，请求超时的判断逻辑中都涉及参数<code>request.timeout.ms</code>，默认超时时间为60s。同时，超时后最终会触发回调函数的执行。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,29 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式消息中间件（十三）——RocketMQ延时消息</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式消息中间件（十三）——RocketMQ延时消息</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在第一章<a href="https://www.tpvlog.com/article/126#menu_5">概述</a>中，我们的背景案例存在一个问题——状态补偿问题。也就是说，订单系统需要一种补偿机制去确认某些订单的最终状态。比如，因为网络等原因，订单系统没收到“成功”的支付通知，此时订单的状态就是不确定的。一种常见的思路是：订单系统后台起一个定时任务，每隔一段时间扫描下所有”中间状态“的订单，确认下是否要关闭它。但是这种方案在订单量小的情况下还好说，一旦订单量大了，就会出现性能瓶颈，而且重复扫描的效率也太低。</p>
+<p>本章，我们就来看下如何通过RocketMQ来解决这个问题。在RocketMQ中，有两种特殊类型的消息：<strong>定时消息</strong>和<strong>延时消息</strong>。</p>
+<h2 id="-">一、延时消息</h2>
+<p>所谓延时消息， 就是当Producer将消息发送到MQ后，这条消息不会立马被Consumer消费到，而是延迟一定时间后后才能被消费到。 </p>
+<p>Producer在发送<strong>延时消息</strong>时，需要设定一个<strong>延时时间长度</strong>，消息将从<strong>当前发送时间点开始</strong>延迟固定时间之后，才能被消费到。 </p>
+<p>比如在订单系统中，在订单创建时会发送一条延时消息，指定延时时间长度为30分钟，那这条消息将会在 30 分钟后才能被消费者消费到，消费者收到此消息后需要判断对应的订单是否已完成支付。如支付未完成，则关闭订单，如已完成支付则忽略。</p>
+<p>通过这种方式，我们就可以解决订单系统的状态补偿问题：</p>
+<center><br/> <img src="./img/20200227170139643.png" style="zoom:80%"><br/></img></center>
+<h3 id="1-1-">1.1 延时级别</h3>
+<p>RocketMQ默认支持一些延迟级别：<code>1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h</code>。比如，Producer设置消息的延迟级别为3，意思就是延迟10s，那发送出去的消息，会过10s才会被消费者获取到。对于我们的订单延时扫描场景，可以设置延迟级别为16，也就是对应上面的30分钟。 </p>
+<h2 id="-">二、定时消息</h2>
+<p>RocketMQ除了支持延时消息外，还支持<strong>定时消息</strong>。 定时消息，顾名思义，就是Producer将消息发送到MQ时，需要指定这条消息能被消费的<strong>具体时间点</strong>，只要到达具体时间点后，消费者才能消费到该消息。 </p>
+<p>可以通过定时消息触发一些定时任务，比如在某一固定时间点向用户发送提醒消息。 </p>
+<h2 id="-">三、总结</h2>
+<p>本章，我们介绍了RocketMQ中的延时消息，这是一个非常有用的功能。当订单系统的订单数量非常多时，我们完全可以部署几个“订单扫描服务”，然后订阅订单消息的Topic，这样就可以很高效的处理这类状态补偿问题。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,54 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（十五）—— J.U.C之atomic框架：Atomic数组</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（十五）—— J.U.C之atomic框架：Atomic数组</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-atomic-">一、Atomic数组简介</h2>
+<p>Atomic数组，顾名思义，就是能以原子的方式，操作数组中的元素。</p>
+<p>JDK提供了三种类型的原子数组：<code>AtomicIntegerArray</code>、<code>AtomicLongArray</code>、<code>AtomicReferenceArray</code>。</p>
+<p>这三种类型大同小异：</p>
+<ul>
+<li><p><code>AtomicIntegerArray</code>对应<code>AtomicInteger</code></p>
+</li>
+<li><p><code>AtomicLongArray</code>对应<code>AtomicLong</code></p>
+</li>
+<li><code>AtomicReferenceArray</code>对应<code>AtomicReference</code></li>
+</ul>
+<p>其实阅读源码也可以发现，这些数组原子类与对应的普通原子类相比，只是多了通过索引找到内存中元素地址的操作而已。</p>
+<blockquote>
+<p>注意：原子数组并不是说可以让线程以原子方式一次性地操作数组中所有元素的数组。<br/>而是指对于数组中的每个元素，可以以原子方式进行操作。</p>
+</blockquote>
+<p>说得简单点，<strong>原子数组类型</strong>其实可以看成<strong>原子类型组成的数组</strong>。</p>
+<p>比如：</p>
+<pre><code class="lang-JAVA">AtomicIntegerArray  array = new AtomicIntegerArray(10);
+array.getAndIncrement(0);   // 将第0个元素原子地增加1
+</code></pre>
+<p>等同于</p>
+<pre><code>AtomicInteger[]  array = new AtomicInteger[10];
+array[0].getAndIncrement();  // 将第0个元素原子地增加1
+</code></pre><h2 id="-atomicintegerarray-">二、AtomicIntegerArray原理</h2>
+<p>本节将以<strong>AtomicIntegerArray</strong>为例，介绍下原子数组的原理，<strong>AtomicLongArray</strong>和<strong>AtomicReferenceArray</strong>的使用和源码与<strong>AtomicIntegerArray</strong>大同小异，读者可以自己查看<a href="https://docs.oracle.com/javase/8/docs/api/">Oracle官方文档</a>和源码。</p>
+<p><strong>AtomicIntegerArray</strong>其实和其它原子类区别并不大，只不过构造的时候传入的是一个<strong>int[]</strong>数组，然后底层通过<strong>Unsafe</strong>类操作数组：<br/><img src="./img/20191027153108179.png"/></p>
+<p>可以看到，<strong>AtomicIntegerArray</strong>提供了两种构造器，本质都是内部利用<code>array</code>变量保存一个<code>int[]</code>数组引用。 </p>
+<p>另外，<strong>AtomicIntegerArray</strong>利用<strong>Unsafe</strong>类直接操作<code>int[]</code>对象的内存地址，以达到操作数组元素的目的，几个关键的变量解释如下：</p>
+<p><code>int base = unsafe.arrayBaseOffset(int[].class);</code></p>
+<p>Unsafe类的<strong>arraBaseOffset</strong>方法：返回指定类型数组的第一个元素地址相对于数组起始地址的偏移值。</p>
+<p><code>int scale = unsafe.arrayIndexScale(int[].class);</code></p>
+<p>Unsafe类的<strong>arrayIndexScale</strong>方法：返回指定类型数组的元素所占用的字节数。比如int[]数组中的每个int元素占用4个字节，就返回4。</p>
+<p>那么，通过<code>base + i * sacle</code> 其实就可以知道 索引<strong>i</strong>的元素在数组中的内存起始地址。</p>
+<p>但是，观察<strong>AtomicIntegerArray</strong>的<strong>byteOffset</strong>方法，是通过<code>i &lt;&lt; shift + base</code> 的公式计算元素的起始地址的：</p>
+<p>$$<br/>i &lt;&lt; shift + base = i * 2^{shift} + base<br/>$$</p>
+<p>这里 $2^{shift}$其实就等于<strong>scale</strong>。<br/>$$<br/>shift = 31 - Integer.numberOfLeadingZeros(scale)<br/>$$<br/><code>Integer.numberOfLeadingZeros(scale)</code>是将<strong>scale</strong>转换为2进制，然后从左往右数连续0的个数。</p>
+<p>读者可以自己计算下：<br/>$$<br/>shift = 31 - Integer.numberOfLeadingZeros(4) = 31 - 29 =2<br/>$$</p>
+<p>之所以要这么绕一圈，其实是处于性能的考虑，通过移位计算乘法的效率往往更高。</p>
+<h2 id="-atomicintegerarray-">三、AtomicIntegerArray接口声明</h2>
+<p><img src="./img/20191027153114393.png"/><br/><img src="./img/20191027153120150.png"/></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

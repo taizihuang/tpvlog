@@ -1,0 +1,619 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（三十）——服务自省方案：配置中心</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（三十）——服务自省方案：配置中心</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Dubbo从 <code>2.7.0</code> 版本开始正式支持配置中心，在服务自省架构中也依赖配置中心完成 Service ID 与 Service Name 的映射。配置中心在 Dubbo 中主要承担两个职责：</p>
+<ul>
+<li>外部化配置：目的之一是实现配置的集中式管理，目前已经有很多成熟的专业配置管理系统（例如，携程开源的 Apollo、阿里开源的 Nacos 等），Dubbo 配置中心的目的不是”重复造轮子”，而是保证 Dubbo 能与这些成熟的配置管理系统一起正常工作；</li>
+<li>服务治理：负责服务治理规则的存储与通知。</li>
+</ul>
+<p>Dubbo 可以同时支持多种配置来源。在 Dubbo 初始化过程中，会从多个来源获取配置，并按照固定的优先级将这些配置整合起来，实现<strong>高优先级的配置覆盖低优先级配置</strong>的效果。这些配置的汇总结果将会参与形成 URL，以及后续的服务发布和服务引用。</p>
+<p>Dubbo 目前支持下面四种配置来源，优先级由 1 到 4 逐级降低：</p>
+<ol>
+<li>System Properties，即<code>-D</code> 参数；</li>
+<li>外部化配置，也就是本章要介绍的配置中心；</li>
+<li>API 接口、注解、XML 配置等编程方式收到的配置，最终得到 ServiceConfig、ReferenceConfig 等对象；</li>
+<li>本地 <code>dubbo.properties</code> 配置文件。</li>
+</ol>
+<h2 id="-">一、核心接口</h2>
+<p>我们先来看于配置中心相关的一些核心接口。</p>
+<h3 id="1-1-configuration">1.1 Configuration</h3>
+<p>Configuration 接口是 Dubbo 中所有配置的基础接口，其中定义了根据指定 Key 获取对应配置值的相关方法，如下图所示：</p>
+<center><br/> <img src="./img/20211128230152198.png" style="zoom:100%"><br/></img></center>
+<p>从上图中可以看到，Configuration 针对不同的 boolean、int、String 返回值都有对应的 get() 方法，同时还提供了带有默认值的 get() 方法。这些 get() 方法底层首先调用 getInternalProperty() 方法获取配置值，然后调用 convert() 方法将获取到的配置值转换成返回值的类型之后返回。</p>
+<p>下图展示了 Dubbo 中提供的 Configuration 接口实现，包括：SystemConfiguration、EnvironmentConfiguration、InmemoryConfiguration、PropertiesConfiguration、CompositeConfiguration、ConfigConfigurationAdapter 和 DynamicConfiguration。下面我将结合具体代码逐个介绍其实现。</p>
+<center><br/> <img src="./img/20211128230203950.png" style="zoom:100%"/><br/></center>
+<h4 id="systemconfiguration-environmentconfiguration">SystemConfiguration &amp; EnvironmentConfiguration</h4>
+<p>SystemConfiguration 是从 Java Properties 配置（也就是 -D 配置参数）中获取相应的配置项，EnvironmentConfiguration 是从使用环境变量中获取相应的配置。两者的 getInternalProperty() 方法实现如下：</p>
+<pre><code class="lang-java">public class SystemConfiguration implements Configuration {
+    public Object getInternalProperty(String key) {
+        return System.getProperty(key); // 读取-D配置参数
+    }
+}
+
+public class EnvironmentConfiguration implements Configuration {
+    public Object getInternalProperty(String key) {
+        String value = System.getenv(key);
+        if (StringUtils.isEmpty(value)) {
+            // 读取环境变量中获取相应的配置
+            value = System.getenv(StringUtils.toOSStyleKey(key));
+        }
+        return value;
+    }
+}
+</code></pre>
+<h4 id="inmemoryconfiguration">InmemoryConfiguration</h4>
+<p>InmemoryConfiguration 会在内存中维护一个 Map<string, string=""> 集合（store 字段），其 getInternalProperty() 方法的实现就是从 store 集合中获取对应配置值：</string,></p>
+<pre><code class="lang-java">// InmemoryConfiguration.java
+
+public class InmemoryConfiguration implements Configuration {
+    private Map&lt;String, String&gt; store = new LinkedHashMap&lt;&gt;();
+    @Override
+    public Object getInternalProperty(String key) {
+        return store.get(key);
+    }
+    // 省略addProperty()等写入store集合的方法
+}
+</code></pre>
+<h4 id="propertiesconfiguration">PropertiesConfiguration</h4>
+<p>PropertiesConfiguration 涉及 OrderedPropertiesProvider，其接口的定义如下：</p>
+<pre><code class="lang-java">// OrderedPropertiesProvider.java
+
+@SPI
+public interface OrderedPropertiesProvider {
+    // 用于排序
+    int priority();
+    // 获取Properties配置
+    Properties initProperties();
+}
+</code></pre>
+<p>在 PropertiesConfiguration 的构造方法中，会加载 OrderedPropertiesProvider 接口的全部扩展实现，并按照 priority() 方法进行排序。然后，加载默认的 <code>dubbo.properties.file</code> 配置文件。最后，用 OrderedPropertiesProvider 中提供的配置覆盖 <code>dubbo.properties.file</code> 文件中的配置。</p>
+<p>PropertiesConfiguration 的构造方法的具体实现如下：</p>
+<pre><code class="lang-java">// PropertiesConfiguration.java
+
+public PropertiesConfiguration() {
+    // 获取OrderedPropertiesProvider接口的全部扩展名称
+    ExtensionLoader&lt;OrderedPropertiesProvider&gt; propertiesProviderExtensionLoader = ExtensionLoader.getExtensionLoader(OrderedPropertiesProvider.class);
+    Set&lt;String&gt; propertiesProviderNames = propertiesProviderExtensionLoader.getSupportedExtensions();
+    if (propertiesProviderNames == null || propertiesProviderNames.isEmpty()) {
+        return;
+    }
+    // 加载OrderedPropertiesProvider接口的全部扩展实现
+    List&lt;OrderedPropertiesProvider&gt; orderedPropertiesProviders = new ArrayList&lt;&gt;();
+    for (String propertiesProviderName : propertiesProviderNames) {
+        orderedPropertiesProviders.add(propertiesProviderExtensionLoader.getExtension(propertiesProviderName));
+    }
+    // 排序OrderedPropertiesProvider接口的扩展实现
+    orderedPropertiesProviders.sort((OrderedPropertiesProvider a, OrderedPropertiesProvider b) -&gt; {
+        return b.priority() - a.priority();
+    });
+    // 加载默认的dubbo.properties.file配置文件，加载后的结果记录在ConfigUtils.PROPERTIES这个static字段中
+    Properties properties = ConfigUtils.getProperties();
+    // 使用OrderedPropertiesProvider扩展实现，按序覆盖dubbo.properties.file配置文件中的默认配置
+    for (OrderedPropertiesProvider orderedPropertiesProvider :
+            orderedPropertiesProviders) {
+        properties.putAll(orderedPropertiesProvider.initProperties());
+    }
+    // 更新ConfigUtils.PROPERTIES字段
+    ConfigUtils.setProperties(properties);
+}
+</code></pre>
+<p>在 PropertiesConfiguration.getInternalProperty() 方法中，直接从 <code>ConfigUtils.PROPERTIES</code> 这个 Properties 中获取覆盖后的配置信息：</p>
+<pre><code class="lang-java">// PropertiesConfiguration.java
+
+public Object getInternalProperty(String key) {
+    return ConfigUtils.getProperty(key);
+}
+</code></pre>
+<h4 id="compositeconfiguration">CompositeConfiguration</h4>
+<p>CompositeConfiguration 是一个复合的 Configuration 对象，<strong>其核心就是将多个 Configuration 对象组合起来，对外表现为一个 Configuration 对象</strong>。</p>
+<p>CompositeConfiguration 组合的 Configuration 对象都保存在 configList 字段中（LinkedList<code>&lt;Configuration&gt;</code> 集合），CompositeConfiguration 提供了 addConfiguration() 方法用于向 configList 集合中添加 Configuration 对象，如下所示：</p>
+<pre><code class="lang-java">// CompositeConfiguration.java
+
+public void addConfiguration(Configuration configuration) {
+    if (configList.contains(configuration)) {
+        return; // 不会重复添加同一个Configuration对象
+    }
+    this.configList.add(configuration);
+}
+</code></pre>
+<p>在 CompositeConfiguration 中维护了一个 prefix 字段和 id 字段，两者可以作为 Key 的前缀进行查询，在 getProperty() 方法中的相关代码如下：</p>
+<pre><code class="lang-java">// CompositeConfiguration.java
+
+public Object getProperty(String key, Object defaultValue) {
+    Object value = null;
+    if (StringUtils.isNotEmpty(prefix)) { // 检查prefix
+        if (StringUtils.isNotEmpty(id)) { // 检查id
+            // prefix和id都作为前缀，然后拼接key进行查询
+            value = getInternalProperty(prefix + id + "." + key);
+        }
+        if (value == null) {
+            // 只把prefix作为前缀，拼接key进行查询
+            value = getInternalProperty(prefix + key);
+        }
+    } else {
+        // 若prefix为空，则直接用key进行查询
+        value = getInternalProperty(key);
+    }
+    return value != null ? value : defaultValue;
+}
+</code></pre>
+<p>在 getInternalProperty() 方法中，会按序遍历 configList 集合中的全部 Configuration 查询对应的 Key，返回第一个成功查询到的 Value 值，如下示例代码：</p>
+<pre><code class="lang-java">// CompositeConfiguration.java
+
+public Object getInternalProperty(String key) {
+    Configuration firstMatchingConfiguration = null;
+    for (Configuration config : configList) { // 遍历所有Configuration对象
+        try {
+            if (config.containsKey(key)) { // 得到第一个包含指定Key的Configuration对象
+                firstMatchingConfiguration = config; 
+                break;
+            }
+        } catch (Exception e) {
+            logger.error("...");
+        }
+    }
+    if (firstMatchingConfiguration != null) { // 通过该Configuration查询Key并返回配置值
+        return firstMatchingConfiguration.getProperty(key);
+    } else {
+        return null;
+    }
+}
+</code></pre>
+<h4 id="configconfigurationadapter">ConfigConfigurationAdapter</h4>
+<p>Dubbo 通过 AbstractConfig 类来抽象实例对应的配置，如下图所示：</p>
+<center><br/> <img src="./img/20211128230214738.png" style="zoom:100%"/><br/></center>
+<p>这些 AbstractConfig 实现基本都对应一个固定的配置，也定义了配置对应的字段以及 getter/setter() 方法。例如，RegistryConfig 这个实现类就对应了注册中心的相关配置，其中包含了 address、protocol、port、timeout 等一系列与注册中心相关的字段以及对应的 getter/setter() 方法，来接收用户通过 XML、Annotation 或是 API 方式传入的注册中心配置。</p>
+<p><strong>ConfigConfigurationAdapter 是 AbstractConfig 与 Configuration 之间的适配器</strong>，它会将 AbstractConfig 对象转换成 Configuration 对象。在 ConfigConfigurationAdapter 的构造方法中会获取 AbstractConfig 对象的全部字段，并转换成一个 Map<string, string=""> 集合返回，该 Map<string, string=""> 集合将会被 ConfigConfigurationAdapter 的 metaData 字段引用。相关示例代码如下：</string,></string,></p>
+<pre><code class="lang-JAVA">// ConfigConfigurationAdapter.java
+
+public ConfigConfigurationAdapter(AbstractConfig config) {
+    // 获取该AbstractConfig对象中的全部字段与字段值的映射
+    Map&lt;String, String&gt; configMetadata = config.getMetaData();
+    metaData = new HashMap&lt;&gt;(configMetadata.size());
+    // 根据AbstractConfig配置的prefix和id，修改metaData集合中Key的名称
+    for (Map.Entry&lt;String, String&gt; entry : configMetadata.entrySet()) {
+        String prefix = config.getPrefix().endsWith(".") ? config.getPrefix() : config.getPrefix() + ".";
+        String id = StringUtils.isEmpty(config.getId()) ? "" : config.getId() + ".";
+        metaData.put(prefix + id + entry.getKey(), entry.getValue());
+    }
+}
+</code></pre>
+<p>在 ConfigConfigurationAdapter 的 getInternalProperty() 方法实现中，直接从 metaData 集合中获取配置值即可，如下所示：</p>
+<pre><code class="lang-java">// ConfigConfigurationAdapter.java
+
+public Object getInternalProperty(String key) {
+    return metaData.get(key);
+}
+</code></pre>
+<h3 id="1-2-dynamicconfiguration">1.2 DynamicConfiguration</h3>
+<p>DynamicConfiguration 是对 Dubbo 中动态配置的抽象，其核心方法有下面三类：</p>
+<ul>
+<li>getProperties()/ getConfig() / getProperty() 方法：从配置中心获取指定的配置，在使用时，可以指定一个超时时间；</li>
+<li>addListener()/ removeListener() 方法：添加或删除对指定配置的监听器；</li>
+<li>publishConfig() 方法：发布一条配置信息。</li>
+</ul>
+<p>在上述三类方法中，每个方法都用多个重载，其中，都会包含一个带有 group 参数的重载，也就是说<strong>配置中心的配置可以按照 group 进行分组</strong>。</p>
+<p>与 Dubbo 中很多接口类似，DynamicConfiguration 接口本身不被 @SPI 注解修饰（即不是一个扩展接口），<strong>而是在 DynamicConfigurationFactory 上添加了 @SPI 注解，使其成为一个扩展接口</strong>。</p>
+<p>在 DynamicConfiguration 中提供了 getDynamicConfiguration() 静态方法，该方法会从传入的配置中心 URL 参数中，解析出协议类型并获取对应的 DynamicConfigurationFactory 实现，如下所示：</p>
+<pre><code class="lang-java">// DynamicConfiguration.java
+
+static DynamicConfiguration getDynamicConfiguration(URL connectionURL) {
+    String protocol = connectionURL.getProtocol();
+    DynamicConfigurationFactory factory = getDynamicConfigurationFactory(protocol);
+    return factory.getDynamicConfiguration(connectionURL);
+}
+</code></pre>
+<p>DynamicConfigurationFactory 接口的定义如下：</p>
+<pre><code class="lang-java">// DynamicConfigurationFactory.java
+
+@SPI("nop") 
+public interface DynamicConfigurationFactory {
+    DynamicConfiguration getDynamicConfiguration(URL url);
+    static DynamicConfigurationFactory getDynamicConfigurationFactory(String name) {
+        // 根据扩展名称获取DynamicConfigurationFactory实现
+        Class&lt;DynamicConfigurationFactory&gt; factoryClass = DynamicConfigurationFactory.class;
+        ExtensionLoader&lt;DynamicConfigurationFactory&gt; loader = getExtensionLoader(factoryClass);
+        return loader.getOrDefaultExtension(name);
+    }
+}
+</code></pre>
+<p>DynamicConfigurationFactory 接口的继承关系以及 DynamicConfiguration 接口对应的继承关系如下：</p>
+<center><br/> <img src="./img/20211128230226419.png" style="zoom:100%"/><br/></center>
+<center><br/> <img src="./img/20211128230238582.png" style="zoom:100%"/><br/></center>
+<p>我们先来看 AbstractDynamicConfigurationFactory 的实现，其中会维护一个 dynamicConfigurations 集合（<code>Map&lt;String, DynamicConfiguration&gt;</code> 类型），在 getDynamicConfiguration() 方法中会填充该集合，实现<strong>缓存</strong>DynamicConfiguration 对象的效果。同时，AbstractDynamicConfigurationFactory 提供了一个 createDynamicConfiguration() 方法给子类实现，来<strong>创建</strong>DynamicConfiguration 对象。</p>
+<p>以 ZookeeperDynamicConfigurationFactory 实现为例，其 createDynamicConfiguration() 方法创建的就是 ZookeeperDynamicConfiguration 对象：</p>
+<pre><code class="lang-java">// ZookeeperDynamicConfigurationFactory.java
+
+protected DynamicConfiguration createDynamicConfiguration(URL url) {
+    // 这里创建ZookeeperDynamicConfiguration使用的ZookeeperTransporter就是前文在Transport层中针对Zookeeper的实现
+    return new ZookeeperDynamicConfiguration(url, zookeeperTransporter);
+}
+</code></pre>
+<p>接下来我们再以 ZookeeperDynamicConfiguration 为例，分析 DynamicConfiguration 接口的具体实现。首先来看 ZookeeperDynamicConfiguration 的核心字段：</p>
+<ul>
+<li>executor（Executor 类型）：用于执行监听器的线程池；</li>
+<li>rootPath（String 类型）：以 Zookeeper 作为配置中心时，配置也是以 ZNode 形式存储的，rootPath 记录了所有配置节点的根路径；</li>
+<li>zkClient（ZookeeperClient 类型）：与 Zookeeper 集群交互的客户端；</li>
+<li>initializedLatch（CountDownLatch 类型）：阻塞等待 ZookeeperDynamicConfiguration 相关的监听器注册完成；</li>
+<li>cacheListener（CacheListener 类型）：用于监听配置变化的监听器；</li>
+<li>url（URL 类型）：配置中心对应的 URL 对象。</li>
+</ul>
+<p>在 ZookeeperDynamicConfiguration 的构造函数中，会<strong>初始化上述核心字段</strong>，具体实现如下：</p>
+<pre><code class="lang-JAVA">// ZookeeperDynamicConfiguration.java
+
+ZookeeperDynamicConfiguration(URL url, ZookeeperTransporter zookeeperTransporter) {
+    this.url = url;
+    // 根据URL中的config.namespace参数(默认值为dubbo)，确定配置中心ZNode的根路径
+    rootPath = PATH_SEPARATOR + url.getParameter(CONFIG_NAMESPACE_KEY, DEFAULT_GROUP) + "/config";
+
+    // 初始化initializedLatch以及cacheListener，在cacheListener注册成功之后，会调用cacheListener.countDown()方法
+    initializedLatch = new CountDownLatch(1);
+    this.cacheListener = new CacheListener(rootPath, initializedLatch);
+
+    // 初始化executor字段，用于执行监听器的逻辑
+    this.executor = Executors.newFixedThreadPool(1, new NamedThreadFactory(this.getClass().getSimpleName(), true));
+
+    // 初始化Zookeeper客户端
+    zkClient = zookeeperTransporter.connect(url);
+
+    // 在rootPath上添加cacheListener监听器
+    zkClient.addDataListener(rootPath, cacheListener, executor);
+    try {
+        // 从URL中获取当前线程阻塞等待Zookeeper监听器注册成功的时长上限
+        long timeout = url.getParameter("init.timeout", 5000);
+        // 阻塞当前线程，等待监听器注册完成
+        boolean isCountDown = this.initializedLatch.await(timeout, TimeUnit.MILLISECONDS);
+        if (!isCountDown) {
+            throw new IllegalStateException("...");
+        }
+    } catch (InterruptedException e) {
+        logger.warn("...");
+    }
+}
+</code></pre>
+<p>在上述初始化过程中，ZookeeperDynamicConfiguration 会创建 CacheListener 监听器。在前面章节中，我介绍了 dubbo-remoting-zookeeper 对外提供了 StateListener、DataListener 和 ChildListener 三种类型的监听器。<strong>这里的 CacheListener 就是 DataListener 监听器的具体实现</strong>。</p>
+<p>在 CacheListener 中维护了一个 Map<string, set=""> 集合（keyListeners 字段）用于记录所有添加的 ConfigurationListener 监听器，其中 Key 是配置信息在 Zookeeper 中存储的 path，Value 为该 path 上的监听器集合。当某个配置项发生变化的时候，CacheListener 会从 keyListeners 中获取该配置对应的 ConfigurationListener 监听器集合，并逐个进行通知。</string,></p>
+<p>该逻辑是在 CacheListener 的 dataChanged() 方法中实现的：</p>
+<pre><code class="lang-JAVA">// CacheListener.java
+
+public void dataChanged(String path, Object value, EventType eventType) {
+    if (eventType == null) {
+        return;
+    }
+    if (eventType == EventType.INITIALIZED) {
+        // 在收到INITIALIZED事件的时候，表示CacheListener已经成功注册，会释放阻塞在initializedLatch上的主线程
+        initializedLatch.countDown();
+        return;
+    }
+    if (path == null || (value == null &amp;&amp; eventType != EventType.NodeDeleted)) {
+        return;
+    }
+
+    if (path.split("/").length &gt;= MIN_PATH_DEPTH) { // 对path层数进行过滤
+        String key = pathToKey(path); // 将path中的"/"替换成"."
+        ConfigChangeType changeType;
+        switch (eventType) { // 将Zookeeper中不同的事件转换成不同的ConfigChangedEvent事件
+            case NodeCreated:
+                changeType = ConfigChangeType.ADDED;
+                break;
+            case NodeDeleted:
+                changeType = ConfigChangeType.DELETED;
+                break;
+            case NodeDataChanged:
+                changeType = ConfigChangeType.MODIFIED;
+                break;
+            default:
+                return;
+        }
+        // 使用ConfigChangedEvent封装触发事件的Key、Value、配置group以及事件类型
+        ConfigChangedEvent configChangeEvent = new ConfigChangedEvent(key, getGroup(path), (String) value, changeType);
+        // 从keyListeners集合中获取对应的ConfigurationListener集合，然后逐一进行通知
+        Set&lt;ConfigurationListener&gt; listeners = keyListeners.get(path);
+        if (CollectionUtils.isNotEmpty(listeners)) {
+            listeners.forEach(listener -&gt; listener.process(configChangeEvent));
+        }
+    }
+}
+</code></pre>
+<p>CacheListener 中调用的监听器都是 ConfigurationListener 接口实现，如下图所示，这里前面章节介绍的 TagRouter、AppRouter 和 ServiceRouter，它们主要是监听路由配置的变化；还涉及 RegistryDirectory 和 RegistryProtocol 中的四个内部类（AbstractConfiguratorListener 的子类），它们主要监听 Provider 和 Consumer 的配置变化。</p>
+<center><br/> <img src="./img/20211128230252788.png" style="zoom:100%"/><br/></center>
+<p>这些 ConfigurationListener 实现在前面的课程中已经详细介绍过了，这里就不再重复。ZookeeperDynamicConfiguration 中还提供了 addListener()、removeListener() 两个方法用来增删 ConfigurationListener 监听器，具体实现比较简单，这里就不再赘述。</p>
+<p>介绍完 ZookeeperDynamicConfiguration 的初始化过程之后，我们再来看 ZookeeperDynamicConfiguration 中<strong>读取配置、写入配置</strong>的相关操作。相关方法的实现如下：</p>
+<pre><code class="lang-JAVA">// ZookeeperDynamicConfiguration.java
+
+public Object getInternalProperty(String key) {
+    // 直接从Zookeeper中读取对应的Key
+    return zkClient.getContent(key);
+}
+public boolean publishConfig(String key, String group, String content) {
+    // getPathKey()方法中会添加rootPath和group两部分信息到Key中
+    String path = getPathKey(group, key);
+    // 在Zookeeper中创建对应ZNode节点用来存储配置信息
+    zkClient.create(path, content, false);
+    return true;
+}
+</code></pre>
+<h2 id="-">二、配置中心初始化</h2>
+<p>在上一节，我详细分析了 Configuration 接口以及 DynamicConfiguration 接口的实现，其中 DynamicConfiguration 接口实现是动态配置中心的基础。那 Dubbo 中的动态配置中心是如何启动的呢？我将在本节详细介绍。</p>
+<h3 id="2-1-">2.1 基础配置类</h3>
+<p>在 DubboBootstrap 初始化的过程中，会调用 ApplicationModel.initFrameworkExts() 方法初始化所有 FrameworkExt 接口实现，继承关系如下图所示：</p>
+<center><br/> <img src="./img/20211128230307052.png" style="zoom:60%"/><br/></center>
+<p>相关代码片段如下：</p>
+<pre><code class="lang-java">// FrameworkExt.java
+
+public static void initFrameworkExts() {
+    Set&lt;FrameworkExt&gt; exts = ExtensionLoader.getExtensionLoader(FrameworkExt.class).getSupportedExtensionInstances();
+    for (FrameworkExt ext : exts) {
+        ext.initialize();
+    }
+}
+</code></pre>
+<p>ConfigManager 用于管理当前 Dubbo 节点中全部 AbstractConfig 对象，其中就包括 ConfigCenterConfig 这个实现的对象，我们通过 XML、Annotation 或是 API 方式添加的配置中心的相关信息（例如，配置中心的地址、端口、协议等），会转换成 ConfigCenterConfig 对象。</p>
+<p><strong>Environment 中维护了多个 Configuration 对象</strong>，具体含义如下。</p>
+<ul>
+<li>propertiesConfiguration（PropertiesConfiguration 类型）：全部 OrderedPropertiesProvider 实现提供的配置以及环境变量或是 -D 参数中指定配置文件的相关配置信息；</li>
+<li>systemConfiguration（SystemConfiguration 类型）：-D 参数配置直接添加的配置信息；</li>
+<li>environmentConfiguration（EnvironmentConfiguration 类型）：环境变量中直接添加的配置信息；</li>
+<li>externalConfiguration、appExternalConfiguration（InmemoryConfiguration 类型）：使用 Spring 框架且将 include-spring-env 配置为 true 时，会自动从 Spring Environment 中读取配置。默认依次读取 key 为 dubbo.properties 和 application.dubbo.properties 到这里两个 InmemoryConfiguration 对象中；</li>
+<li>globalConfiguration（CompositeConfiguration 类型）：用于组合上述各个配置来源；</li>
+<li>dynamicConfiguration（CompositeDynamicConfiguration 类型）：用于组合当前全部的配置中心对应的 DynamicConfiguration。</li>
+<li>configCenterFirst（boolean 类型）：用于标识配置中心的配置是否为最高优先级。</li>
+</ul>
+<p>在 Environment 的构造方法中会初始化上述 Configuration 对象，在 initialize() 方法中会将从 Spring Environment 中读取到的配置填充到 externalConfiguration 以及 appExternalConfiguration 中。相关的实现片段如下：</p>
+<pre><code class="lang-java">// Environment.java
+
+public Environment() {
+    // 创建上述Configuration对象
+    this.propertiesConfiguration = new PropertiesConfiguration();
+    this.systemConfiguration = new SystemConfiguration();
+    this.environmentConfiguration = new EnvironmentConfiguration();
+    this.externalConfiguration = new InmemoryConfiguration();
+    this.appExternalConfiguration = new InmemoryConfiguration();
+}
+public void initialize() throws IllegalStateException {
+    // 读取对应配置，填充上述Configuration对象
+    ConfigManager configManager = ApplicationModel.getConfigManager();
+    Optional&lt;Collection&lt;ConfigCenterConfig&gt;&gt; defaultConfigs = configManager.getDefaultConfigCenter();
+    defaultConfigs.ifPresent(configs -&gt; {
+        for (ConfigCenterConfig config : configs) {
+            this.setExternalConfigMap(config.getExternalConfiguration());
+            this.setAppExternalConfigMap(config.getAppExternalConfiguration());
+        }
+    });
+this.externalConfiguration.setProperties(externalConfigurationMap);
+    this.appExternalConfiguration.setProperties(appExternalConfigurationMap);
+}
+</code></pre>
+<h3 id="2-2-">2.2 启动配置中心</h3>
+<p>完成了 Environment 的初始化之后，DubboBootstrap 接下来会调用 startConfigCenter() 方法启动一个或多个配置中心客户端，核心操作有两个：</p>
+<ol>
+<li>调用 ConfigCenterConfig.refresh() 方法刷新配置中心的相关配置；</li>
+<li>通过 prepareEnvironment() 方法，根据 ConfigCenterConfig 中的配置创建 DynamicConfiguration 对象。</li>
+</ol>
+<pre><code class="lang-JAVA">// DubboBootstrap.java
+
+private void startConfigCenter() {
+    Collection&lt;ConfigCenterConfig&gt; configCenters = configManager.getConfigCenters();
+    if (CollectionUtils.isEmpty(configCenters)) { // 未指定配置中心
+        ... ... // 省略该部分逻辑
+    } else {
+        for (ConfigCenterConfig configCenterConfig : configCenters) { // 可能配置了多个配置中心
+            configCenterConfig.refresh(); // 刷新配置
+            // 检查配置中心的配置是否合法           ConfigValidationUtils.validateConfigCenterConfig(configCenterConfig);
+        }
+    }
+    if (CollectionUtils.isNotEmpty(configCenters)) {
+        // 创建CompositeDynamicConfiguration对象，用于组装多个DynamicConfiguration对象
+        CompositeDynamicConfiguration compositeDynamicConfiguration = new CompositeDynamicConfiguration();
+        for (ConfigCenterConfig configCenter : configCenters) {
+            // 根据ConfigCenterConfig创建相应的DynamicConfig对象，并添加到CompositeDynamicConfiguration中
+compositeDynamicConfiguration.addConfiguration(prepareEnvironment(configCenter));
+        }
+        // 将CompositeDynamicConfiguration记录到Environment中的dynamicConfiguration字段
+        environment.setDynamicConfiguration(compositeDynamicConfiguration);
+    }
+    configManager.refreshAll(); // 刷新所有AbstractConfig配置
+}
+</code></pre>
+<h4 id="1-">1. 刷新配置中心的配置</h4>
+<p>首先来看 ConfigCenterConfig.refresh() 方法，该方法会组合 Environment 对象中全部已初始化的 Configuration，然后遍历 ConfigCenterConfig 中全部字段的 setter 方法，并从 Environment 中获取对应字段的最终值。具体实现如下：</p>
+<pre><code class="lang-java">// ConfigCenterConfig.java
+
+public void refresh() {
+    // 获取Environment对象
+    Environment env = ApplicationModel.getEnvironment();
+    // 将当前已初始化的所有Configuration合并返回
+    CompositeConfiguration compositeConfiguration = env.getPrefixedConfiguration(this);
+    Method[] methods = getClass().getMethods();
+    for (Method method : methods) {
+        if (MethodUtils.isSetter(method)) { // 获取ConfigCenterConfig中各个字段的setter方法
+            // 根据配置中心的相关配置以及Environment中的各个Configuration，获取该字段的最终值
+            String value = StringUtils.trim(compositeConfiguration.getString(extractPropertyName(getClass(), method)));
+            // 调用setter方法更新ConfigCenterConfig的相应字段
+            if (StringUtils.isNotEmpty(value) &amp;&amp; ClassUtils.isTypeMatch(method.getParameterTypes()[0], value)) {
+                method.invoke(this, ClassUtils.convertPrimitive(method.getParameterTypes()[0], value));
+            }
+        } else if (isParametersSetter(method)) { // 设置parameters字段，与设置其他字段的逻辑基本类似，但是实现有所不同
+            String value = StringUtils.trim(compositeConfiguration.getString(extractPropertyName(getClass(), method)));
+            if (StringUtils.isNotEmpty(value)) {
+                // 获取当前已有的parameters字段
+                Map&lt;String, String&gt; map = invokeGetParameters(getClass(), this);
+                map = map == null ? new HashMap&lt;&gt;() : map;
+                // 覆盖parameters集合 
+                map.putAll(convert(StringUtils.parseParameters(value), ""));
+                // 设置parameters字段
+                invokeSetParameters(getClass(), this, map);
+            }
+        }
+    }
+}
+</code></pre>
+<p>这里我们关注一下 Environment.getPrefixedConfiguration() 方法，该方法会将 Environment 中已有的 Configuration 对象以及当前的 ConfigCenterConfig 按照顺序合并，得到一个 CompositeConfiguration 对象，用于确定配置中心的最终配置信息。具体实现如下：</p>
+<pre><code class="lang-java">// Environment.java
+
+public synchronized CompositeConfiguration getPrefixedConfiguration(AbstractConfig config) {
+    // 创建CompositeConfiguration对象，这里的prefix和id是根据ConfigCenterConfig确定的
+    CompositeConfiguration prefixedConfiguration = new CompositeConfiguration(config.getPrefix(), config.getId());
+    // 将ConfigCenterConfig封装成ConfigConfigurationAdapter
+    Configuration configuration = new ConfigConfigurationAdapter(config);
+    if (this.isConfigCenterFirst()) { // 根据配置确定ConfigCenterConfig配置的位置
+        // The sequence would be: SystemConfiguration -&gt; AppExternalConfiguration -&gt; ExternalConfiguration -&gt; AbstractConfig -&gt; PropertiesConfiguration
+        // 按序组合已有Configuration对象以及ConfigCenterConfig
+        prefixedConfiguration.addConfiguration(systemConfiguration);
+        prefixedConfiguration.addConfiguration(environmentConfiguration);
+        prefixedConfiguration.addConfiguration(appExternalConfiguration);
+        prefixedConfiguration.addConfiguration(externalConfiguration);
+        prefixedConfiguration.addConfiguration(configuration);
+        prefixedConfiguration.addConfiguration(propertiesConfiguration);
+    } else {
+        // 配置优先级如下：SystemConfiguration -&gt; AbstractConfig -&gt; AppExternalConfiguration -&gt; ExternalConfiguration -&gt; PropertiesConfiguration
+        prefixedConfiguration.addConfiguration(systemConfiguration);
+        prefixedConfiguration.addConfiguration(environmentConfiguration);
+        prefixedConfiguration.addConfiguration(configuration);
+        prefixedConfiguration.addConfiguration(appExternalConfiguration);
+        prefixedConfiguration.addConfiguration(externalConfiguration);
+        prefixedConfiguration.addConfiguration(propertiesConfiguration);
+    }
+    return prefixedConfiguration;
+}
+</code></pre>
+<h4 id="2-dynamicconfiguration-">2. 创建 DynamicConfiguration 对象</h4>
+<p>通过 ConfigCenterConfig.refresh() 方法确定了所有配置中心的最终配置之后，接下来就会对每个配置中心执行 prepareEnvironment() 方法，得到对应的 DynamicConfiguration 对象。具体实现如下：</p>
+<pre><code class="lang-java">// DynamicConfiguration.java
+
+private DynamicConfiguration prepareEnvironment(ConfigCenterConfig configCenter) {
+    // 检查ConfigCenterConfig是否合法
+    if (configCenter.isValid()) { 
+        if (!configCenter.checkOrUpdateInited()) { 
+            return null; // 检查ConfigCenterConfig是否已初始化，这里不能重复初始化
+        }
+        // 根据ConfigCenterConfig中的各个字段，拼接出配置中心的URL，创建对应的DynamicConfiguration对象
+        DynamicConfiguration dynamicConfiguration = getDynamicConfiguration(configCenter.toUrl());
+        // 从配置中心获取externalConfiguration和appExternalConfiguration，并进行覆盖
+        String configContent = dynamicConfiguration.getProperties(configCenter.getConfigFile(), configCenter.getGroup());
+
+        String appGroup = getApplication().getName();
+        String appConfigContent = null;
+        if (isNotEmpty(appGroup)) {
+            appConfigContent = dynamicConfiguration.getProperties
+                    (isNotEmpty(configCenter.getAppConfigFile()) ? configCenter.getAppConfigFile() : configCenter.getConfigFile(),
+                            appGroup
+                    );
+        }
+        try {
+            // 更新Environment
+            environment.setConfigCenterFirst(configCenter.isHighestPriority());
+            environment.updateExternalConfigurationMap(parseProperties(configContent));
+            environment.updateAppExternalConfigurationMap(parseProperties(appConfigContent));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to parse configurations from Config Center.", e);
+        }
+        return dynamicConfiguration; // 返回通过该ConfigCenterConfig创建的DynamicConfiguration对象
+    }
+    return null;
+}
+</code></pre>
+<p>完成 DynamicConfiguration 的创建之后，DubboBootstrap 会将多个配置中心对应的 DynamicConfiguration 对象封装成一个 CompositeDynamicConfiguration 对象，并记录到 Environment.dynamicConfiguration 字段中，等待后续使用。另外，还会调用全部 AbstractConfig 的 refresh() 方法（即根据最新的配置更新各个 AbstractConfig 对象的字段）。这些逻辑都在 DubboBootstrap.startConfigCenter() 方法中，不再赘述。</p>
+<h3 id="2-3-">2.3 初始化后续流程</h3>
+<p>完成明确指定的配置中心初始化之后，DubboBootstrap 接下来会执行 useRegistryAsConfigCenterIfNecessary() 方法，检测当前 Dubbo 是否要将注册中心也作为一个配置中心使用（常见的注册中心，都可以直接作为配置中心使用，这样可以降低运维成本）。</p>
+<pre><code class="lang-java">// DubboBootstrap.java
+
+private void useRegistryAsConfigCenterIfNecessary() {
+    if (environment.getDynamicConfiguration().isPresent()) {
+        return; // 如果当前配置中心已经初始化完成，则不会将注册中心作为配置中心
+    }
+    if (CollectionUtils.isNotEmpty(configManager.getConfigCenters())) {
+        return; // 明确指定了配置中心的配置，哪怕配置中心初始化失败，也不会将注册中心作为配置中心
+    }
+    // 从ConfigManager中获取注册中心的配置（即RegistryConfig），并转换成配置中心的配置（即ConfigCenterConfig）
+    configManager.getDefaultRegistries().stream()
+            .filter(registryConfig -&gt; registryConfig.getUseAsConfigCenter() == null || registryConfig.getUseAsConfigCenter())
+            .forEach(registryConfig -&gt; {
+                String protocol = registryConfig.getProtocol();
+                String id = "config-center-" + protocol + "-" + registryConfig.getPort();
+                ConfigCenterConfig cc = new ConfigCenterConfig();
+                cc.setId(id);
+                if (cc.getParameters() == null) {
+                    cc.setParameters(new HashMap&lt;&gt;());
+                }
+                if (registryConfig.getParameters() != null) {
+                    cc.getParameters().putAll(registryConfig.getParameters());
+                }
+                cc.getParameters().put(CLIENT_KEY, registryConfig.getClient());
+                cc.setProtocol(registryConfig.getProtocol());
+                cc.setPort(registryConfig.getPort());
+                cc.setAddress(registryConfig.getAddress());
+                cc.setNamespace(registryConfig.getGroup());
+                cc.setUsername(registryConfig.getUsername());
+                cc.setPassword(registryConfig.getPassword());
+                if (registryConfig.getTimeout() != null) {
+                    cc.setTimeout(registryConfig.getTimeout().longValue());
+                }
+                cc.setHighestPriority(false); // 这里优先级较低
+                configManager.addConfigCenter(cc);
+            });
+    startConfigCenter(); // 重新调用startConfigCenter()方法，初始化配置中心
+}
+</code></pre>
+<p>完成配置中心的初始化之后，后续需要 DynamicConfiguration 的地方直接从 Environment 中获取即可，例如，DynamicConfigurationServiceNameMapping 就是依赖 DynamicConfiguration 实现 Service ID 与 Service Name 映射的管理。</p>
+<p>接下来，DubboBootstrap 执行 loadRemoteConfigs() 方法，根据前文更新后的 externalConfigurationMap 和 appExternalConfigurationMap 配置信息，确定是否配置了额外的注册中心或 Protocol，如果有，则在此处转换成 RegistryConfig 和 ProtocolConfig，并记录到 ConfigManager 中，等待后续逻辑使用。</p>
+<p>随后，DubboBootstrap 执行 checkGlobalConfigs() 方法完成 ProviderConfig、ConsumerConfig、MetadataReportConfig 等一系列 AbstractConfig 的检查和初始化，具体实现比较简单，这里不再赘述。</p>
+<p>再紧接着，DubboBootstrap 会通过 initMetadataService() 方法初始化 MetadataReport、MetadataReportInstance 以及 MetadataService、MetadataServiceExporter。</p>
+<p>在 DubboBootstrap 初始化的最后，会调用 initEventListener() 方法将 DubboBootstrap 作为 EventListener 监听器添加到 EventDispatcher 中。DubboBootstrap 继承了 GenericEventListener 抽象类，如下图所示：</p>
+<center><br/> <img src="./img/20211128230319973.png" style="zoom:70%"/><br/></center>
+<p><strong>GenericEventListener 是一个泛型监听器，它可以让子类监听任意关心的 Event 事件，只需定义相关的 onEvent() 方法即可</strong>。在 GenericEventListener 中维护了一个 handleEventMethods 集合，其中 Key 是 Event 的子类，即监听器关心的事件，Value 是处理该类型 Event 的相应 onEvent() 方法。</p>
+<p>在 GenericEventListener 的构造方法中，通过反射将当前 GenericEventListener 实现的全部 onEvent() 方法都查找出来，并记录到 handleEventMethods 字段中。具体查找逻辑在 findHandleEventMethods() 方法中实现：</p>
+<pre><code class="lang-java">// GenericEventListener.java
+
+private Map&lt;Class&lt;?&gt;, Set&lt;Method&gt;&gt; findHandleEventMethods() {
+    Map&lt;Class&lt;?&gt;, Set&lt;Method&gt;&gt; eventMethods = new HashMap&lt;&gt;();
+    of(getClass().getMethods()) // 遍历当前GenericEventListener子类的全部方法
+            // 过滤得到onEvent()方法，具体过滤条件在isHandleEventMethod()方法之中：
+            // 1.方法必须是public的
+            // 2.方法参数列表只有一个参数，且该参数为Event子类
+            // 3.方法返回值为void，且没有声明抛出异常
+            .filter(this::isHandleEventMethod) 
+            .forEach(method -&gt; {
+                Class&lt;?&gt; paramType = method.getParameterTypes()[0];
+                Set&lt;Method&gt; methods = eventMethods.computeIfAbsent(paramType, key -&gt; new LinkedHashSet&lt;&gt;());
+                methods.add(method);
+            });
+    return eventMethods;
+}
+</code></pre>
+<p>在 GenericEventListener 的 onEvent() 方法中，会根据收到的 Event 事件的具体类型，从 handleEventMethods 集合中找到相应的 onEvent() 方法进行调用，如下所示：</p>
+<pre><code class="lang-java">// GenericEventListener.java
+
+public final void onEvent(Event event) {
+    // 获取Event的实际类型
+    Class&lt;?&gt; eventClass = event.getClass(); 
+    // 根据Event的类型获取对应的onEvent()方法并调用
+    handleEventMethods.getOrDefault(eventClass,  emptySet()).forEach(method -&gt; {
+        ThrowableConsumer.execute(method, m -&gt; {
+            m.invoke(this, event);
+        });
+    });
+}
+</code></pre>
+<p>我们可以查看 DubboBootstrap 的所有方法，目前并没有发现符合 isHandleEventMethod() 条件的方法。但在 GenericEventListener 的另一个实现—— LoggingEventListener 中，可以看到多个符合 isHandleEventMethod() 条件的方法（如下图所示），在这些 onEvent() 方法重载中会输出 INFO 日志。</p>
+<center><br/> <img src="./img/20211128230336658.png" style="zoom:50%"/><br/></center>
+<p>至此，DubboBootstrap 整个初始化过程，以及该过程中与配置中心相关的逻辑就介绍完了。</p>
+<h2 id="-">三、总结</h2>
+<p>本章我重点介绍了 Dubbo 配置中心中的多种配置接口：</p>
+<ul>
+<li>首先，我讲解了 Configuration 这个顶层接口的核心方法；</li>
+<li>接着，我介绍了 Configuration 接口的相关实现，这些实现可以从环境变量、-D 启动参数、Properties文件以及其他配置文件或注解处读取配置信息；</li>
+<li>然后，我还着重介绍了 DynamicConfiguration 这个动态配置接口的定义，并分析了以 Zookeeper 为动态配置中心的 ZookeeperDynamicConfiguration 实现；</li>
+<li>最后，我介绍了 Dubbo 动态配置中心启动的核心流程，以及该流程涉及的重要组件类。</li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

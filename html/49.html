@@ -1,0 +1,260 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（三三）—— J.U.C之collections框架：LinkedBlockingQueue</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（三三）—— J.U.C之collections框架：LinkedBlockingQueue</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-linkedblockingqueue-">一、LinkedBlockingQueue简介</h2>
+<p><code>LinkedBlockingQueue</code>是在JDK1.5时，随着J.U.C包引入的一种阻塞队列，它实现了BlockingQueue接口，底层基于<strong>单链表</strong>实现：</p>
+<p><img alt="img" src="./img/20191030234825075.png"/></p>
+<p>LinkedBlockingQueue是一种<strong>近似有界阻塞队列</strong>，为什么说近似？因为LinkedBlockingQueue既可以在初始构造时就指定队列的容量，也可以不指定，如果不指定，那么它的容量大小默认为<code>Integer.MAX_VALUE</code>。</p>
+<p>LinkedBlockingQueue除了底层数据结构（单链表）与ArrayBlockingQueue不同外，另外一个特点就是：<br/>它维护了两把锁——<code>takeLock</code>和<code>putLock</code>。</p>
+<p>takeLock用于控制出队的并发，putLock用于入队的并发。这也就意味着，同一时刻，只能只有一个线程能执行入队/出队操作，其余入队/出队线程会被阻塞；但是，入队和出队之间可以并发执行，即同一时刻，可以同时有一个线程进行入队，另一个线程进行出队，这样就可以提升吞吐量。</p>
+<blockquote>
+<p>在ArrayBlockingQueue章节中，我们说过，ArrayBlockingQueue维护了一把全局锁，无论是出队还是入队，都共用这把锁，这就导致任一时间点只有一个线程能够执行。那么对于“生产者-消费者”模式来说，意味着生产者和消费者不能并发执行。</p>
+</blockquote>
+<h2 id="-linkedblockingqueue-">二、LinkedBlockingQueue原理</h2>
+<h3 id="2-1-">2.1 构造</h3>
+<p><strong>LinkedBlockingQueue</strong>提供了三种构造器：</p>
+<pre><code class="lang-JAVA">/**
+ * 默认构造器.
+ * 队列容量为Integer.MAX_VALUE.
+ */
+public LinkedBlockingQueue() {
+    this(Integer.MAX_VALUE);
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+ * 显示指定队列容量的构造器
+ */
+public LinkedBlockingQueue(int capacity) {
+    if (capacity &lt;= 0) throw new IllegalArgumentException();
+    this.capacity = capacity;
+    last = head = new Node&lt;E&gt;(null);
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+ * 从已有集合构造队列.
+ * 队列容量为Integer.MAX_VALUE
+ */
+public LinkedBlockingQueue(Collection&lt;? extends E&gt; c) {
+    this(Integer.MAX_VALUE);
+    final ReentrantLock putLock = this.putLock;
+    putLock.lock();                     // 这里加锁仅仅是为了保证可见性
+    try {
+        int n = 0;
+        for (E e : c) {
+            if (e == null)              // 队列不能包含null元素
+                throw new NullPointerException();
+            if (n == capacity)          // 队列已满
+                throw new IllegalStateException("Queue full");
+            enqueue(new Node&lt;E&gt;(e));    // 队尾插入元素
+            ++n;
+        }
+        count.set(n);                   // 设置元素个数
+    } finally {
+        putLock.unlock();
+    }
+}
+</code></pre>
+<p>可以看到，如果不指定容量，那么它的容量大小默认为<code>Integer.MAX_VALUE</code>。另外，<strong>LinkedBlockingQueue</strong>使用了一个原子变量<code>AtomicInteger</code>记录队列中元素的个数，以保证入队/出队并发修改元素时的数据一致性。</p>
+<pre><code class="lang-JAVA">public class LinkedBlockingQueue&lt;E&gt; extends AbstractQueue&lt;E&gt;
+    implements BlockingQueue&lt;E&gt;, java.io.Serializable {
+
+    /**
+     * 队列容量.
+     * 如果不指定, 则为Integer.MAX_VALUE
+     */
+    private final int capacity;
+
+    /**
+     * 队列中的元素个数
+     */
+    private final AtomicInteger count = new AtomicInteger();
+
+    /**
+     * 队首指针.
+     * head.item == null
+     */
+    transient Node&lt;E&gt; head;
+
+    /**
+     * 队尾指针.
+     * last.next == null
+     */
+    private transient Node&lt;E&gt; last;
+
+    /**
+     * 出队锁
+     */
+    private final ReentrantLock takeLock = new ReentrantLock();
+
+    /**
+     * 队列空时，出队线程在该条件队列等待
+     */
+    private final Condition notEmpty = takeLock.newCondition();
+
+    /**
+     * 入队锁
+     */
+    private final ReentrantLock putLock = new ReentrantLock();
+
+    /**
+     * 队列满时，入队线程在该条件队列等待
+     */
+    private final Condition notFull = putLock.newCondition();
+
+    /**
+     * 链表结点定义
+     */
+    static class Node&lt;E&gt; {
+        E item;
+
+        Node&lt;E&gt; next;   // 后驱指针
+
+        Node(E x) {
+            item = x;
+        }
+    }
+
+    //...
+}
+</code></pre>
+<p>构造完成后，LinkedBlockingQueue的初始结构如下：</p>
+<p><img alt="img" src="./img/20191030234833835.png"/></p>
+<p>插入部分元素后的LinkedBlockingQueue结构：</p>
+<p><img alt="img" src="./img/20191030234839927.png"/></p>
+<h3 id="2-2-">2.2 核心方法</h3>
+<p>由于接口和ArrayBlockingQueue完全一样，所以LinkedBlockingQueue会阻塞线程的方法也一共有4个：<code>put(E e)</code>、<code>offer(e, time, unit)</code>和<code>take()</code>、<code>poll(time, unit)</code>，我们先来看插入元素的方法。</p>
+<p><strong>插入元素——put(E e)</strong></p>
+<pre><code class="lang-JAVA">/**
+ * 在队尾插入指定的元素.
+ * 如果队列已满，则阻塞线程.
+ */
+public void put(E e) throws InterruptedException {
+    if (e == null) throw new NullPointerException();
+    int c = -1;
+    Node&lt;E&gt; node = new Node&lt;E&gt;(e);
+    final ReentrantLock putLock = this.putLock;
+    final AtomicInteger count = this.count;
+    putLock.lockInterruptibly();            // 获取“入队锁”
+    try {
+        while (count.get() == capacity) {   // 队列已满, 则线程在notFull上等待
+            notFull.await();
+        }
+        enqueue(node);                      // 将新结点链接到“队尾”
+
+        /**
+         * c+1 表示的元素个数.
+         * 如果，则唤醒一个“入队线程”
+         */
+        c = count.getAndIncrement();        // c表示入队前的队列元素个数
+        if (c + 1 &lt; capacity)               // 入队后队列未满, 则唤醒一个“入队线程”
+            notFull.signal();
+    } finally {
+        putLock.unlock();
+    }
+
+    if (c == 0)                             // 队列初始为空, 则唤醒一个“出队线程”
+        signalNotEmpty();
+}
+</code></pre>
+<p>插入元素时，首先需要获得<strong>“入队锁”</strong>，如果队列满了，则当前线程需要在<strong>notFull</strong>条件队列等待；否则，将新元素链接到队列尾部。</p>
+<p>这里需要注意的是两个地方：</p>
+<p><strong>①每入队一个元素后，如果队列还没满，则需要唤醒其它可能正在等待的“入队线程”：</strong></p>
+<pre><code class="lang-JAVA">/**
+ * c+1 表示的元素个数.
+ * 如果，则唤醒一个“入队线程”
+ */
+c = count.getAndIncrement();        // c表示入队前的队列元素个数
+if (c + 1 &lt; capacity)               // 入队后队列未满, 则唤醒一个“入队线程”
+    notFull.signal();
+</code></pre>
+<p><strong>② 每入队一个元素，都要判断下队列是否空了，如果空了，说明可能存在正在等待的“出队线程”，需要唤醒它：</strong></p>
+<pre><code class="lang-JAVA">if (c == 0)                             // 队列为空, 则唤醒一个“出队线程”
+    signalNotEmpty();
+</code></pre>
+<blockquote>
+<p><em>这里为什么不像ArrayBlockingQueue那样，入队完成后，直接唤醒一个在notEmpty上等待的出队线程？</em></p>
+</blockquote>
+<p>因为ArrayBlockingQueue中，入队/出队用的是同一把锁，两者不会并发执行，所以每入队一个元素（拿到锁），就可以通知可能正在等待的“出队线程”。（同一个锁的两个条件队列：<strong>notEmpty</strong>、<strong>notFull</strong>）</p>
+<p>ArrayBlockingQueue中的<strong>enqueue</strong>方法：</p>
+<pre><code class="lang-JAVA">private void enqueue(E x) {
+    final Object[] items = this.items;
+    items[putIndex] = x;
+    if (++putIndex == items.length)     // 队列已满,则重置索引为0
+        putIndex = 0;
+    count++;                            // 元素个数+1
+    notEmpty.signal();                  // 唤醒一个notEmpty上的等待线程(可以来队列取元素了)
+}
+</code></pre>
+<p>而LinkedBlockingQueue中，入队/出队用的是两把锁，入队/出队是会并发执行的。入队锁对应的是<strong>notFull</strong>条件队列，出队锁对应的是<strong>notEmpty</strong>条件队列，所以每入队一个元素，应当立即去唤醒可能阻塞的其它入队线程。当队列为空时，说明后面再来“出队线程”，一定都会阻塞，所以此时可以去唤醒一个出队线程，以提升性能。</p>
+<blockquote>
+<p>试想以下，如果去掉上面的①和②，当入队线程拿到“入队锁”，入队元素后，直接尝试唤醒出队线程，会要求去拿出队锁，这样持有锁A的同时，再去尝试获取锁B，很可能引起死锁，就算通过打破死锁的条件避免死锁，每次操作同时获取两把锁也会降低性能。</p>
+</blockquote>
+<hr/>
+<p><strong>删除元素——table()</strong></p>
+<p>删除元素的逻辑和插入元素类似。删除元素时，首先需要获得<strong>“出队锁”</strong>，如果队列为空，则当前线程需要在<strong>notEmpty</strong>条件队列等待；否则，从队首出队一个元素：</p>
+<pre><code class="lang-JAVA">/**
+ * 从队首出队一个元素
+ */
+public E take() throws InterruptedException {
+    E x;
+    int c = -1;
+    final AtomicInteger count = this.count;
+    final ReentrantLock takeLock = this.takeLock;   // 获取“出队锁”
+    takeLock.lockInterruptibly();
+    try {
+        while (count.get() == 0) {                  // 队列为空, 则阻塞线程
+            notEmpty.await();
+        }
+        x = dequeue();
+        c = count.getAndDecrement();                // c表示出队前的元素个数
+        if (c &gt; 1)                                  // 出队前队列非空, 则唤醒一个出队线程
+            notEmpty.signal();
+    } finally {
+        takeLock.unlock();
+    }
+    if (c == capacity)                              // 队列初始为满，则唤醒一个入队线程
+        signalNotFull();
+    return x;
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+ * 队首出队一个元素.
+ */
+private E dequeue() {
+    Node&lt;E&gt; h = head;
+    Node&lt;E&gt; first = h.next;
+    h.next = h;         // help GC
+    head = first;
+    E x = first.item;
+    first.item = null;
+    return x;
+}
+</code></pre>
+<p>上面需要的注意点和插入元素一样：<br/><strong>①每出队一个元素前，如果队列非空，则需要唤醒其它可能正在等待的“出队线程”：</strong></p>
+<pre><code class="lang-java">c = count.getAndDecrement();                // c表示出队前的元素个数
+if (c &gt; 1)                                  // 出队前队列非空, 则唤醒一个出队线程
+    notEmpty.signal();
+</code></pre>
+<p><strong>② 每入队一个元素，都要判断下队列是否满，如果是满的，说明可能存在正在等待的“入队线程”，需要唤醒它：</strong></p>
+<pre><code class="lang-java">if (c == capacity)                              // 队列初始为满，则唤醒一个入队线程
+    signalNotFull();
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>归纳一下，<strong>LinkedBlockingQueue</strong>和<strong>ArrayBlockingQueue</strong>比较主要有以下区别：</p>
+<ol>
+<li>队列大小不同。ArrayBlockingQueue初始构造时必须指定大小，而LinkedBlockingQueue构造时既可以指定大小，也可以不指定（默认为<code>Integer.MAX_VALUE</code>，近似于无界）；</li>
+<li>底层数据结构不同。ArrayBlockingQueue底层采用<strong>数组</strong>作为数据存储容器，而LinkedBlockingQueue底层采用<strong>单链表</strong>作为数据存储容器；</li>
+<li>两者的加锁机制不同。ArrayBlockingQueue使用一把<strong>全局锁</strong>，即入队和出队使用同一个ReentrantLock锁；而LinkedBlockingQueue进行了<strong>锁分离</strong>，入队使用一个ReentrantLock锁（putLock），出队使用另一个ReentrantLock锁（takeLock）；</li>
+<li>LinkedBlockingQueue不能指定公平/非公平策略（默认都是非公平），而ArrayBlockingQueue可以指定策略。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

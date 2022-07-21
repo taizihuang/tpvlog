@@ -1,0 +1,492 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（二六）——Feign基本使用</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（二六）——Feign基本使用</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将讲解Spring Cloud中的另一个组件——<strong><em>Feign</em></strong>。Feign是什么？能解决什么样的问题？</p>
+<p>回顾一下我们之前使用<code>RestTemplate + Ribbon + Eureka</code>的方式来进行服务间的调用，每次调用服务接口，都必须像下面这样写代码：</p>
+<pre><code class="lang-JAVA">@RestController
+public class ServiceBController {
+    @Bean
+    @LoadBalanced
+    public RestTemplate getRestTemplate() {
+        return new RestTemplate();
+    }
+
+    @GetMapping(value = "/greeting/{name}")
+    public String greeting(@PathVariable("name") String name) {
+        RestTemplate restTemplate = getRestTemplate();
+        // ServiceA是服务提供方向Eureka注册的应用名
+        return restTemplate.getForObject("http://ServiceA/sayHello/" + name, String.class);
+    }
+}
+</code></pre>
+<p>显然，这是一种低效的方式，针对服务提供方ServiceA的每一个对外接口，我们都要硬编码。理想的微服务架构中，ServiceA应该提供一个接口存根jar包，然后服务调用方直接引用一个jar包，并使用一些注解即可完成调用。</p>
+<p>Feign要解决的就是这个问题，它就是一个<strong><em>声明式服务调用框架</em></strong>。</p>
+<h2 id="-">一、基本使用</h2>
+<p>我们来看下Feign的基本使用。我将创建以下应用：</p>
+<ul>
+<li>eureka-server：服务注册中心</li>
+<li>serviceA：服务提供者</li>
+<li>service-a-api：服务提供者API存根</li>
+<li>serviceB：服务调用者</li>
+</ul>
+<blockquote>
+<p>更多Spring Cloud Feign的使用介绍，请参考Spring官方文档：<a href="https://docs.spring.io/spring-cloud-openfeign/docs/2.2.5.RELEASE/reference/html/。">https://docs.spring.io/spring-cloud-openfeign/docs/2.2.5.RELEASE/reference/html/。</a></p>
+</blockquote>
+<h3 id="1-1-eureka-server">1.1 eureka-server</h3>
+<p>eureka-server就是一个普通的Eureka注册中心。</p>
+<h4 id="-">启动类</h4>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaServer
+public class EurekaServer {
+    public static void main(String[] args) {
+        SpringApplication.run(EurekaServer.class, args);
+    }
+}
+</code></pre>
+<h4 id="-">配置文件</h4>
+<pre><code class="lang-YML">server:
+  port: 8761
+eureka:
+  client:
+    registerWithEureka: false
+    fetchRegistry: false
+</code></pre>
+<h4 id="pom-">pom依赖</h4>
+<pre><code class="lang-XML">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+      &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+      &lt;artifactId&gt;eureka-server&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;eureka-server&lt;/name&gt;
+     &lt;url&gt;http://maven.apache.org&lt;/url&gt;
+
+    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.3.1.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+
+    &lt;properties&gt;
+        &lt;spring.cloud-version&gt;Hoxton.SR8&lt;/spring.cloud-version&gt;
+    &lt;/properties&gt;
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;${spring.cloud-version}&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+
+      &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-config&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-server&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/project&gt;
+</code></pre>
+<h3 id="1-2-service-a-api">1.2 service-a-api</h3>
+<p>service-a-api定义了ServiceA对外的接口。</p>
+<h4 id="pom-">pom依赖</h4>
+<pre><code class="lang-XML">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+      &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+      &lt;artifactId&gt;service-a-api&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;service-a-api&lt;/name&gt;
+      &lt;url&gt;http://maven.apache.org&lt;/url&gt;
+
+      &lt;properties&gt;
+        &lt;project.build.sourceEncoding&gt;UTF-8&lt;/project.build.sourceEncoding&gt;
+      &lt;/properties&gt;
+
+      &lt;distributionManagement&gt;
+        &lt;repository&gt;
+            &lt;id&gt;nexus-releases&lt;/id&gt;
+            &lt;name&gt;Nexus Release Repository&lt;/name&gt;
+            &lt;url&gt;http://localhost:8081/repository/maven-releases/&lt;/url&gt;
+        &lt;/repository&gt;
+        &lt;snapshotRepository&gt;
+            &lt;id&gt;nexus-snapshots&lt;/id&gt;
+            &lt;name&gt;Nexus Snapshot Repository&lt;/name&gt;
+            &lt;url&gt;http://localhost:8081/repository/maven-snapshots/&lt;/url&gt;
+        &lt;/snapshotRepository&gt;
+    &lt;/distributionManagement&gt;
+
+      &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+            &lt;version&gt;2.3.1.RELEASE&lt;/version&gt;
+        &lt;/dependency&gt;
+      &lt;/dependencies&gt;
+&lt;/project&gt;
+</code></pre>
+<h4 id="-">服务接口</h4>
+<pre><code class="lang-JAVA">@RequestMapping("/user")  
+public interface ServiceAInterface {
+
+    @RequestMapping(value = "/sayHello/{id}", method = RequestMethod.GET)
+    String sayHello(@PathVariable("id") Long id, 
+            @RequestParam("name") String name, 
+            @RequestParam("age") Integer age);
+
+    @RequestMapping(value = "/", method = RequestMethod.POST)
+    String createUser(@RequestBody User user);
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.PUT)
+    String updateUser(@PathVariable("id") Long id, @RequestBody User user);
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.DELETE)
+    String deleteUser(@PathVariable("id") Long id);
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.GET)
+    User getById(@PathVariable("id") Long id);
+
+}
+</code></pre>
+<pre><code class="lang-JAVA">public class User {
+    private Long id;
+    private String name;
+    private Integer age;
+
+    //...
+}
+</code></pre>
+<h3 id="1-3-servicea">1.3 serviceA</h3>
+<p>ServiceA就是一个普通的Spring Boot应用。</p>
+<h4 id="-">启动类</h4>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+public class ServiceAApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ServiceAApplication.class, args);
+    }
+}
+</code></pre>
+<h4 id="-">配置文件</h4>
+<pre><code class="lang-YML">server:
+  port: 8088
+spring:
+  application:
+    name: ServiceA
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+</code></pre>
+<h4 id="pom-">pom依赖</h4>
+<pre><code class="lang-XML">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+      &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+      &lt;artifactId&gt;serviceA&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;serviceA&lt;/name&gt;
+      &lt;url&gt;http://maven.apache.org&lt;/url&gt;
+
+    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.3.1.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+
+    &lt;properties&gt;
+        &lt;spring.cloud-version&gt;Hoxton.SR8&lt;/spring.cloud-version&gt;
+    &lt;/properties&gt;
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;${spring.cloud-version}&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+
+    &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-config&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-client&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+            &lt;artifactId&gt;service-a-api&lt;/artifactId&gt;
+            &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/project&gt;
+</code></pre>
+<h4 id="-">服务接口实现</h4>
+<pre><code class="lang-JAVA">@RestController
+public class ServiceAController implements ServiceAInterface {
+
+    public String sayHello(@PathVariable("id") Long id, @RequestParam("name") String name, 
+            @RequestParam("age") Integer age) {     
+        System.out.println("打招呼，id=" + id + ", name=" + name + ", age=" + age);   
+        return "{'msg': 'hello, " + name + "'}";  
+    }
+
+    public String createUser(@RequestBody User user) {
+        System.out.println("创建用户，" + user);  
+        return "{'msg': 'success'}";
+    }
+
+    public String updateUser(@PathVariable("id") Long id, @RequestBody User user) {
+        System.out.println("更新用户，" + user);  
+        return "{'msg': 'success'}";
+    }
+
+    public String deleteUser(@PathVariable("id") Long id) {
+        System.out.println("删除用户，id=" + id);
+        return "{'msg': 'success'}"; 
+    }
+
+    public User getById(@PathVariable("id") Long id) {
+        System.out.println("查询用户，id=" + id);
+        return new User(1L, "张三", 20);
+    }
+}
+</code></pre>
+<h3 id="1-4-serviceb">1.4 serviceB</h3>
+<p>serviceB就是服务调用方，依赖了Feign实现声明式服务调用。</p>
+<h4 id="-">启动类</h4>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+@EnableFeignClients
+public class ServiceBApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ServiceBApplication.class, args);
+    }
+}
+</code></pre>
+<h4 id="-">配置文件</h4>
+<pre><code class="lang-YML">server:
+  port: 9090
+spring:
+  application:
+    name: ServiceB
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+</code></pre>
+<h4 id="pom-">pom依赖</h4>
+<pre><code class="lang-xml">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+      &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+      &lt;artifactId&gt;serviceB&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;serviceB&lt;/name&gt;
+      &lt;url&gt;http://maven.apache.org&lt;/url&gt;
+
+      &lt;properties&gt;
+        &lt;project.build.sourceEncoding&gt;UTF-8&lt;/project.build.sourceEncoding&gt;
+      &lt;/properties&gt;
+
+    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.2.6.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;Hoxton.SR8&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+
+    &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-config&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-ribbon&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-client&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-openfeign&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+            &lt;artifactId&gt;service-a-api&lt;/artifactId&gt;
+            &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-netflix-eureka-client&lt;/artifactId&gt;
+            &lt;version&gt;2.2.5.RELEASE&lt;/version&gt;
+            &lt;scope&gt;compile&lt;/scope&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/project&gt;
+</code></pre>
+<h4 id="-">服务调用</h4>
+<p>首先，定义一个Feign客户端，继承ServiceA接口存根：</p>
+<pre><code class="lang-JAVA">@FeignClient("ServiceA")    // ServiceA就是服务A的名称
+public interface ServiceAClient extends ServiceAInterface {
+}
+</code></pre>
+<pre><code class="lang-JAVA">@RestController
+@RequestMapping("/ServiceB/user")  
+public class ServiceBController {    
+    // 注入Feign客户端
+    @Autowired
+    private ServiceAClient serviceA;
+
+    @RequestMapping(value = "/sayHello/{id}", method = RequestMethod.GET)
+    public String greeting(@PathVariable("id") Long id, 
+            @RequestParam("name") String name, 
+            @RequestParam("age") Integer age) {
+        return serviceA.sayHello(id, name, age);
+    }
+
+    @RequestMapping(value = "/", method = RequestMethod.POST)
+    public String createUser(@RequestBody User user) {
+        return serviceA.createUser(user);
+    }
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.PUT)
+    public String updateUser(@PathVariable("id") Long id, @RequestBody User user) {
+        return serviceA.updateUser(id, user); 
+    }
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.DELETE)
+    public String deleteUser(@PathVariable("id") Long id) {
+        return serviceA.deleteUser(id);
+    }
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.GET)
+    public User getById(@PathVariable("id") Long id) {
+        return serviceA.getById(id);
+    }
+}
+</code></pre>
+<p>上面的<code>@FeignClient</code>注解的value表示要消费的服务名称，是在服务提供方的yml文件中配置的。Feign会自动生成访问后台服务的代理接口服务，后续我讲Feign原理时会专门讲解。</p>
+<h2 id="-">二、核心组件</h2>
+<p>Feign就跟Ribbon一样，内部都包含了很多的核心组件：</p>
+<ul>
+<li><p><strong>编码器（Encoder）</strong>：如果调用接口时，传递的参数是个对象，Feign会将这个对象进行编码，转换成JSON格式；</p>
+</li>
+<li><p><strong>解码器（Decoder）</strong>：接受到响应后，将JSON转换为一个对象；</p>
+</li>
+<li><p><strong>Logger</strong>：负责日志打印，即打印这个接口调用的详细请求，包含请求、响应等等；</p>
+</li>
+<li><p><strong>Contract</strong>：契约组件，Feign使用时一般会用到SpringMVC相关的注解，这个组件就负责Feign的原生注解与SpringMVC注解之间的转化；</p>
+</li>
+<li><p><strong>Feign.Builder</strong>：FeignClient的一个实例构造器，这是Builder设计模式的典型实现；</p>
+</li>
+<li><p><strong>FeignClient</strong>：Feign客户端，里面包含了上述的一系列组件，可类比Ribbon客户端理解。</p>
+</li>
+</ul>
+<p>Spring Cloud对上述的这些Feign的组件都有默认的实现：</p>
+<ul>
+<li>Encoder：SpringEncoder；</li>
+<li>Decoder：ResponseEntityDecoder；</li>
+<li>Logger：Slf4jLogger；</li>
+<li>Contract：SpringMvcContract；</li>
+<li>Feign.Builder：HystrixFeign.Builder；</li>
+<li>FeignClient：LoadBalancerFeignClient；</li>
+</ul>
+<h3 id="2-1-">2.1 自定义组件</h3>
+<p> 除了这些默认组件外，我们也可以自定义实现：</p>
+<pre><code class="lang-JAVA">@FeignClient(name = "ServiceA", configuration = FooConfiguration.class)
+public interface ServiceAClient {
+    //..
+}
+</code></pre>
+<pre><code class="lang-JAVA">public class FooConfiguration {
+    // 配置拦截器
+    @Bean
+    public RequestInterceptor requestInterceptor() {
+        return new MyRequestInterceptor();
+    }
+
+    // 配置日志级别：none，basic，headers，full
+    @Bean
+    Logger.Level feignLoggerLevel() {
+        return Logger.Level.FULL;
+    }
+}
+</code></pre>
+<blockquote>
+<p>Spring会为每一个Feign客户端创建一个独立上下文ApplicationContext，默认这些客户端的组件都依赖<code>FeignClientsConfiguration</code>配置，我们可以通过自定义配置的方式替换掉部分默认配置给我们生成的Feign组件。</p>
+</blockquote>
+<h3 id="2-2-">2.2 客户端配置</h3>
+<p>Feign使用时必然会涉及到很多参数的配置，这些参数大部分都有默认值，我们也可以通过下面的方式进行指定：</p>
+<pre><code class="lang-YML">feign:
+  client:
+    config:
+      ServiceA:    # 针对指定Feign客户端进行配置
+        connectTimeout: 5000
+        readTimeout: 5000
+        loggerLevel: full
+        decode404: false
+
+feign:
+  client:
+    config:
+      default:    # 全局默认配置
+        connectTimeout: 5000
+        readTimeout: 5000
+        loggerLevel: full
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>最后，我用一张图简单说下Feign的核心工作流程，以便大家有一个初步印象。这张图并不完全准确，但可以帮助大家理解Feign，也能说明Feign的核心思想其实就是<strong><em>动态代理</em></strong>，为我们后面研究它的源码打下基础：</p>
+<p><img alt="" src="./img/20210306190603642.png"/></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

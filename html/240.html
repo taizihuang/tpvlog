@@ -1,0 +1,229 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（二）——Eureka基本使用</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（二）——Eureka基本使用</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将基于Spring Cloud——<strong>Edgware.SR3</strong> 搭建一个Eureka Demo应用，演示下Eureka的基本使用。我这里没有使用Spring Cloud的最新版本，而是使用了Edgware.SR3，其对应的Netflix Eureka版本是<code>1.7.2</code>。但这不会影响后面我对Eureka核心原理的讲解，事实上，源码的阅读应该从最初的Skeleton版本开始。</p>
+<p>另外说明一下，Spring Cloud Eureka Server和Client仅仅是对Netflix Eureka进行了封装，加了一些注解，对Spring Boot进行支持。所以阅读Eureka源码，应该先从<strong>Netflix Eureka</strong>开始，看完后再把Spring Cloud Eureka Server和Client两个项目的源码给看一下就可以了。 </p>
+<blockquote>
+<p>Netflix Eureka源码： <a href="https://github.com/Netflix/eureka">https://github.com/Netflix/eureka</a>；<br/>Spring Cloud源码：<a href="https://github.com/spring-cloud/spring-cloud-netflix">https://github.com/spring-cloud/spring-cloud-netflix</a>。</p>
+</blockquote>
+<h2 id="-eureka-server-">一、Eureka Server集群</h2>
+<p>本节，我将构建一个由2节点组成的Eureka Server集群，然后注册两个应用服务：ServiceA和ServiceB。</p>
+<p>首先，我们构建Eureka Server集群，需要新建一个Spring Boot应用，引入相关的Maven POM依赖：</p>
+<pre><code class="lang-XML">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+      &lt;groupId&gt;com.tpvlog&lt;/groupId&gt;
+      &lt;artifactId&gt;eureka-server&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;eureka-server&lt;/name&gt;
+
+    &lt;!--Spring Boot依赖--&gt;
+    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;1.5.13.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+
+      &lt;properties&gt;
+        &lt;project.build.sourceEncoding&gt;UTF-8&lt;/project.build.sourceEncoding&gt;
+      &lt;/properties&gt;
+
+    &lt;!--Spring Cloud依赖--&gt;
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;Edgware.SR3&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+
+    &lt;!--Eureka依赖--&gt;
+      &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-config&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;!--Eureka Client依赖--&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-eureka&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;!--Eureka Server依赖--&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-eureka-server&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/project&gt;
+</code></pre>
+<p>注意上面，我同时引入了<code>spring-cloud-starter-eureka</code>这个依赖，因为在集群部署下，每个Eureka Server都是其它Server的客户端，用来进行集群间的数据复制。</p>
+<p>接着，是Spring Boot的启动类，注意这里使用了<code>@EnableEurekaServer</code>注解，标识这是一个EurekaServer：</p>
+<pre><code class="lang-JAVA">/**
+ * eureka注册中心
+ *
+ * @author ressmix
+ */
+@SpringBootApplication
+@EnableEurekaServer
+public class EurekaServer {
+    public static void main(String[] args) {
+        SpringApplication.run(EurekaServer.class, args);
+    }
+}
+</code></pre>
+<p>接着是Spring Boot的配置类——<code>application.yml</code>：</p>
+<pre><code class="lang-YML">spring:
+  application:
+    name: EurekaServer1
+server:
+  port: 8761
+eureka:
+  # Eureka实例配置
+  instance:
+    # 配置通过主机名方式注册
+    hostname: EurekaServer1
+  # Eureka Client配置
+  client:
+    serviceUrl:
+      # 作为client向EurekaServer2进行注册
+      defaultZone: http://EurekaServer2:8762/eureka/
+</code></pre>
+<p>EurekaServer1这个Server节点将启动在8761端口提供服务。同时，EurekaServer1自身也作为Eureka Client，向EurekaServer2这个Server节点注册自己，因为Eureka Server集群中的每个节点，对于其它节点来说就是一个客户端，需要同步数据。</p>
+<p>按照同样的方式，我们再新建一个Spring Boot应用作为EurekaServer2，唯一区别是application.yml配置不同：</p>
+<pre><code class="lang-YML">spring:
+  application:
+    name: EurekaServer2
+server:
+  port: 8762
+eureka:
+  # Eureka Server配置
+  instance:
+    # 配置通过主机名方式注册
+    hostname: EurekaServer2
+  # Eureka Client配置
+  client:
+    serviceUrl:
+      # 作为client向EurekaServer1进行注册
+      defaultZone: http://EurekaServer1:8761/eureka/
+</code></pre>
+<blockquote>
+<p>注意，记得在测试机器中的hosts文件里加上域名和IP的映射配置，我是直接在本机测试，所以加上如下两条配置：<br/><code>127.0.0.1 EurekaServer1</code><br/><code>127.0.0.1 EurekaServer2</code></p>
+</blockquote>
+<p>最后，我们分别启动这两个节点，然后通过访问<a href="">http://EurekaServer2:8762/</a> 或者 <a href="">http://EurekaServer1:8761/</a> 可以进入Eureka控制台，看到集群的整体情况。以EurekaServer1的控制台为例：</p>
+<p><img alt="" src="./img/20210109220915509.png"/></p>
+<h2 id="-eureka-client">二、Eureka Client</h2>
+<p>接着，我们来新建两个服务SerivceA和ServiceB，作为Eureka Client。注意，<strong>Eureka提供的客户端是不区分Provider和Consumer的</strong>，也就是说，Provider同时也会是Consumer。</p>
+<h3 id="2-1-">2.1 服务提供者</h3>
+<p>我这里将ServiceA作为服务提供者。首先引入maven pom依赖，我这里只贴dependencies依赖了，需要注意的是我没有引入<code>spring-cloud-starter-eureka-server</code>，因为这是一个Eureka Client：</p>
+<pre><code class="lang-XML">&lt;dependencies&gt;
+    &lt;dependency&gt;
+        &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-cloud-starter-config&lt;/artifactId&gt;
+    &lt;/dependency&gt;
+    &lt;dependency&gt;
+        &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-cloud-starter-eureka&lt;/artifactId&gt;
+    &lt;/dependency&gt;
+&lt;/dependencies&gt;
+</code></pre>
+<p>接着，是Spring Boot的启动类，注意这里使用了<code>@EnableEurekaClient</code>注解，标识这是一个Eureka Client：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+public class ServiceAApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ServiceAApplication.class, args);
+    }
+}
+</code></pre>
+<p>ServiceA的Spring Boot配置如下：</p>
+<pre><code class="lang-YML">server:
+  port: 8080
+# 应用名称
+spring:
+  application:
+    name: ServiceA
+eureka:
+  # 应用实例信息
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      # 作为client向Eureka Server集群进行注册
+      defaultZone: http://EurekaServer1:8761/eureka,http://EurekaServer2:8762/eureka
+</code></pre>
+<p>最后，ServiceA提供的服务接口如下：</p>
+<pre><code class="lang-JAVA">@RestController
+public class ServiceAController {
+    @GetMapping(value = "/sayHello/{name}")
+    public String sayHello(@PathVariable("name") String name) {
+        System.out.println("Service A被调用了一次");  
+        return "{'msg': 'hello, " + name + "'}";  
+    }
+}
+</code></pre>
+<h3 id="2-2-">2.2 服务消费者</h3>
+<p>我这里将ServiceB作为服务消费者，启动类和pom与服务A完全相同。ServiceB的Spring Boot配置如下：</p>
+<pre><code class="lang-YML">server:
+  port: 8081
+# 应用名称
+spring:
+  application:
+    name: ServiceB
+eureka:
+  # 应用实例信息
+  instance:
+    hostname: localhost
+  client:
+    # 作为client向Eureka Server集群进行注册
+    serviceUrl:
+      defaultZone: http://EurekaServer1:8761/eureka,http://EurekaServer2:8762/eureka
+</code></pre>
+<blockquote>
+<p>注意：当defaultZone配置了多个Eureka Server节点时，谁配置在第一个，所有的服务优先就是访问那个eureka server。只有当这台eureka server宕机了，那么此时所有的服务在重试过后，才会访问其他的eureka server。</p>
+</blockquote>
+<p>服务调用接口如下：</p>
+<pre><code class="lang-JAVA">@RestController
+@Configuration
+public class ServiceBController {
+    @Bean
+    @LoadBalanced
+    public RestTemplate getRestTemplate() {
+        return new RestTemplate();
+    }
+
+    @GetMapping(value = "/greeting/{name}")
+    public String greeting(@PathVariable("name") String name) {
+        RestTemplate restTemplate = getRestTemplate();
+        return restTemplate.getForObject("http://ServiceA/sayHello/" + name, String.class);
+    }
+}
+</code></pre>
+<p>这里我使用了<code>@LoadBalanced</code>注解，用于服务调用的客户端负载均衡，这个以后章节会提到，暂时不管。关键看服务调用的URL：</p>
+<pre><code class="lang-java">http://ServiceA/sayHello/
+</code></pre>
+<p>我这里并没有直接指定ServiceA的IP和端口，而是使用了它的应用名称——ServiceA。ServiceB会从Eureka Server拉取应用实例注册信息，然后从中选择一个ServiceA的实际地址进行调用，如下图：</p>
+<p><img alt="" src="./img/20210109221002125.png"/></p>
+<p>接着，我们再访问：<a href="">http://eurekaserver1:8761/</a> ，可以看到Eureka Client多了ServiceA和ServiceB：</p>
+<p><img alt="" src="./img/20210109221013974.png"/></p>
+<p>如果此时我们直接访问ServiceB的接口，正常情况下，ServiceB就会去调用ServiceA接口，并返回响应：</p>
+<p><img alt="" src="./img/20210109221027433.png"/></p>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解Eureka的基本使用，并搭建了一个集群部署的Eureka Demo。下一章开始，我们将正式进入Eureka源码的学习环节。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

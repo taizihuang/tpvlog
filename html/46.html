@@ -1,0 +1,519 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（三十）—— J.U.C之collections框架：ConcurrentLinkedDeque</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（三十）—— J.U.C之collections框架：ConcurrentLinkedDeque</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、引言</h2>
+<p>在开始讲<code>ConcurrentLinkedDeque</code>之前，我们先来了解下<strong>Deque</strong>这种数据结构，我们知道Queue是一种具有<strong>FIFO</strong>特点的数据结构，元素只能在队首进行“入队”操作，在队尾进行“出队”操作。</p>
+<p>而<strong>Deque</strong>（double-ended queue）是一种双端队列，也就是说可以在任意一端进行“入队”，也可以在任意一端进行“出队”：<br/><img alt="img" src="./img/20191030232440116.png"/></p>
+<p>Deque的数据结构示意图如下：<br/><img alt="img" src="./img/20191030232446209.png"/></p>
+<p>我们再来看下JDK中<strong>Queue</strong>和<strong>Deque</strong>这两种数据结构的接口定义，看看Deque和Queue相比有哪些增强：</p>
+<h3 id="1-1-queue-">1.1 Queue接口定义</h3>
+<p>Queue的接口非常简单，一共只有三种类型的操作：入队、出队、读取。</p>
+<p><img alt="img" src="./img/20191030232451962.png"/></p>
+<p>上述方法，可以划分如下：</p>
+<table>
+<thead>
+<tr>
+<th>操作类型</th>
+<th>抛出异常</th>
+<th>返回特殊值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>入队</td>
+<td>add(e)</td>
+<td>offer(e)</td>
+</tr>
+<tr>
+<td>出队</td>
+<td>remove()</td>
+<td>poll()</td>
+</tr>
+<tr>
+<td>读取</td>
+<td>element()</td>
+<td>peek()</td>
+</tr>
+</tbody>
+</table>
+<p>每种操作类型，都给出了两种方法，区别就是其中一种操作在队列的状态不满足某些要求时，会抛出异常；另一种，则直接返回特殊值（如null）。</p>
+<h3 id="1-2-deque-">1.2 Deque接口定义</h3>
+<p>Queue接口的所有方法Deque都具备，只不过队首/队尾都可以进行“出队”和“入队”操作：</p>
+<table>
+<thead>
+<tr>
+<th>操作类型</th>
+<th>抛出异常</th>
+<th>返回特殊值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>队首入队</td>
+<td>addFirst(e)</td>
+<td>offerFirst(e)</td>
+</tr>
+<tr>
+<td>队首出队</td>
+<td>removeFirst()</td>
+<td>pollFirst()</td>
+</tr>
+<tr>
+<td>队首读取</td>
+<td>getFirst()</td>
+<td>peekFirst()</td>
+</tr>
+<tr>
+<td>队尾入队</td>
+<td>addLast(e)</td>
+<td>offerLast(e)</td>
+</tr>
+<tr>
+<td>队尾出队</td>
+<td>removeLast()</td>
+<td>pollLast()</td>
+</tr>
+<tr>
+<td>队尾读取</td>
+<td>getLast()</td>
+<td>peekLast()</td>
+</tr>
+</tbody>
+</table>
+<p>除此之外，Deque还可以当作“栈”来使用，我们知道“栈”是一种具有<strong>“LIFO”</strong>特点的数据结构（关于栈，可以参考我的这篇博文：<a href="https://www.jianshu.com/p/ec2e4da52ea7">栈</a>），Deque提供了<code>push</code>、<code>pop</code>、<code>peek</code>这三个栈方法，一般实现这三个方法时，可以利用已有方法，即有如下映射关系：</p>
+<table>
+<thead>
+<tr>
+<th>栈方法</th>
+<th>Deque方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>push</td>
+<td>addFirst(e)</td>
+</tr>
+<tr>
+<td>pop</td>
+<td>removeFirst()</td>
+</tr>
+<tr>
+<td>peek</td>
+<td>peekFirst()</td>
+</tr>
+</tbody>
+</table>
+<p>关于Deque接口的更多细节，读者可以参考Oracle的官方文档：<a href="https://docs.oracle.com/javase/8/docs/api/">https://docs.oracle.com/javase/8/docs/api/</a></p>
+<h2 id="-concurrentlinkeddeque-">二、ConcurrentLinkedDeque简介</h2>
+<p><code>ConcurrentLinkedDeque</code>是JDK1.7时，J.U.C包引入的一个集合工具类。在JDK1.7之前，除了Stack类外，并没有其它适合并发环境的“栈”数据结构。ConcurrentLinkedDeque作为双端队列，可以当作“栈”来使用，并且高效地支持并发环境。</p>
+<p><code>ConcurrentLinkedDequ</code>和<code>ConcurrentLinkedQueue</code>一样，采用了无锁算法，底层基于<strong>自旋+CAS</strong>的方式实现。</p>
+<p><img alt="img" src="./img/20191030232458165.png"/></p>
+<h2 id="-concurrentlinkeddeque-">三、ConcurrentLinkedDeque原理</h2>
+<h3 id="3-1-">3.1 队列结构</h3>
+<p>我们先来看下ConcurrentLinkedDeque的内部结构：</p>
+<pre><code class="lang-JAVA">public class ConcurrentLinkedDeque&lt;E&gt; extends AbstractCollection&lt;E&gt;
+    implements Deque&lt;E&gt;, java.io.Serializable {
+
+    /**
+     * 头指针
+     */
+    private transient volatile Node&lt;E&gt; head;
+
+    /**
+     * 尾指针
+     */
+    private transient volatile Node&lt;E&gt; tail;
+
+    private static final Node&lt;Object&gt; PREV_TERMINATOR, NEXT_TERMINATOR;
+
+    // Unsafe mechanics
+    private static final sun.misc.Unsafe UNSAFE;
+    private static final long headOffset;
+    private static final long tailOffset;
+
+    static {
+        PREV_TERMINATOR = new Node&lt;Object&gt;();
+        PREV_TERMINATOR.next = PREV_TERMINATOR;
+        NEXT_TERMINATOR = new Node&lt;Object&gt;();
+        NEXT_TERMINATOR.prev = NEXT_TERMINATOR;
+        try {
+            UNSAFE = sun.misc.Unsafe.getUnsafe();
+            Class&lt;?&gt; k = ConcurrentLinkedDeque.class;
+            headOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("head"));
+            tailOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("tail"));
+        } catch (Exception e) {
+            throw new Error(e);
+        }
+    }
+
+    /**
+     * 双链表结点定义
+     */
+    static final class Node&lt;E&gt; {
+        volatile Node&lt;E&gt; prev;  // 前驱指针
+        volatile E item;        // 结点值
+        volatile Node&lt;E&gt; next;  // 后驱指针
+
+        Node() {
+        }
+
+        Node(E item) {
+            UNSAFE.putObject(this, itemOffset, item);
+        }
+
+        boolean casItem(E cmp, E val) {
+            return UNSAFE.compareAndSwapObject(this, itemOffset, cmp, val);
+        }
+
+        void lazySetNext(Node&lt;E&gt; val) {
+            UNSAFE.putOrderedObject(this, nextOffset, val);
+        }
+
+        boolean casNext(Node&lt;E&gt; cmp, Node&lt;E&gt; val) {
+            return UNSAFE.compareAndSwapObject(this, nextOffset, cmp, val);
+        }
+
+        void lazySetPrev(Node&lt;E&gt; val) {
+            UNSAFE.putOrderedObject(this, prevOffset, val);
+        }
+
+        boolean casPrev(Node&lt;E&gt; cmp, Node&lt;E&gt; val) {
+            return UNSAFE.compareAndSwapObject(this, prevOffset, cmp, val);
+        }
+
+        // Unsafe mechanics
+
+        private static final sun.misc.Unsafe UNSAFE;
+        private static final long prevOffset;
+        private static final long itemOffset;
+        private static final long nextOffset;
+
+        static {
+            try {
+                UNSAFE = sun.misc.Unsafe.getUnsafe();
+                Class&lt;?&gt; k = Node.class;
+                prevOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("prev"));
+                itemOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("item"));
+                nextOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("next"));
+            } catch (Exception e) {
+                throw new Error(e);
+            }
+        }
+    }
+
+    // ...
+}
+</code></pre>
+<p>可以看到，ConcurrentLinkedDeque的内部和ConcurrentLinkedQueue类似，不过是一个双链表结构，每入队一个元素就是插入一个Node类型的结点。字段<code>head</code>指向队列头，<code>tail</code>指向队列尾，通过Unsafe来CAS操作字段值以及Node对象的字段值。</p>
+<p><img alt="img" src="./img/20191030232505778.png"/></p>
+<p>需要特别注意的是ConcurrentLinkedDeque包含两个特殊字段：PREV_TERMINATOR、NEXT_TERMINATOR。<br/>这两个字段初始时都指向一个值为null的空结点，这两个字段在结点删除时使用，后面会详细介绍：</p>
+<p><img alt="img" src="./img/20191030232512516.png"/></p>
+<p><img alt="img" src="./img/20191030232519349.png"/></p>
+<hr/>
+<h3 id="3-2-">3.2 构造器定义</h3>
+<p><code>ConcurrentLinkedDeque</code>包含两种构造器：</p>
+<pre><code class="lang-JAVA">/**
+ * 空构造器.
+ */
+public ConcurrentLinkedDeque() {
+    head = tail = new Node&lt;E&gt;(null);
+
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+ * 从已有集合，构造队列
+ */
+public ConcurrentLinkedDeque(Collection&lt;? extends E&gt; c) {
+    Node&lt;E&gt; h = null, t = null;
+    for (E e : c) {
+        checkNotNull(e);
+        Node&lt;E&gt; newNode = new Node&lt;E&gt;(e);
+        if (h == null)
+            h = t = newNode;
+        else {  // 在队尾插入元素
+            t.lazySetNext(newNode);
+            newNode.lazySetPrev(t);
+            t = newNode;
+        }
+    }
+    initHeadTail(h, t);
+}
+</code></pre>
+<p>我们重点看下空构造器，通过空构造器建立的ConcurrentLinkedDeque对象，其head和tail指针并非指向null，而是指向一个item值为null的Node结点——哨兵结点，如下图：</p>
+<p><img alt="img" src="./img/20191030232526526.png"/></p>
+<h3 id="3-3-">3.3 入队操作</h3>
+<p>双端队列与普通队列的入队区别是：双端队列既可以在“队尾”插入元素，也可以在“队首”插入元素。ConcurrentLinkedDeque的入队方法有很多：<code>addFirst(e)</code>、<code>addLast(e)</code>、<code>offerFirst(e)</code>、<code>offerLast(e)</code>：</p>
+<pre><code class="lang-JAVA">public void addFirst(E e) {
+    linkFirst(e);
+}
+
+public void addLast(E e) {
+    linkLast(e);
+}
+
+public boolean offerFirst(E e) {
+    linkFirst(e);
+    return true;
+}
+
+public boolean offerLast(E e) {
+    linkLast(e);
+    return true;
+}
+</code></pre>
+<p>可以看到，队首“入队”其实就是调用了<code>linkFirst(e)</code>方法，而队尾“入队”是调用了 linkLast(e)方法。我们先来看下队首“入队”——linkFirst(e)：</p>
+<pre><code class="lang-JAVA">/**
+ * 在队首插入一个元素.
+ */
+private void linkFirst(E e) {
+    checkNotNull(e);
+    final Node&lt;E&gt; newNode = new Node&lt;E&gt;(e); // 创建待插入的结点
+
+    restartFromHead:
+    for (; ; )
+        for (Node&lt;E&gt; h = head, p = h, q; ; ) {
+            if ((q = p.prev) != null &amp;&amp; (q = (p = q).prev) != null)
+                // Check for head updates every other hop.
+                // If p == q, we are sure to follow head instead.
+                p = (h != (h = head)) ? h : q;
+            else if (p.next == p) // PREV_TERMINATOR
+                continue restartFromHead;
+            else {
+                // p is first node
+                newNode.lazySetNext(p); // CAS piggyback
+                if (p.casPrev(null, newNode)) {
+                    // Successful CAS is the linearization point
+                    // for e to become an element of this deque,
+                    // and for newNode to become "live".
+                    if (p != h) // hop two nodes at a time
+                        casHead(h, newNode);  // Failure is OK.
+                    return;
+                }
+                // Lost CAS race to another thread; re-read prev
+            }
+        }
+}
+</code></pre>
+<hr/>
+<p>为了便于理解，我们以示例来看：假设有两个线程ThreadA和ThreadB同时进行入队操作。</p>
+<p><strong>①ThreadA先单独入队一个元素9</strong></p>
+<p>此时，ThreadA会执行<strong>CASE3</strong>分支：</p>
+<pre><code class="lang-JAVA">else {                              // CASE3: p是队首结点
+    newNode.lazySetNext(p);         // “新结点”的next指向队首结点
+    if (p.casPrev(null, newNode)) { // 队首结点的prev指针指向“新结点”
+        if (p != h) // hop two nodes at a time
+            casHead(h, newNode);  // Failure is OK.
+        return;
+    }
+    // 执行到此处说明CAS操作失败，有其它线程也在队首插入元素
+}
+</code></pre>
+<p>队列的结构如下：<br/><img alt="img" src="./img/20191030232532999.png"/></p>
+<hr/>
+<p><strong>②ThreadA入队一个元素2，同时ThreadB入队一个元素10</strong></p>
+<p>此时，依然执行<strong>CASE3</strong>分支，我们假设ThreadA操作成功，ThreadB操作失败：</p>
+<pre><code class="lang-JAVA">else {                              // CASE3: p是队首结点
+    newNode.lazySetNext(p);         // “新结点”的next指向队首结点
+    if (p.casPrev(null, newNode)) { // 队首结点的prev指针指向“新结点”
+        if (p != h) // hop two nodes at a time
+            casHead(h, newNode);  // Failure is OK.
+        return;
+    }
+    // 执行到此处说明CAS操作失败，有其它线程也在队首插入元素
+}
+</code></pre>
+<p>ThreadA的CAS操作成功后，会进入以下判断：</p>
+<pre><code class="lang-JAVA">if (p != h) // hop two nodes at a time
+    casHead(h, newNode);  // Failure is OK.
+</code></pre>
+<p>上述判断的作用就是重置head头指针，可以看到，ConcurrentLinkedDeque其实是以每次跳2个结点的方式移动指针，这主要考虑到并发环境以这种hop跳的方式可以提升效率。</p>
+<p>此时队列的机构如下：<br/><img alt="img" src="./img/20191030232539297.png"/></p>
+<p>注意，此时ThreadB的<code>p.casPrev(null, newNode)</code>操作失败了，所以会进入下一次自旋，在下一次自旋中继续进入CASE3。如果ThreadA的casHead操作没有完成，ThreadB就进入了下一次自旋，则会进入分支1，重置指针p指向队首。最终队列结构如下：</p>
+<p><img alt="img" src="./img/20191030232545282.png"/></p>
+<blockquote>
+<p>在队尾插入元素和队首类似，不再赘述，读者可以自己阅读源码。</p>
+</blockquote>
+<h3 id="3-4-">3.4 出队操作</h3>
+<p>ConcurrentLinkedDeque的出队一样分为队首、队尾两种情况：<code>removeFirst()</code>、<code>pollFirst()</code>、<code>removeLast()</code>、<code>pollLast()</code>。</p>
+<pre><code class="lang-JAVA">public E removeFirst() {
+    return screenNullResult(pollFirst());
+}
+
+public E removeLast() {
+    return screenNullResult(pollLast());
+}
+
+public E pollFirst() {
+    for (Node&lt;E&gt; p = first(); p != null; p = succ(p)) {
+        E item = p.item;
+        if (item != null &amp;&amp; p.casItem(item, null)) {
+            unlink(p);
+            return item;
+        }
+    }
+    return null;
+}
+
+public E pollLast() {
+    for (Node&lt;E&gt; p = last(); p != null; p = pred(p)) {
+        E item = p.item;
+        if (item != null &amp;&amp; p.casItem(item, null)) {
+            unlink(p);
+            return item;
+        }
+    }
+    return null;
+}
+</code></pre>
+<p>可以看到，两个<strong>remove</strong>方法其实内部都调用了对应的poll方法，我们重点看下队尾的“出队”——<strong>pollLast</strong>方法：</p>
+<pre><code class="lang-JAVA">public E pollLast() {
+    for (Node&lt;E&gt; p = last(); p != null; p = pred(p)) {
+        E item = p.item;
+        if (item != null &amp;&amp; p.casItem(item, null)) {
+            unlink(p);
+            return item;
+        }
+    }
+    return null;
+}
+</code></pre>
+<p><strong>last</strong>方法用于寻找队尾结点，即满足<code>p.next == null &amp;&amp; p.prev != p</code>的结点：</p>
+<pre><code class="lang-JAVA">Node&lt;E&gt; last() {
+    restartFromTail:
+    for (; ; )
+        for (Node&lt;E&gt; t = tail, p = t, q; ; ) {
+            if ((q = p.next) != null &amp;&amp;
+                (q = (p = q).next) != null)
+                // Check for tail updates every other hop.
+                // If p == q, we are sure to follow tail instead.
+                p = (t != (t = tail)) ? t : q;
+            else if (p == t
+                // It is possible that p is NEXT_TERMINATOR,
+                // but if so, the CAS is guaranteed to fail.
+                || casTail(t, p))
+                return p;
+            else
+                continue restartFromTail;
+        }
+}
+</code></pre>
+<p><strong>pred</strong>方法用于寻找当前结点的前驱结点（如果前驱是自身，则返回队尾结点）：</p>
+<pre><code class="lang-JAVA">final Node&lt;E&gt; pred(Node&lt;E&gt; p) {
+    Node&lt;E&gt; q = p.prev;
+    return (p == q) ? last() : q;
+}
+</code></pre>
+<p><strong>unlink</strong>方法断开结点的链接：</p>
+<pre><code class="lang-JAVA">/**
+ * Unlinks non-null node x.
+ */
+void unlink(Node&lt;E&gt; x) {
+    // assert x != null;
+    // assert x.item == null;
+    // assert x != PREV_TERMINATOR;
+    // assert x != NEXT_TERMINATOR;
+
+    final Node&lt;E&gt; prev = x.prev;
+    final Node&lt;E&gt; next = x.next;
+    if (prev == null) {
+        unlinkFirst(x, next);
+    } else if (next == null) {
+        unlinkLast(x, prev);
+    } else {
+        Node&lt;E&gt; activePred, activeSucc;
+        boolean isFirst, isLast;
+        int hops = 1;
+
+        // Find active predecessor
+        for (Node&lt;E&gt; p = prev; ; ++hops) {
+            if (p.item != null) {
+                activePred = p;
+                isFirst = false;
+                break;
+            }
+            Node&lt;E&gt; q = p.prev;
+            if (q == null) {
+                if (p.next == p)
+                    return;
+                activePred = p;
+                isFirst = true;
+                break;
+            } else if (p == q)
+                return;
+            else
+                p = q;
+        }
+
+        // Find active successor
+        for (Node&lt;E&gt; p = next; ; ++hops) {
+            if (p.item != null) {
+                activeSucc = p;
+                isLast = false;
+                break;
+            }
+            Node&lt;E&gt; q = p.next;
+            if (q == null) {
+                if (p.prev == p)
+                    return;
+                activeSucc = p;
+                isLast = true;
+                break;
+            } else if (p == q)
+                return;
+            else
+                p = q;
+        }
+
+        // TODO: better HOP heuristics
+        if (hops &lt; HOPS
+            // always squeeze out interior deleted nodes
+            &amp;&amp; (isFirst | isLast))
+            return;
+
+        // Squeeze out deleted nodes between activePred and
+        // activeSucc, including x.
+        skipDeletedSuccessors(activePred);
+        skipDeletedPredecessors(activeSucc);
+
+        // Try to gc-unlink, if possible
+        if ((isFirst | isLast) &amp;&amp;
+
+            // Recheck expected state of predecessor and successor
+            (activePred.next == activeSucc) &amp;&amp;
+            (activeSucc.prev == activePred) &amp;&amp;
+            (isFirst ? activePred.prev == null : activePred.item != null) &amp;&amp;
+            (isLast ? activeSucc.next == null : activeSucc.item != null)) {
+
+            updateHead(); // Ensure x is not reachable from head
+            updateTail(); // Ensure x is not reachable from tail
+
+            // Finally, actually gc-unlink
+            x.lazySetPrev(isFirst ? prevTerminator() : x);
+            x.lazySetNext(isLast ? nextTerminator() : x);
+        }
+    }
+}
+</code></pre>
+<blockquote>
+<p>ConcurrentLinkedDeque相比ConcurrentLinkedQueue，功能更丰富，但是由于底层结构是双链表，且完全采用CAS+自旋的无锁算法保证线程安全性，所以需要考虑各种并发情况，源码比ConcurrentLinkedQueue更加难懂，留待有精力作进一步分析。</p>
+</blockquote>
+<h2 id="-">四、总结</h2>
+<p><strong>ConcurrentLinkedDeque</strong>使用了<strong>自旋+CAS</strong>的非阻塞算法来保证线程并发访问时的数据一致性。由于队列本身是一种双链表结构，所以虽然算法看起来很简单，但其实需要考虑各种并发的情况，实现复杂度较高，并且ConcurrentLinkedDeque不具备实时的数据一致性，实际运用中，如果需要一种线程安全的栈结构，可以使用ConcurrentLinkedDeque。</p>
+<p>另外，关于ConcurrentLinkedDeque还有以下需要注意的几点：</p>
+<ol>
+<li><p>ConcurrentLinkedDeque的迭代器是弱一致性的，这在并发容器中是比较普遍的现象，主要是指在一个线程在遍历队列结点而另一个线程尝试对某个队列结点进行修改的话不会抛出ConcurrentModificationException，这也就造成在遍历某个尚未被修改的结点时，在next方法返回时可以看到该结点的修改，但在遍历后再对该结点修改时就看不到这种变化。</p>
+</li>
+<li><p>size方法需要遍历链表，所以在并发情况下，其结果不一定是准确的，只能供参考。</p>
+</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

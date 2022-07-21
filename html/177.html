@@ -1,0 +1,180 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch进阶（八）——性能调优：读写优化</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch进阶（八）——性能调优：读写优化</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来看下Elasticsearch中的读写优化。ES中几乎所有的操作都是读操作或写操作，所以我们需要掌握一些对读写操作优化的方法。</p>
+<h2 id="-">一、数据写入优化</h2>
+<h3 id="1-1-bulk-">1.1 bulk批量写入</h3>
+<p>如果我们要往Elasticsearch中批量写入数据的话，尽量采用bulk方式，每次批量写个几百条的样子。</p>
+<p>bulk批量写入的性能比一条一条写入大量的document的性能要好很多。但是，如果要知道一个bulk请求最佳的大小，需要对单个ES node的单个shard做压测。比如，先往bulk写入100个document，然后200个，500个，以此类推，每次都将bulk size加倍一次。如果bulk写入性能开始变平缓，那么这个就是最佳的bulk大小。</p>
+<h3 id="1-2-">1.2 多线程写入</h3>
+<p>单线程发送bulk请求是无法最大化Elasticsearch集群写入吞吐量的。如果要利用集群的所有资源，就需要使用多线程并发的将数据bulk写入集群中。多线程并发写入，可以减少每次磁盘fsync的次数和开销。</p>
+<p><strong><em>线程的数量如何确定？</em></strong></p>
+<p>对单个ES node的单个shard做压测，比如说，先是2个线程，然后是4个线程，然后是8个线程……，每次线程数量倍增。一旦发现ES返回了<code>TOO_MANY_REQUESTS</code>的错误，那么就说明ES集群已经达到了并发写入的最大瓶颈，此时我们就知道最多只能支撑这么高的并发写入了。</p>
+<h3 id="1-3-refresh-">1.3 增加refresh间隔</h3>
+<p>默认的refresh间隔是1s，用<code>index.refresh_interval</code>参数可以设置，这样会其强迫Elasticsearch每隔1s就将创建一个新的segment file。如果我们可以接受写入的数据较长时间后才查询到，比如30s，就可以调大这个参数，此时就可以获取更大的写入吞吐量，因为30s内都是写内存的，每隔30s才会创建一个segment file。</p>
+<h3 id="1-4-refresh-replia">1.4 禁止refresh和replia</h3>
+<p>如果我们要一次性加载大批量的数据进Elasticsearch，可以先禁止refresh和replia复制，将<code>index.refresh_interval</code>设置为-1，将·index.number_of_replicas·设置为0。此时就没有refresh和replica机制了，写入的速度会非常快，一旦写完之后，我可以将refresh和replica修改回正常的状态。</p>
+<h3 id="1-5-swapping">1.5 禁止swapping</h3>
+<p>之前讲解过，可以将swapping内存页交换禁止掉，因为swapping会导致大量磁盘IO，性能很差。</p>
+<h3 id="1-6-filesystem-cache-">1.6 增加filesystem cache大小</h3>
+<p>filesystem cache被用来执行更多的IO操作，如果我们能给filesystem cache更多的内存资源，那么Elasticsearch的写入性能会好很多。</p>
+<h3 id="1-7-id">1.7 使用自动生成的id</h3>
+<p>如果我们要手动给es document设置一个id，那么es需要每次都去确认一下那个id是否存在，这个过程是比较耗费时间的。如果我们使用自动生成的id，那么es就可以跳过这个步骤，写入性能会更好。对于你的业务表中的id，可以作为es document的一个field。</p>
+<h3 id="1-8-">1.8 提升硬件</h3>
+<p>我们可以给filesystem cache更多的内存，也可以使用SSD替代机械硬盘，避免使用NAS等网络存储，考虑使用RAID 0来提升磁盘并行读写效率等等。</p>
+<h3 id="1-9-index-buffer">1.9 index buffer</h3>
+<p>如果我们的写入并发量非常高，那么最好将index buffer调大一些，可以通过<code>indices.memory.index_buffer_size</code>参数设置。Elasticsearch会将这个设置作为每个shard共享的index buffer，对于每个shard来说，最多给512MB。默认这个参数的值是10%，也就是jvm heap的10%，如果我们给jvm heap分配10gb内存，那么这个index buffer就有1gb，对于两个shard共享来说是足够的了。</p>
+<h2 id="-">二、数据搜索优化</h2>
+<h3 id="2-1-filesystem-cache-">2.1 增加filesystem cache大小</h3>
+<p>Elasticsearch的搜索引擎严重依赖于底层的filesystem cache，你如果给filesystem cache更多的内存，尽量让内存可以容纳所有的indx segment file索引数据文件，那么你搜索的时候就基本都是走内存的，性能会非常高。</p>
+<p>举个例子，如果有3个ES节点（3台机器），每台机器64G内存，每台机器给es jvm heap是32G，剩下的留给filesystem cache，那么集群给filesystem cache的总内存就是96G。</p>
+<p>如果你的索引数据文件有1T，那么由于filesystem cache的内存才100g，所以只有十分之一的数据可以放入内存，其它的都在磁盘，此时搜索操作大部分都是走磁盘，性能肯定差。</p>
+<p>归根结底，要让Elasticsearch性能要好，你的机器的总内存至少要容纳ES总数据量的一半。</p>
+<h3 id="2-2-">2.2 提升硬件</h3>
+<ul>
+<li>给filesystem cache更多的内存资源；</li>
+<li>用SSD固态硬盘；</li>
+<li>使用本地存储系统，不要用NFS等网络存储系统；</li>
+<li>给更多的CPU资源。</li>
+</ul>
+<h3 id="2-3-document-">2.3 document模型设计</h3>
+<p>document模型设计是非常重要的，一般有两个思路：</p>
+<ol>
+<li>在写入数据的时候，就设计好模型，把处理好的数据放到一个新字段，避免ES执行复杂的搜索；</li>
+<li>自己用Java/Python之类的程序封装，Elasticsearch仅做普通数据搜索，在Java/Python程序里去做复杂的业务逻辑处理。</li>
+</ol>
+<h3 id="2-3-filesystem-cache">2.3 预热filesystem cache</h3>
+<p>如果我们重启了Elasticsearch，那么filesystem cache是空的，就需要不断的查询才能重新让filesystem cache热起来，所以我们可以先做数据预热。</p>
+<p>比如说，本来一个查询，要用户点击以后才执行，才能从磁盘加载到filesystem cache里，第一次执行要10s，以后每次就几百毫秒。那么完全可以，后台先将数据加载到filesystem cahce，以后用户真的访问时消耗时间就大大缩短。</p>
+<h3 id="2-6-script-">2.6 避免使用script脚本</h3>
+<p>生产环境中，一般是避免使用Elasticsearch script，性能不高。</p>
+<h3 id="2-7-">2.7 使用固定范围的日期查询</h3>
+<p>尽量不要使用now这种内置函数来执行日期查询，因为默认now是到毫秒级的，是无法缓存结果，尽量使用一个阶段范围，比如分钟级，那么如果一分钟内都执行这个查询，是可以取用查询缓存的：</p>
+<pre><code class="lang-JAVA">PUT index/1
+{
+  "my_date": "2016-05-11T16:30:55.328Z"
+}
+
+GET index/_search
+{
+  "query": {
+    "constant_score": {
+      "filter": {
+        "range": {
+          "my_date": {
+            "gte": "now-1h",
+            "lte": "now"
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>上面的请求完全可以替换成下面这样，性能会更高：</p>
+<pre><code class="lang-JAVA">GET index/_search
+{
+  "query": {
+    "constant_score": {
+      "filter": {
+        "range": {
+          "my_date": {
+            "gte": "now-1h/m",
+            "lte": "now/m"
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<h2 id="-">三、磁盘读写优化</h2>
+<p>磁盘读写优化，主要是优化磁盘空间的占用，减少磁盘空间的占用，让更多的数据可以进入filesystem cache。比如原来磁盘空间占用1T，内存只有512G，现在优化了磁盘空间占用后，减少了数据量，可能数据量就只有512G了，那么就可以全部进入内存。</p>
+<h3 id="3-1-">3.1 禁用不用的功能</h3>
+<p>禁用不用的功能是指，如果我们不需要使用Elasticsearch的以下功能，完全可以禁用掉以提升性能：</p>
+<ul>
+<li>聚合：doc values</li>
+<li>搜索：倒排索引，index</li>
+<li>评分：norms</li>
+<li>近似匹配：index_options（freqs）</li>
+</ul>
+<p>上述任何一个功能不需要，就把对应的存储数据给清理掉，这样可以节约磁盘空间的占用，也可以优化磁盘的读写性能。</p>
+<h4 id="-">禁用倒排索引</h4>
+<p>默认情况下，Elasticsearch在写入document到索引的时候，都会给大多数的field增加一份<code>doc values</code>，就是正排索引，用来进行聚合或者排序。比如说，如果我们有一个叫做<code>foo</code>的数字类型field，我们要对这个字段运行histograms aggr聚合操作，但是可能我们并不需要对这个字段进行搜索，那么就可以禁止为这个字段生成倒排索引，只需要doc value正排索引即可。禁用倒排索引的方式如下：</p>
+<pre><code class="lang-JAVA">PUT index
+{
+  "mappings": {
+      "properties": {
+        "foo": {
+          "type": "integer",
+          "index": false
+        }
+      }
+  }
+}
+</code></pre>
+<h4 id="-">禁用评分</h4>
+<p>text类型的field会存储norm值，用来计算doc的相关度分数，如果我们需要对一个text field进行搜索，但是不关心这个field的分数，那么可以禁用norm值：</p>
+<pre><code class="lang-JAVA">PUT index
+{
+  "mappings": {
+      "properties": {
+        "foo": {
+          "type": "text",
+          "norms": false
+        }
+      }
+    }
+}
+</code></pre>
+<h4 id="-">禁用近似匹配</h4>
+<p>text field还会存储出现频率以及位置，出现频率也是用来计算相关度分数的，位置是用来进行phrase query这种近似匹配操作的，如果我们不需要执行phrase query近似匹配，那么可以禁用这个属性：</p>
+<pre><code class="lang-JAVA">PUT index
+{
+  "mappings": {
+      "properties": {
+        "foo": {
+          "type": "text",
+          "index_options": "freqs"
+        }
+      }
+    }
+}
+</code></pre>
+<h3 id="3-2-string-">3.2 禁用动态string类型映射</h3>
+<p>默认的动态string类型映射，会将string类型的field同时映射为text类型以及keyword类型，这会浪费磁盘空间。如果我们不是两种类型都需要，可以通过手动设置mappings映射来避免字符串类型的field被自动映射为text和keyword：</p>
+<pre><code class="lang-JAVA">PUT index
+{
+  "mappings": {
+      "dynamic_templates": [
+        {
+          "strings": {
+            "match_mapping_type": "string",
+            "mapping": {
+              "type": "keyword"
+            }
+          }
+        }
+      ]
+  }
+}
+</code></pre>
+<h3 id="3-3-_all-field">3.3 禁止_all field</h3>
+<p><code>_all field</code>会将document中所有field的值都合并在一起进行索引，很耗费空间，如果不需要一次性对所有的field都进行搜索，那么最好禁用<code>_all field</code>。</p>
+<h3 id="3-4-best_compression">3.4 使用best_compression</h3>
+<p><code>_source field</code>和其他field都很耗费磁盘空间，最好是对其使用<code>best_compression</code>进行压缩。用elasticsearch.yml中的index.codec来设置，将其设置为best_compression即可。</p>
+<h3 id="3-5-">3.5 合理使用数字类型</h3>
+<p>Elasticsearch支持4种数字类型：<code>byte</code>、<code>short</code>、<code>integer</code>、<code>long</code>。如果最小的类型就合适，那么就用最小的类型，以减少doc大小。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我介绍了一些Elasticsearch中的常用读写优化建议。ES中几乎所有的操作都是读操作或写操作，所以我们需要掌握这些对读写操作优化的方法。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

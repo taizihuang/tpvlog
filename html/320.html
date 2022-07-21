@@ -1,0 +1,328 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解分布式存储（二）——gRPC使用</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解分布式存储（二）——gRPC使用</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将对<code>dfs-rpc</code>这个模块进行讲解。该模块依赖gRPC，存放各个RPC服务的存根。我们的分布式文件系统的服务间的调用需要以gRPC作为通信组件，所以本章我会讲解gRPC的基本使用，但我不会对gRPC作深入介绍，gRPC的底层原理和各种高阶用法，读者可以参考其它资料。</p>
+<h2 id="-dfs-rpc-">一、dfs-rpc工程</h2>
+<p>gRPC本身支持不同语言，通过ProtoBuf编写的<code>.proto</code>文件，然后使用不同语言的编译器，可以生成特定语言相关的模板代码。由于我们的工程使用Java，所以需要使用<a href="https://github.com/grpc/grpc-java">grpc-java</a>。</p>
+<blockquote>
+<p><code>Protobuf</code>是一种语言中立、平台无关、可扩展的<strong>序列化数据的格式</strong>，可用于通信协议，数据存储等。我们的系统中涉及的服务接口都需要通过protobuf来生成。</p>
+</blockquote>
+<h3 id="1-1-">1.1 引入依赖</h3>
+<p>首先，新建一个Maven工程<code>dfs-rpc</code>，在pom中引入以下依赖。注意，我这里使用了<code>protobuf-maven-plugin</code>插件，用来将<code>.proto</code>文件转化成 Java 模板代码。<code>protobuf-maven-plugin</code>插件内部整合了<a href="https://github.com/protocolbuffers/protobuf/releases">protoc编译器</a>，读者也可以自己下载protoc编译器，手动将<code>.proto</code>文件转化为Java代码：</p>
+<pre><code class="lang-XML">&lt;project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+      &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+      &lt;groupId&gt;com.tpvlog.dfs&lt;/groupId&gt;
+      &lt;artifactId&gt;dfs-rpc&lt;/artifactId&gt;
+      &lt;version&gt;0.0.1-SNAPSHOT&lt;/version&gt;
+      &lt;packaging&gt;jar&lt;/packaging&gt;
+
+      &lt;name&gt;dfs-rpc&lt;/name&gt;
+      &lt;url&gt;http://maven.apache.org&lt;/url&gt;
+
+      &lt;properties&gt;
+        &lt;project.build.sourceEncoding&gt;UTF-8&lt;/project.build.sourceEncoding&gt;
+      &lt;/properties&gt;
+
+    &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;io.grpc&lt;/groupId&gt;
+            &lt;artifactId&gt;grpc-netty-shaded&lt;/artifactId&gt;
+            &lt;version&gt;1.35.0&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;io.grpc&lt;/groupId&gt;
+            &lt;artifactId&gt;grpc-protobuf&lt;/artifactId&gt;
+            &lt;version&gt;1.35.0&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;io.grpc&lt;/groupId&gt;
+            &lt;artifactId&gt;grpc-stub&lt;/artifactId&gt;
+            &lt;version&gt;1.35.0&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt; &lt;!-- necessary for Java 9+ --&gt;
+            &lt;groupId&gt;org.apache.tomcat&lt;/groupId&gt;
+            &lt;artifactId&gt;annotations-api&lt;/artifactId&gt;
+            &lt;version&gt;6.0.53&lt;/version&gt;
+            &lt;scope&gt;provided&lt;/scope&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+    &lt;build&gt;
+        &lt;extensions&gt;
+            &lt;extension&gt;
+                &lt;groupId&gt;kr.motd.maven&lt;/groupId&gt;
+                &lt;artifactId&gt;os-maven-plugin&lt;/artifactId&gt;
+                &lt;version&gt;1.6.2&lt;/version&gt;
+            &lt;/extension&gt;
+        &lt;/extensions&gt;
+        &lt;plugins&gt;
+            &lt;plugin&gt;
+                &lt;groupId&gt;org.xolstice.maven.plugins&lt;/groupId&gt;
+                &lt;artifactId&gt;protobuf-maven-plugin&lt;/artifactId&gt;
+                &lt;version&gt;0.6.1&lt;/version&gt;
+                &lt;configuration&gt;
+                    &lt;protocArtifact&gt;com.google.protobuf:protoc:3.12.0:exe:${os.detected.classifier}&lt;/protocArtifact&gt;
+                    &lt;pluginId&gt;grpc-java&lt;/pluginId&gt;
+                    &lt;pluginArtifact&gt;io.grpc:protoc-gen-grpc-java:1.35.0:exe:${os.detected.classifier}&lt;/pluginArtifact&gt;
+                &lt;/configuration&gt;
+                &lt;executions&gt;
+                    &lt;execution&gt;
+                        &lt;goals&gt;
+                            &lt;goal&gt;compile&lt;/goal&gt;
+                            &lt;goal&gt;compile-custom&lt;/goal&gt;
+                        &lt;/goals&gt;
+                    &lt;/execution&gt;
+                &lt;/executions&gt;
+            &lt;/plugin&gt;
+        &lt;/plugins&gt;
+    &lt;/build&gt;
+&lt;/project&gt;
+</code></pre>
+<h3 id="1-2-">1.2 接口编写</h3>
+<p>服务接口的编写使用ProtoBuf的标准语法，我们编写一个<code>NameNodeServiceProto.proto</code>文件，里面定义<strong>NameNode</strong>提供的各个服务接口：</p>
+<pre><code class="lang-protobuf">syntax = "proto3";
+
+option java_multiple_files = true;
+option java_outer_classname = "NameNodeServiceProto";
+
+service NameNodeService {
+    rpc register(RegisterRequest) returns (RegisterResponse){}
+    rpc heartbeat(HeartbeatRequest) returns (HeartbeatResponse){}
+    rpc mkdir(MkDirRequest) returns (MkDirResponse){}
+    rpc shutdown(ShutdownRequest) returns (ShutdownResponse){}
+    rpc fetchEditsLog(FetchEditsLogRequest) returns (FetchEditsLogResponse){}
+    rpc updateCheckpointTxid(UpdateCheckpointTxidRequest) returns (UpdateCheckpointTxidResponse){}
+}
+
+message RegisterRequest{
+    string ip  = 1;
+    string hostname  = 2;
+}
+message RegisterResponse{
+    int32 status  = 1;
+}
+message HeartbeatRequest{
+    string ip  = 1;
+    string hostname  = 2;
+}
+message HeartbeatResponse{
+    int32 status  = 1;
+}
+message MkDirRequest{
+    string path  = 1;
+}
+message MkDirResponse{
+    int32 status  = 1;
+}
+
+message ShutdownRequest{
+    int32 code  = 1;
+}
+message ShutdownResponse{
+    int32 status  = 1;
+}
+message FetchEditsLogRequest{
+    int64 syncedTxid  = 1;
+}
+message FetchEditsLogResponse{
+    string editsLog  = 1;
+}
+message UpdateCheckpointTxidRequest{
+    int64 txid  = 1;
+}
+message UpdateCheckpointTxidResponse{
+    int32 status  = 1;
+}
+</code></pre>
+<h3 id="1-3-java-">1.3 Java代码生成</h3>
+<p>我们把上面的<code>.proto</code>文件存放到项目的<code>/src/main/proto</code>目录下，然后 cd 到项目根目录，执行<code>mvn clean compile</code>命令：</p>
+<pre><code class="lang-SHELL">C:\Users\Ressmix\Desktop\source-code\dfs\dfs-rpc&gt;mvn clean compile
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Detecting the operating system and CPU architecture
+[INFO] ------------------------------------------------------------------------
+[INFO] os.detected.name: windows
+[INFO] os.detected.arch: x86_64
+[INFO] os.detected.version: 10.0
+[INFO] os.detected.version.major: 10
+[INFO] os.detected.version.minor: 0
+[INFO] os.detected.classifier: windows-x86_64
+[INFO]
+[INFO] -----------------------&lt; com.tpvlog.dfs:dfs-rpc &gt;-----------------------
+[INFO] Building dfs-rpc 0.0.1-SNAPSHOT
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-clean-plugin:2.5:clean (default-clean) @ dfs-rpc ---
+[INFO] Deleting C:\Users\Ressmix\Desktop\source-code\dfs\dfs-rpc\target
+[INFO]
+[INFO] --- protobuf-maven-plugin:0.6.1:compile (default) @ dfs-rpc ---
+[INFO] Compiling 1 proto file(s) to C:\Users\Ressmix\Desktop\source-code\dfs\dfs-rpc\target\generated-sources\protobuf\java
+[INFO]
+[INFO] --- protobuf-maven-plugin:0.6.1:compile-custom (default) @ dfs-rpc ---
+[INFO] Compiling 1 proto file(s) to C:\Users\Ressmix\Desktop\source-code\dfs\dfs-rpc\target\generated-sources\protobuf\grpc-java
+[INFO]
+[INFO] --- maven-resources-plugin:2.6:resources (default-resources) @ dfs-rpc ---
+[INFO] Using 'UTF-8' encoding to copy filtered resources.
+[INFO] skip non existing resourceDirectory C:\Users\Ressmix\Desktop\source-code\dfs\dfs-rpc\src\main\resources
+[INFO] Copying 1 resource
+[INFO] Copying 1 resource
+[INFO]
+[INFO] --- maven-compiler-plugin:3.1:compile (default-compile) @ dfs-rpc ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 48 source files to C:\Users\Ressmix\Desktop\source-code\dfs\dfs-rpc\target\classes
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  7.920 s
+[INFO] Finished at: 2021-02-19T16:29:49+08:00
+[INFO] ------------------------------------------------------------------------
+</code></pre>
+<p>完成后会在<code>/target/generated-sources/protobuf/java/</code>目录下看到一堆生成的Java模板代码：</p>
+<center><br/> <img src="./img/20210630223431453.png" style="zoom:80%"><br/></img></center>
+<h3 id="1-4-">1.4 测试使用</h3>
+<p>我们把这些代码拷贝到<code>dfs-rpc</code>工程的<code>com.tpvlog.dfs.rpc.service</code>包下：</p>
+<center><br/> <img src="./img/20210630223441413.png" style="zoom:80%"/><br/></center>
+<p>然后来测试一下，先写一个服务端测试类：</p>
+<pre><code class="lang-JAVA">package com.tpvlog.dfs.rpc.service;
+
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
+import io.grpc.stub.StreamObserver;
+
+import java.io.IOException;
+
+public class GrpcServerTest {
+    private final int port = 19080;
+    private Server server;
+
+    public static void main(String[] args) throws IOException, InterruptedException {
+        final GrpcServerTest grpcServer = new GrpcServerTest();
+        grpcServer.start();
+        grpcServer.blockUntilShutdown();
+    }
+
+    private void start() throws IOException {
+        server = ServerBuilder.forPort(port).addService(new NameNodeServiceImpl()).build().start();
+        System.out.println("------- NameNodeService Started -------");
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            @Override
+            public void run() {
+                System.err.println("------shutting down gRPC server since JVM is shutting down-------");
+                GrpcServerTest.this.stop();
+                System.err.println("------server shut down------");
+            }
+        });
+    }
+
+    /**
+     * 服务接口实现类
+     */
+    private class NameNodeServiceImpl extends NameNodeServiceGrpc.NameNodeServiceImplBase {
+        public void register(RegisterRequest request, StreamObserver&lt;RegisterResponse&gt; responseObserver) {
+            RegisterResponse response = RegisterResponse.newBuilder().setStatus(200).build();
+            // onNext()方法向客户端返回结果
+            responseObserver.onNext(response);
+            // 告诉客户端这次调用已经完成
+            responseObserver.onCompleted();
+        }
+
+        public void heartbeat(HeartbeatRequest request, StreamObserver&lt;HeartbeatResponse&gt; responseObserver) {
+            HeartbeatResponse response=HeartbeatResponse.newBuilder().setStatus(200).build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+    }
+
+    private void stop() {
+        if (server != null) {
+            server.shutdown();
+        }
+    }
+
+    private void blockUntilShutdown() throws InterruptedException {
+        if (server != null) {
+            server.awaitTermination();
+        }
+    }
+}
+</code></pre>
+<p>再写一个客户端测试类：</p>
+<pre><code class="lang-JAVA">package com.tpvlog.dfs.rpc.service;
+
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+
+import java.util.concurrent.TimeUnit;
+
+public class GrpcClientTest {
+    private final ManagedChannel channel;
+    private final NameNodeServiceGrpc.NameNodeServiceBlockingStub blockingStub;
+
+    private static final String host = "127.0.0.1";
+    private static final int ip = 19080;
+
+    public GrpcClientTest(String host, int port) {
+        // usePlaintext表示明文传输，否则需要配置ssl
+        // channel表示通信通道
+        channel = ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        // 存根
+        blockingStub = NameNodeServiceGrpc.newBlockingStub(channel);
+    }
+
+    public void shutdown() throws InterruptedException {
+        channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
+    }
+
+    public void testHeartbeat(String name) {
+        HeartbeatRequest request = HeartbeatRequest.newBuilder().setIp("127.0.0.1").setHostname("localhost").build();
+        HeartbeatResponse response = blockingStub.heartbeat(request);
+        System.out.println(name + ": " + response.getStatus());
+    }
+
+    public void testRegister(String name) {
+        RegisterRequest request = RegisterRequest.newBuilder().setIp("127.0.0.1").setHostname("localhost").build();
+        RegisterResponse response = blockingStub.register(request);
+        System.out.println(response.getStatus());
+    }
+
+    public static void main(String[] args) {
+        GrpcClientTest client = new GrpcClientTest(host, ip);
+        for (int i = 0; i &lt;= 5; i++) {
+            client.testHeartbeat("&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-" + i);
+        }
+
+        for (int i = 0; i &lt;= 5; i++) {
+            client.testHeartbeat("&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-" + i);
+        }
+    }
+}
+</code></pre>
+<p>最后，先启动服务端，然后启动客户端，输出如下，说明RPC调用成功了：</p>
+<pre><code class="lang-SHELL">------- NodeRegisterService Started -------
+
+&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-0: 200
+&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-1: 200
+&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-2: 200
+&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-3: 200
+&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-4: 200
+&lt;&lt;&lt;&lt;&lt;Heartbeat result&gt;&gt;&gt;&gt;&gt;-5: 200
+&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-0: 200
+&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-1: 200
+&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-2: 200
+&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-3: 200
+&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-4: 200
+&lt;&lt;&lt;&lt;&lt;Register result&gt;&gt;&gt;&gt;&gt;-5: 200
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我完成了<code>dfs-rpc</code>工程的构建，同时我对gRPC的基本使用进行了讲解，后续这个工程会存放我们所有的gRPC模板代码和<code>.proto</code>文件，其它涉及gRPC服务调用的工程都需要依赖该工程。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式存储分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/65">分布式存储</a></div>
+</div></body>
+        </html>
+        

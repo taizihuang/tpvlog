@@ -1,0 +1,29 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Kafka（五）——通信机制：多路复用</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Kafka（五）——通信机制：多路复用</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Kafka Broker基于Reactor模式，通过I/O多路复用来完成请求的处理，所以具有极高的吞吐量。关于I/O多路复用，我在其它的专栏里反复讲解过多次了。本章，我再来针对Kafka讲解下它是如何实现多路复用的。</p>
+<h2 id="-">一、工作流程</h2>
+<p>每个Kafka Broker上都有一个Acceptor线程和多个Processor线程：</p>
+<ol>
+<li>Kafka Broker通过Acceptor监听每个新的Socket连接，建立连接成功后，会采用Round Robin的轮询方式，将Socket连接分配给Processor线程；</li>
+<li>Processor线程负责处理这个Socket连接，每一个Processor都有一个Selector，可以非阻塞的处理多个客户端的读写请求，包括读取数据和将响应返回给对应Client，但是Processor本身不处理具体的业务逻辑；</li>
+<li>所有Processor都会把请求放入一个Broker全局唯一的请求队列，默认大小是500，可以通过<code>queued.max.requests</code>参数设置；</li>
+<li>接着，有一个<strong>KafkaRequestHandler</strong>线程池负责不停的从队列中获取请求来处理，这个线程池大小默认是8个，可通过<code>num.io.threads</code>参数控制，处理完请求后的响应，会放入每个Processor自己的响应队列ResponseQueue里；</li>
+<li>最后，Processor会监听自己的响应队列，把响应拿出来通过Socket连接返回给客户端。</li>
+</ol>
+<p>整个流程如下图：</p>
+<center><br/> <img src="./img/20210417213732537.png" style="zoom:100%"><br/></img></center>
+<blockquote>
+<p>通过参数<code>num.network.threads</code>可以设置processor线程的数量，默认值是3。</p>
+</blockquote>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

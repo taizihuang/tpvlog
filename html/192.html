@@ -1,0 +1,494 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二一）——分布式框架之可扩展：API网关</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二一）——分布式框架之可扩展：API网关</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将介绍微服务架构中的另一个非常重要的组件——API网关。网关在分布式系统中实在太重要了，可以提供动态路由、灰度发布、授权认证、性能监控、限流熔断等功能：</p>
+<center><br/> <img src="./img/20200620165932549.png" style="zoom:100%"><br/></img></center>
+<p>目前开源界有很多可供选择的API网关，云原生软件基金会（CNCF）的全景图就是一个很好的参考：</p>
+<center><br/> <img src="./img/20200620165950970.png" style="zoom:100%"/><br/></center>
+<p>本章，我会先讲解一个API网关应当具备哪些核心组件，并分析如果我们要自己实现这样一个API网关，系统设计和架构的思路应当是怎样的，然后对几种常见的开源API网关框架进行介绍。最后，我会以Spring Cloud Zuul为例，介绍Zuul的基本使用。</p>
+<h2 id="-">一、核心组件</h2>
+<p>一个API网关，一般至少需要具备如下核心组件：</p>
+<ul>
+<li><strong>路由：</strong>定义一些规则来匹配客户端的请求，根据匹配的结果加载、执行相应的插件，并把请求转发到指定的上游。路由匹配规则可以由 host、uri、请求头等组成，比如Nginx 中的 location，就是路由的一种实现；</li>
+<li><strong>插件：</strong>提供身份认证、限流限速、IP 黑白名单、Prometheus、Zipkin 等功能，插件之间不能互相影响，应该支持插件的热加载；</li>
+<li><strong>schema：</strong>对 API 的报文格式做校验，比如数据类型、字段内容、可空等，由schema来做统一、独立的定义和检查；</li>
+<li><strong>存储：</strong>存放用户的各种配置，并在有变更时负责推送到所有的API网关节点。</li>
+</ul>
+<p>在这些核心组件之上，我们还需要抽象出几个 API 网关的常用概念，它们在不同的 API 网关之间都是通用的。</p>
+<h3 id="1-1-route">1.1 Route</h3>
+<p>路由（Route）一般会包含三部分内容：即匹配的条件、绑定的插件和上游，如下图：</p>
+<center><br/> <img src="./img/20200620170005894.png" style="zoom:35%"/><br/></center>
+<p>在 API 和上游很多的情况下，会有很多重复的配置。这时候，我们一般需要 Service 和 Upstream 这两个概念来做一层抽象。</p>
+<h3 id="1-2-service">1.2 Service</h3>
+<p>Service是某类 API 的抽象，也可以理解为一组 Route 的抽象，它通常与上游服务是一一对应的，而 Route 与 Service 之间通常是 N:1 的关系：</p>
+<center><br/> <img src="./img/20200620170020757.png" style="zoom:45%"/><br/></center>
+<p>通过 Service 的这层抽象，我们就可以把重复的插件和上游剥离出来。这样，在插件和上游发生变更的时候，我们只需要修改 Service 就可以了，而不用去修改多个 Route 上绑定的数据。</p>
+<h3 id="1-3-upstream">1.3 Upstream</h3>
+<p>如果两个 Route 中的上游是一样的，但是绑定的插件各自不同，那么我们就可以把上游单独抽象出来，如下图所示：</p>
+<center><br/> <img src="./img/20200620170036873.png" style="zoom:35%"/><br/></center>
+<p>这样，在上游节点发生变更时，Route 是完全无感知的，它们都在 Upstream 内部进行了处理。其实，从这三个主要概念的衍生过程中，我们也可以看到，这几个抽象都基于用户的实际场景，而不是生造出来的。自然，它们适用于所有的 API 网关，和具体的技术方案无关。</p>
+<hr/>
+<p>当微服务 API 网关的这些关键组件都确定了之后，用户请求的处理流程，也就随之尘埃落定了。下面这张图可以表示这整个流程：</p>
+<center><br/> <img src="./img/20200620170052019.png" style="zoom:35%"/><br/></center>
+<p>从这个图中我们可以看出：</p>
+<ol>
+<li>当一个用户请求进入 API 网关时，首先，会根据请求的方法、uri、host、请求头等条件，去路由规则中进行匹配，如果命中了某条路由规则，就会从 etcd 中获取对应的插件列表；</li>
+<li>然后，和本地开启的插件列表进行交集，得到最终可以运行的插件列表；</li>
+<li>再接着，根据插件的优先级，逐个运行插件；</li>
+<li>最后，根据上游的健康检查和负载均衡算法，把这个请求发送给上游。</li>
+</ol>
+<p>当架构设计完成后，我们就可以去编写具体的代码了。</p>
+<blockquote>
+<p>上图其实是基于OpenResty实现一个API网关的基本思路，关于源码实现，读者可以参考温铭的<a href="https://time.geekbang.org/column/intro/186">《OpenResty从入门到实战》</a>中的内容，也可以直接从GitHub寻找基于APISIX框架的网关源码进行阅读并扩展其功能。</p>
+</blockquote>
+<h2 id="-">二、技术选型</h2>
+<p>介绍完了一个API网关应该具备的基本功能及核心组件，我们就来看看目前开源界由哪些产品我们供我们使用。</p>
+<h3 id="2-1-openresty">2.1 OpenResty</h3>
+<p>OpenResty 是一个兼具开发效率和性能的服务端开发平台，虽然它基于 NGINX 实现，但其适用范围，早已远远超出反向代理和负载均衡。它的核心是基于 NGINX 的一个 C 模块（lua-nginx-module），该模块将 LuaJIT 嵌入到 NGINX 服务器中，并对外提供一套完整的 Lua API，透明地支持非阻塞 I/O，提供了轻量级线程、定时器等高级抽象。</p>
+<p>我们可以基于OpenResty开发自己的API网关，优点是抗并发的能力很强，少数几台机器部署一下，就可以抗很高的并发。缺点是需要精通Lua，而且OpenResty的很多API使用上都有性能上的坑，各类<code>lua-resty-*</code>包也都零零散散，缺乏统一的规范和整合，所以要想使用好门槛是比较高的，否则生产上很容易引发性能问题和莫名其妙的异常。</p>
+<h3 id="2-2-kong">2.2 Kong</h3>
+<p>Kong 是由 Mashape 开发的并于2015年开源的一款API 网关，它是基于OpenResty（Nginx + Lua模块）和 Apache Cassandra/PostgreSQL 构建的，能提供易于使用的RESTful API来操作和配置API管理系统。Kong 可以水平扩展多个 Kong Server，通过前置的负载均衡配置把请求均匀地分发到各个Server，来应对大批量的网络请求。</p>
+<p>一句话，Kong可以看出是基于OpenResty 的一个开源API网关框架。</p>
+<h3 id="2-3-apisix">2.3 APISIX</h3>
+<p>与Kong类似，也是是基于OpenResty 的一个开源API网关框架，但是它是基于etcd 来 做配置管理，相对于Kong 来说，更加轻量级。</p>
+<h3 id="2-4-envoy">2.4 Envoy</h3>
+<p>Envoy 最初是在Lyft上构建的一种高性能C ++分布式代理服务，可以作为大型微服务“Service Mesh”架构的通信总线。</p>
+<p>Envoy 本身可以做反向代理和负载均衡，也就是说它可以完全替换掉NGINX。Envoy具备一个API网关的所有功能，目前Envoy的社区活跃度也非常高，我们可以基于Envoy来构建自己的API网关。</p>
+<p>缺点是Envoy的中文文档目前还很少。</p>
+<h3 id="2-5-zuul">2.5 Zuul</h3>
+<p>Netflix开源的API网关，基于Java开发，功能比较简单，灰度发布、限流、动态路由之类的功能基本都需要自己做二次开发。另外，Zuul的并发能力不强，还要基于Tomcat来部署，好处是基于Java语言开发，可以直接把控源码，方便做二次开发。</p>
+<h3 id="2-6-spring-cloud-gateway">2.6 Spring Cloud Gateway</h3>
+<p>Spring Cloud的一个全新的API网关项目，目的是为了替换掉Zuul。优点是Java源码，背靠Spring全家桶，缺点和Zuul差不多，抗不了超高并发，需要自己做定制。</p>
+<h3 id="2-7-">2.7 自研网关</h3>
+<p>目前很多大公司基本都是自研API网关，有的直接OpenResty，有的基于Netty+Servlet来实现网关的核心功能。</p>
+<h2 id="-zuul-">三、Zuul网关：动态路由</h2>
+<p>在<a href="https://www.tpvlog.com/article/190">分布式框架之可扩展：Spring Cloud</a>一章中，我通过一个简单的电商示例介绍过Zuul网关的基本使用，当时是直接在yml中写死了路由配置：</p>
+<pre><code class="lang-YML">server:
+  port: 9000
+
+spring:
+  application:
+    name: zuul-gateway
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka/
+
+# 所有访问/order/**这个URI的请求，全部转发给order-service服务处理
+zuul:
+  retryable: true
+  routes:
+    order-service:
+      path: /order/**
+</code></pre>
+<p>如果我们要新增服务提供方，难道每次都要重新修改网关配置，然后重启网关？显然不现实，所以一般都要针对网关做<strong><em>动态路由</em></strong>。</p>
+<p>最常见的实现动态路由的方式是基于数据库（也可用Apollo配置中心、Redis、ZooKeeper等保存路由配置信息），本节我以Zuul为示例介绍API网关的动态路由功能。</p>
+<h3 id="3-1-">3.1 路由表</h3>
+<p>首先创建一张路由配置表<code>gateway_api_route</code>：</p>
+<pre><code class="lang-SQL">CREATE TABLE `gateway_api_route` (
+   `id` varchar(50) NOT NULL COMMMENT '自增主键',
+   `path` varchar(255) NOT NULL COMMMENT '请求URI',
+   `service_id` varchar(50) DEFAULT NULL COMMMENT '服务ID，唯一',
+   `url` varchar(255) DEFAULT NULL COMMMENT '',
+   `retryable` tinyint(1) DEFAULT NULL COMMMENT '是否允许重试：0-允许,1-不允许',
+   `enabled` tinyint(1) NOT NULL COMMMENT '是否开启路由：0-关闭，1-开启',
+   `strip_prefix` int(11) DEFAULT NULL COMMMENT '是否去除前缀路径：0-否，1-是',
+   `api_name` varchar(255) DEFAULT NULL COMMMENT '',
+   PRIMARY KEY (`id`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8
+</code></pre>
+<p><strong>数据示例</strong><br/><code>INSERT INTO gateway_api_route (id, path, service_id ,retryable, enabled, strip_prefix) VALUES ('1', '/order/**', 'order-service',0,1, NULL);</code></p>
+<blockquote>
+<p>对于路由表的数据可以进行缓存，然后前端提供页面进行增删改查，以及缓存手动失效处理。</p>
+</blockquote>
+<h3 id="3-2-">3.2 动态路由实现</h3>
+<p>首先，我们需要对Zuul网关应用的<code>application.yml</code>配置进行改写，去掉写死的路由配置：</p>
+<pre><code class="lang-YML">server:
+  port: 9000
+
+spring:
+  application:
+    name: zuul-gateway
+  datasource:
+    url: jdbc:mysql://localhost:3306/test?autoReconnect=true&amp;useUnicode=true&amp;characterEncoding=utf-8
+    username: root
+    password: root
+    driver-class-name: com.mysql.jdbc.Driver
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka/
+    registryFetchIntervalSeconds: 3
+    leaseRenewalIntervalInSeconds: 3
+
+zuul:
+  retryable: true
+</code></pre>
+<p>然后，创建一个动态路由配置类：</p>
+<pre><code class="lang-java">@Configuration
+public class DynamicRouteConfiguration {
+
+    @Autowired
+    private ZuulProperties zuulProperties;
+    @Autowired
+    private ServerProperties server;
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Bean
+    public DynamicRouteLocator routeLocator() {
+        DynamicRouteLocator routeLocator = new DynamicRouteLocator(
+                this.server.getServletPrefix(), this.zuulProperties);
+        routeLocator.setJdbcTemplate(jdbcTemplate);
+        return routeLocator;
+    }
+
+}
+</code></pre>
+<p>DynamicRouteLocator是我们自己实现的动态路由逻辑：</p>
+<pre><code class="lang-JAVA">/**
+ * 动态路由实现类
+ */
+public class DynamicRouteLocator extends SimpleRouteLocator implements RefreshableRouteLocator {
+
+    private JdbcTemplate jdbcTemplate;
+    private ZuulProperties properties;
+
+    public void setJdbcTemplate(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    public DynamicRouteLocator(String servletPath, ZuulProperties properties) {
+        super(servletPath, properties);
+        this.properties = properties;
+    }
+
+    /**
+     * Spring容器接收到RoutesRefreshedEvent事件后触发
+     */
+    @Override
+    public void refresh() {
+        // 内部会调用locateRoutes()方法
+        doRefresh();
+    }
+
+    /**
+     * Zuul网关启动后会调用该方法
+     */
+    @Override
+    protected Map&lt;String, ZuulProperties.ZuulRoute&gt; locateRoutes() {
+        LinkedHashMap&lt;String, ZuulProperties.ZuulRoute&gt; routesMap = new LinkedHashMap&lt;&gt;();
+        // 加载application.yml中的路由表
+        routesMap.putAll(super.locateRoutes());
+        // 加载db中的路由表
+        routesMap.putAll(locateRoutesFromDB());
+
+        // 统一处理路由path的格式
+        LinkedHashMap&lt;String, ZuulProperties.ZuulRoute&gt; values = new LinkedHashMap&lt;&gt;();
+        for (Map.Entry&lt;String, ZuulProperties.ZuulRoute&gt; entry : routesMap.entrySet()) {
+            String path = entry.getKey();
+            if (!path.startsWith("/")) {
+                path = "/" + path;
+            }
+            if (StringUtils.hasText(this.properties.getPrefix())) {
+                path = this.properties.getPrefix() + path;
+                if (!path.startsWith("/")) {
+                    path = "/" + path;
+                }
+            }
+            values.put(path, entry.getValue());
+        }
+
+        System.out.println("路由表：" + values); 
+
+        return values;
+    }
+
+    /**
+      * 从数据库查询路由信息，并转换成&lt;K,V&gt; = &lt;服务URL,ZuulRoute&gt;
+      */
+    private Map&lt;String, ZuulProperties.ZuulRoute&gt; locateRoutesFromDB() {
+        Map&lt;String, ZuulProperties.ZuulRoute&gt; routes = new LinkedHashMap&lt;&gt;();
+        // 仅做示例，生产用Mybatis
+        List&lt;GatewayApiRoute&gt; results = jdbcTemplate.query(
+                "select * from gateway_api_route where enabled = true ", 
+                new BeanPropertyRowMapper&lt;&gt;(GatewayApiRoute.class));
+
+        for (GatewayApiRoute result : results) {
+            if (StringUtils.isEmpty(result.getPath()) ) {
+                continue;
+            }
+            if (StringUtils.isEmpty(result.getServiceId()) &amp;&amp; StringUtils.isEmpty(result.getUrl())) {
+                continue;
+            }
+            ZuulProperties.ZuulRoute zuulRoute = new ZuulProperties.ZuulRoute();
+            try {
+                BeanUtils.copyProperties(result, zuulRoute);
+            } catch (Exception e) { 
+                e.printStackTrace();
+            }
+            routes.put(zuulRoute.getPath(), zuulRoute);
+        }
+        return routes;
+    }
+}
+
+/**
+ * 数据库Bean实体类，对应表gateway_api_route
+ */
+public class GatewayApiRoute {
+
+    private String id;
+    private String path;
+    private String serviceId;
+    private String url;
+    private boolean stripPrefix = true;
+    private Boolean retryable;
+    private Boolean enabled;
+
+    public String getId() {
+        return id;
+    }
+    public void setId(String id) {
+        this.id = id;
+    }
+    public String getPath() {
+        return path;
+    }
+    public void setPath(String path) {
+        this.path = path;
+    }
+    public String getServiceId() {
+        return serviceId;
+    }
+    public void setServiceId(String serviceId) {
+        this.serviceId = serviceId;
+    }
+    public String getUrl() {
+        return url;
+    }
+    public void setUrl(String url) {
+        this.url = url;
+    }
+    public boolean isStripPrefix() {
+        return stripPrefix;
+    }
+    public void setStripPrefix(boolean stripPrefix) {
+        this.stripPrefix = stripPrefix;
+    }
+    public Boolean getRetryable() {
+        return retryable;
+    }
+    public void setRetryable(Boolean retryable) {
+        this.retryable = retryable;
+    }
+    public Boolean getEnabled() {
+        return enabled;
+    }
+    public void setEnabled(Boolean enabled) {
+        this.enabled = enabled;
+    }
+
+}
+</code></pre>
+<p>最后，我们需要一个定时任务，每隔5分钟发布一个更新事件，让Zuul从数据库路由表加载路由信息到缓存中。</p>
+<pre><code class="lang-java">/**
+ * 定时任务，每隔5s触发一次RoutesRefreshedEvent事件
+ */
+@Component
+@Configuration      
+@EnableScheduling   
+public class RefreshRouteTask {
+
+    @Autowired
+    private ApplicationEventPublisher publisher;
+    @Autowired
+    private RouteLocator routeLocator;
+
+    @Scheduled(fixedRate = 5000) 
+    private void refreshRoute() {
+        System.out.println("定时刷新路由表");  
+        RoutesRefreshedEvent routesRefreshedEvent = new RoutesRefreshedEvent(routeLocator);
+        publisher.publishEvent(routesRefreshedEvent);
+    }
+
+}
+</code></pre>
+<h2 id="-zuul-">四、Zuul网关：灰度发布</h2>
+<p>灰度发布（又名金丝雀发布），是API网关的一项重要功能，主要是按照一定策略选取部分用户，让他们先行体验新版本的应用，通过收集这部分用户对新版本应用的反馈（如：微博、微信公众号留言或者产品数据指标统计、用户行为的数据埋点），以及对新版本功能、性能、稳定性等指标进行评论，进而决定继续放大新版本投放范围直至全量升级或回滚至老版本。</p>
+<p>本节我继续以Zuul为例，介绍一种实现灰度发布的方式。</p>
+<h3 id="4-1-">4.1 灰度配置表</h3>
+<p>首先，我们创建一张灰度配置表<code>gray_release_config</code>：</p>
+<pre><code class="lang-SQL">CREATE TABLE `gray_release_config` (
+   `id` int(11) NOT NULL AUTO_INCREMENT,
+   `service_id` varchar(255) DEFAULT NULL COMMMENT '服务ID，唯一',
+   `path` varchar(255) DEFAULT NULL COMMMENT '服务URI',
+   `enable_gray_release` int(11) DEFAULT NULL COMMMENT '是否启用：0-否，1-是',
+   PRIMARY KEY (`id`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8
+</code></pre>
+<p><strong>数据示例</strong><br/><code>INSERT INTO gray_release_config(service_id,path,enable_gray_release) VALUES('order-service', '/order/**', 1)</code></p>
+<h3 id="4-2-">4.2 灰度发布实现</h3>
+<p>首先，创建一个类，继承ZuulFilter，然后在shouldFilter方法中自定义路由规则：</p>
+<pre><code class="lang-JAVA">@Configuration
+public class GrayReleaseFilter extends ZuulFilter {
+
+    @Autowired
+    private GrayReleaseConfigManager grayReleaseConfigManager;
+
+    @Override
+    public int filterOrder() {
+        return PRE_DECORATION_FILTER_ORDER - 1;
+    }
+
+    @Override
+    public String filterType() {
+        return PRE_TYPE;
+    }
+
+    /**
+     * 所有web请求都会被Zuul拦截，并经过该方法
+     */
+    @Override
+    public boolean shouldFilter() {
+        RequestContext ctx = RequestContext.getCurrentContext();
+        HttpServletRequest request = ctx.getRequest();
+
+        // requestURI类似http://localhost:9000/order/order?xxxx
+        String requestURI = request.getRequestURI();
+
+        //  获取灰度配置
+        Map&lt;String, GrayReleaseConfig&gt; grayReleaseConfigs = 
+                grayReleaseConfigManager.getGrayReleaseConfigs();
+        for(String path : grayReleaseConfigs.keySet()) {
+            // 如果请求路径命中
+            if(requestURI.contains(path)) {
+                GrayReleaseConfig grayReleaseConfig = grayReleaseConfigs.get(path);
+                // 开启了灰度
+                if(grayReleaseConfig.getEnableGrayRelease() == 1) {
+                    System.out.println("启用灰度发布功能");  
+                    // 返回true表示将执行该Filter的run()方法
+                    return true;
+                }
+            }
+        }
+
+        System.out.println("不启用灰度发布功能");   
+
+        return false;
+    }
+
+    /**
+     * 这里实现灰度发布的逻辑
+     */
+    @Override
+    public Object run() {
+
+        // 生成一个0-99的随机数
+        Random random = new Random();
+        int seed = random.nextInt() * 100;
+
+        if (seed == 50) {
+            // 1%的流量转发给version==new的后台服务
+            RibbonFilterContextHolder.getCurrentContext().add("version", "new");
+        }  else {
+            // 转发给version==current的后台服务
+            RibbonFilterContextHolder.getCurrentContext().add("version", "current");
+        }
+
+        return null;
+    }
+}
+
+/**
+ * 数据库Bean实体类，对应表gray_release_config
+ */
+public class GrayReleaseConfig {
+    private int id;
+    private String serviceId;
+    private String path;
+    private int enableGrayRelease;
+
+    public int getId() {
+        return id;
+    }
+    public void setId(int id) {
+        this.id = id;
+    }
+    public String getServiceId() {
+        return serviceId;
+    }
+    public void setServiceId(String serviceId) {
+        this.serviceId = serviceId;
+    }
+    public String getPath() {
+        return path;
+    }
+    public void setPath(String path) {
+        this.path = path;
+    }
+    public int getEnableGrayRelease() {
+        return enableGrayRelease;
+    }
+    public void setEnableGrayRelease(int enableGrayRelease) {
+        this.enableGrayRelease = enableGrayRelease;
+    }
+
+}
+</code></pre>
+<blockquote>
+<p>每个服务的<code>yml.application</code>配置中有一个<code>eureka.instance.metadata-map</code>参数，该参数的值是一个Map。上述示例中key为version，我们以此来区分新老服务。此外，上述run()逻辑将1%流量转发给新服务处理，我们也可以根据请求中特定参数、源IP等信息进行路由处理。</p>
+</blockquote>
+<p>最后，我们需要一个定时任务，每隔1s从数据库查询灰度发布配置信息，并更新到内部的HashMap中：</p>
+<pre><code class="lang-JAVA">/**
+ * 定时任务，每隔1s从数据库查询灰度发布配置信息，并更新到内部的HashMap中
+ */
+@Component
+@Configuration      
+@EnableScheduling 
+public class GrayReleaseConfigManager {
+
+    private Map&lt;String, GrayReleaseConfig&gt; grayReleaseConfigs = 
+            new ConcurrentHashMap&lt;String, GrayReleaseConfig&gt;();
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Scheduled(fixedRate = 1000) 
+    private void refreshRoute() {
+        List&lt;GrayReleaseConfig&gt; results = jdbcTemplate.query(
+                "select * from gray_release_config", 
+                new BeanPropertyRowMapper&lt;&gt;(GrayReleaseConfig.class));
+
+        for(GrayReleaseConfig grayReleaseConfig : results) {
+            grayReleaseConfigs.put(grayReleaseConfig.getPath(), grayReleaseConfig);
+        }
+    }
+
+    public Map&lt;String, GrayReleaseConfig&gt; getGrayReleaseConfigs() {
+        return grayReleaseConfigs;
+    }
+
+}
+</code></pre>
+<h2 id="-">五、总结</h2>
+<p>本章，我介绍了API网关的作用和动态路由、灰度发布的基本原理。API网关一般是整个分布式系统的门户，所有流量首先需要经过网关处理，所以API网关的性能优化是至关重要的。</p>
+<p>以笔者曾经做过的一个银行快捷支付系统为例，其架构简化后，主要分为网关模块、联机模块、批量模块，所有支付请求首先要经过F5、Nginx/LVS进行负载均衡，然后到达API网关，由API网关进行服务路由、鉴权、日志记录等处理。所以，生产环境一般都需要根据预判的业务量，提前对整个系统进行压测。</p>
+<p>一般来说，8核16G的机器，部署Zuul作为网关的话，单台可以抗1500QPS。基本上10~20台机器就可以支撑2W左右的总QPS。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,165 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十三）——ngram搜索推荐</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十三）——ngram搜索推荐</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我们讲近似匹配时，提到如果要实现搜索推荐功能，最好不要用<code>match_phrase_prefix</code>进行实时的前缀匹配，因为这样性能很差。本章，我们就来介绍下ngram分词机制，通过它，我们可以在建立索引阶段就完成“搜索推荐”。</p>
+<h2 id="-ngram-">一、ngram机制</h2>
+<p>什么是ngram？<em>N-Gram</em>是大词汇连续语音识别中常用的一种语言模型。</p>
+<p>举个例子，对于单词“quick”，我们可以对其做如下拆分，那么，“quick”这个term就被拆分成了5种长度下的ngram，每种长度下的拆分项都是一个ngram：</p>
+<pre><code class="lang-JAVA"># ngram.length=1
+q u i c k
+# ngram.length=2
+qu ui ic ck
+# ngram.length=3
+qui uic ick
+# ngram.length=4
+quic uick
+# ngram.length=5
+quick
+</code></pre>
+<p>Elasticsearch使用了一种“edge ngram”的分词方法，比如我们有两个下面这样的document：</p>
+<pre><code class="lang-JAVA"># doc1
+hello world
+# doc2
+hello what
+</code></pre>
+<p>Elasticsearch会对文本中的每个term，按照edge ngram机制建立倒排索引：</p>
+<table>
+<thead>
+<tr>
+<th>term</th>
+<th>doc1</th>
+<th>doc2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>h</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>he</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>hel</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>hell</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>hello</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>w</td>
+<td>Y</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>wo</td>
+<td>Y</td>
+<td>N</td>
+</tr>
+<tr>
+<td>wor</td>
+<td>Y</td>
+<td>N</td>
+</tr>
+<tr>
+<td>worl</td>
+<td>Y</td>
+<td>N</td>
+</tr>
+<tr>
+<td>world</td>
+<td>Y</td>
+<td>N</td>
+</tr>
+<tr>
+<td>wh</td>
+<td>N</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>wha</td>
+<td>N</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>what</td>
+<td>N</td>
+<td>Y</td>
+</tr>
+</tbody>
+</table>
+<p>当我们检索“hello w”时，首先会对“hello”这个term检索，发现doc1和doc2都有，然后对“w”这个term检索，发现doc1和doc2也都有，所以doc1和duc2都会被返回，这样就实现了搜索推荐。</p>
+<p>由于检索时，完全利用到了倒排索引，并没有去做前缀匹配，所以ngram机制实现的搜素推荐效率非常高。</p>
+<h2 id="-">二、使用示例</h2>
+<p>接着，我们来看看如何使用ngram进行分词。首先，建立索引，min_gram和max_gram用于控制ngram的长度：</p>
+<pre><code class="lang-JAVA">PUT /my_index
+{
+    "settings": {
+        "analysis": {
+            "filter": {
+                "autocomplete_filter": { 
+                    "type":     "edge_ngram",
+                    "min_gram": 1,
+                    "max_gram": 20
+                }
+            },
+            "analyzer": {
+                "autocomplete": {
+                    "type":      "custom",
+                    "tokenizer": "standard",
+                    "filter": [
+                        "lowercase",
+                        "autocomplete_filter" 
+                    ]
+                }
+            }
+        }
+    }
+}
+</code></pre>
+<p>我们可以通过以下命令查看下分词结果：</p>
+<pre><code class="lang-JAVA">GET /my_index/_analyze
+{
+  "analyzer": "autocomplete",
+  "text": "quick brown"
+}
+</code></pre>
+<p>最后，只要对那些想要实现搜索推荐的字段，修改其字段使用的分词器就完成了：</p>
+<pre><code class="lang-JAVA">PUT /my_index/_mapping
+{
+  "properties": {
+      "title": {
+          "type":     "string",
+          "analyzer": "autocomplete",
+          "search_analyzer": "standard"
+      }
+  }
+}
+</code></pre>
+<blockquote>
+<p>上面<code>analyzer</code>的意思是对title字段的内容建立索引时，使用autocomplete这个分词器，也就是ngram分词；<code>search_analyzer</code>的意思是，对于我们的检索词，比如“hello w”，还是用标准的standard分词器拆分。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解了如何使用Elasticsearch实现index-time搜索推荐。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

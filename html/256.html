@@ -1,0 +1,251 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（十八）——服务注册发现：自我保护机制</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（十八）——服务注册发现：自我保护机制</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>当Eureka-Server节点在短时间内丢失过多客户端时（可能发生了网络分区故障），那么这个节点就会进入<strong>自我保护模式</strong>。一旦进入该模式，Eureka-Server就会保护注册表中的信息，不再剔除注册表中的应用实例，也不接受新实例的注册。</p>
+<p>那么，Eureka-Server是<em>如何判断“短时间内丢失过多客户端”</em>呢？这里涉及两个核心概念：</p>
+<ul>
+<li><code>renewsLastMin</code> ：上一分钟所有实例的实际心跳次数，Eureka-Server会在内存中进行统计；</li>
+<li><code>expectedNumberOfRenewsPerMin</code> ：每分钟所有实例的期望最小心跳次数，通过总实例数乘以一个百分比（通过参数<code>eureka.renewalPercentThreshold</code>配置，默认0.85）计算得到。</li>
+</ul>
+<p><strong>当renewsLastMin小于expectedNumberOfRenewsPerMin，就会触发自我保护机制</strong>。整个自我保护机制的流程可以用下面这张图表示：</p>
+<p><img alt="" src="./img/20210130221220465.png"/></p>
+<h2 id="-">一、触发条件</h2>
+<p>我们首先来看下触发Eurek-Server进入自我保护模式的条件。首先，我们已经知道，Eureka-Server端有个服务剔除任务<code>EvictionTask</code>，该任务每隔60秒会检测一次租约过期的实例，并将它们从注册表剔除（eviction）。</p>
+<h3 id="1-1-">1.1 心跳次数比较</h3>
+<p>EvictionTask任务运行时，最终调用<code>AbstractInstanceRegistry.evict()</code>去剔除过期实例，触发是否进入自我保护模式的判断就在这里：</p>
+<pre><code class="lang-JAVA">/**
+* AbstractInstanceRegistry.java
+*/
+
+// 期望的每分钟最小续租次数
+protected volatile int numberOfRenewsPerMinThreshold;
+
+// 期望的每分钟续租次数
+protected volatile int expectedNumberOfRenewsPerMin;
+
+public void evict(long additionalLeaseMs) {
+    logger.debug("Running the evict task");
+
+    // 如果触发自我保护机制，则直接返回，不再剔除过期实例
+    if (!isLeaseExpirationEnabled()) {
+        logger.debug("DS: lease expiration is currently disabled.");
+        return;
+    }
+
+    //...
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+* PeerAwareInstanceRegistryImpl.java
+*/
+
+public boolean isLeaseExpirationEnabled() {
+    // eureka.enableSelfPreservation配置为true，则表示开启自我保护模式这个功能，默认为true
+    if (!isSelfPreservationModeEnabled()) {
+        return true;
+    }
+    return numberOfRenewsPerMinThreshold &gt; 0 &amp;&amp; getNumOfRenewsInLastMin() &gt; numberOfRenewsPerMinThreshold;
+}
+</code></pre>
+<p>上述<code>PeerAwareInstanceRegistryImpl.isLeaseExpirationEnabled()</code>首先根据配置<code>eureka.enableSelfPreservation</code>判断有没开启自我保护模式功能（默认是开启的），没有开启直接返回。否则，进行如下判断：</p>
+<pre><code class="lang-JAVA">numberOfRenewsPerMinThreshold &gt; 0 &amp;&amp; getNumOfRenewsInLastMin() &gt; numberOfRenewsPerMinThreshold
+</code></pre>
+<p><code>numberOfRenewsPerMinThreshold</code>是什么？在哪里赋的值？实际上是在Eureka-Server启动时进行赋值的，Eureka-Server启动时会从集群其它Server节点拉取所有注册的应用实例数<code>registryCount</code>：</p>
+<pre><code class="lang-JAVA">/**
+* EurekaBootStrap.java
+*/
+
+// Copy registry from neighboring eureka node
+int registryCount = registry.syncUp();
+registry.openForTraffic(applicationInfoManager, registryCount);
+</code></pre>
+<p>接着，根据<code>registryCount</code>计算出<code>expectedNumberOfRenewsPerMin</code>和<code>numberOfRenewsPerMinThreshold</code>。</p>
+<p>registryCount就是所有注册的实例数目，正常情况下，每个实例默认1分钟发送2次心跳，那所有实例1分钟就发送<code>registryCount * 2 =  expectedNumberOfRenewsPerMin</code>次心跳。</p>
+<p>接着再乘以一个百分比<code>eureka.renewalPercentThreshold = 0.85</code>，就得到了<strong>期望的每分钟所有实例的最小心跳次数</strong><code>numberOfRenewsPerMinThreshold</code>：</p>
+<pre><code class="lang-JAVA">/**
+* PeerAwareInstanceRegistryImpl.java
+*/
+
+public void openForTraffic(ApplicationInfoManager applicationInfoManager, int count) {
+    this.expectedNumberOfRenewsPerMin = count * 2;
+    // 期望的一分钟内的所有实例的最小心跳次数 expectedNumberOfRenewsPerMin * 0.85 
+    this.numberOfRenewsPerMinThreshold =
+        (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
+    logger.info("Got " + count + " instances from neighboring DS node");
+    logger.info("Renew threshold is: " + numberOfRenewsPerMinThreshold);
+    this.startupTime = System.currentTimeMillis();
+    if (count &gt; 0) {
+        this.peerInstancesTransferEmptyOnStartup = false;
+    }
+    DataCenterInfo.Name selfName = applicationInfoManager.getInfo().getDataCenterInfo().getName();
+    boolean isAws = Name.Amazon == selfName;
+    if (isAws &amp;&amp; serverConfig.shouldPrimeAwsReplicaConnections()) {
+        logger.info("Priming AWS connections for all replicas..");
+        primeAwsReplicas(applicationInfoManager);
+    }
+    logger.info("Changing status to UP");
+    applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
+    super.postInit();
+}
+</code></pre>
+<p>事实上，这里硬编码了每个应用实例每分钟发送2次心跳（默认30s一次心跳），这是有问题的，正确的计算公式应该是：</p>
+<pre><code class="lang-JAVA">期望的每分钟所有实例的最小心跳次数 = 服务实例综述 * （60 / 心跳时间间隔） * 0.85
+</code></pre>
+<h3 id="1-2-">1.2 统计实际心跳次数</h3>
+<p>接着，我们来看下<code>renewsLastMin</code>的计算：</p>
+<pre><code class="lang-JAVA">/**
+* PeerAwareInstanceRegistryImpl.java
+*/
+
+public long getNumOfRenewsInLastMin() {
+    return renewsLastMin.getCount();
+}
+</code></pre>
+<p>renewsLastMin是一个<code>MeasuredRate</code>对象，用来统计并存储每分钟实际的心跳此次数，里面有一个定时任务，每分钟会将统计数据清零：</p>
+<pre><code class="lang-JAVA">public class MeasuredRate {
+    private static final Logger logger = LoggerFactory.getLogger(MeasuredRate.class);
+    // 上一分钟的心跳次数
+    private final AtomicLong lastBucket = new AtomicLong(0);
+    // 当前分钟内的心跳次数
+    private final AtomicLong currentBucket = new AtomicLong(0);
+
+    private final long sampleInterval;
+    private final Timer timer;
+
+    private volatile boolean isActive;
+
+    public MeasuredRate(long sampleInterval) {
+        this.sampleInterval = sampleInterval;
+        this.timer = new Timer("Eureka-MeasureRateTimer", true);
+        this.isActive = false;
+    }
+
+    public synchronized void start() {
+        if (!isActive) {
+            // 定时任务，每隔sampleInterval（60秒）执行一次
+            timer.schedule(new TimerTask() {
+                @Override
+                public void run() {
+                    try {
+                        // 清零重新计数.
+                        lastBucket.set(currentBucket.getAndSet(0));
+                    } catch (Throwable e) {
+                        logger.error("Cannot reset the Measured Rate", e);
+                    }
+                }
+            }, sampleInterval, sampleInterval);
+
+            isActive = true;
+        }
+    }
+    //...
+    public long getCount() {
+        return lastBucket.get();
+
+    public void increment() {
+        currentBucket.incrementAndGet();
+    }
+}
+</code></pre>
+<blockquote>
+<p>每当Eureka-Server接受到renew请求时，就会调用increment方法将currentBucket值加1。</p>
+</blockquote>
+<h2 id="-">二、期望最小心跳次数更新</h2>
+<p>接着，我们再来看下<code>expectedNumberOfRenewsPerMin</code>这个用于判断是否进入自我保护模式的重要字段还会在哪些场景下更新。</p>
+<h3 id="2-1-">2.1 定时更新</h3>
+<p>Eureka-Server 初始化时，会创建一个定时任务，默认每隔15分钟计算一下<code>expectedNumberOfRenewsPerMin</code> 。实现代码如下：</p>
+<pre><code class="lang-JAVA">/**
+* PeerAwareInstanceRegistryImpl.java
+*/
+
+private void scheduleRenewalThresholdUpdateTask() {
+   timer.schedule(new TimerTask() {
+                      @Override
+                      public void run() {
+                          updateRenewalThreshold();
+                      }
+                  }, serverConfig.getRenewalThresholdUpdateIntervalMs(),
+           serverConfig.getRenewalThresholdUpdateIntervalMs());
+}
+</code></pre>
+<p>可以配置<code>eureka.renewalThresholdUpdateIntervalMs</code>参数，设置上述定时任务的执行间隔，默认15 分钟。</p>
+<pre><code class="lang-JAVA">/**
+* AbstractInstanceRegistry.java
+*/
+
+private void updateRenewalThreshold() {
+   try {
+       // 计算应用实例数
+       Applications apps = eurekaClient.getApplications();
+       int count = 0;
+       for (Application app : apps.getRegisteredApplications()) {
+           for (InstanceInfo instance : app.getInstances()) {
+               if (this.isRegisterable(instance)) {
+                   ++count;
+               }
+           }
+       }
+       // 计算 expectedNumberOfRenewsPerMin 、 numberOfRenewsPerMinThreshold 参数
+       synchronized (lock) {
+           if ((count * 2) &gt; (serverConfig.getRenewalPercentThreshold() * numberOfRenewsPerMinThreshold)
+                   || (!this.isSelfPreservationModeEnabled())) {
+               this.expectedNumberOfRenewsPerMin = count * 2;
+               this.numberOfRenewsPerMinThreshold = (int) ((count * 2) * serverConfig.getRenewalPercentThreshold());
+           }
+       }
+       logger.info("Current renewal threshold is : {}", numberOfRenewsPerMinThreshold);
+   } catch (Throwable e) {
+       logger.error("Cannot update renewal threshold", e);
+   }
+}
+</code></pre>
+<h3 id="2-2-register-cancel-">2.2 register/cancel更新</h3>
+<p>当有应用实例注册时，会更新<code>expectedNumberOfRenewsPerMin</code>。实现代码如下：</p>
+<pre><code class="lang-JAVA">/**
+* AbstractInstanceRegistry.java
+*/
+
+public void register(InstanceInfo registrant, int leaseDuration, boolean isReplication) {
+
+    // ... 
+
+    synchronized (lock) {
+         if (this.expectedNumberOfRenewsPerMin &gt; 0) {
+             this.expectedNumberOfRenewsPerMin = this.expectedNumberOfRenewsPerMin + 2;
+             this.numberOfRenewsPerMinThreshold =
+                     (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
+         }
+     }
+     // ...
+}
+
+public boolean cancel(final String appName, final String id,
+                     final boolean isReplication) {
+   // ...
+
+   synchronized (lock) {
+        if (this.expectedNumberOfRenewsPerMin &gt; 0) {
+               this.expectedNumberOfRenewsPerMin = this.expectedNumberOfRenewsPerMin - 2;
+               this.numberOfRenewsPerMinThreshold = (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
+        }
+   }
+
+   // ... 
+}
+</code></pre>
+<p>可以看到，Eureka-Server每注册/下线一个应用实例时，就将期望的最小心跳次数<code>expectedNumberOfRenewsPerMin</code>加2或减2。当应用实例确实出现故障，需要剔除时，我没有找到更新<code>expectedNumberOfRenewsPerMin</code>的代码。</p>
+<p>所以说，Eureka的自我保护机制的这块代码，是有bug的，如果有应用实例是因为故障而下线的，结果<code>expectedNumberOfRenewsPerMin</code>并没有减少，而实际的服务实例确实是变少了，那可能导致Eureka-Server异常进入自我保护模式。这也是为什么<strong>生产环境不建议开启自我保护机制的原因</strong>。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解了Eureka的自我保护机制，Eureka进入自我保护模式的条件是上一分钟实际收到的心跳总数小于某个阈值，这个阈值是通过应用实例数乘以一个百分比得到的。</p>
+<p>Eureka在这个机制的代码实现上，存在很多问题，生产上不建议启用自我保护模式。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

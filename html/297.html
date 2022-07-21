@@ -1,0 +1,280 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（八）——Producer：Sender线程——ClientRequest请求缓存</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（八）——Producer：Sender线程——ClientRequest请求缓存</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，Sender线程检查完Broker状态，并对未建立连接的Broker初始化连接后，会将请求重新进行分类处理：</p>
+<pre><code class="lang-JAVA">// Sender.java
+
+// 1. 转换成 Map&lt;Integer, List&lt;RecordBatch&gt;&gt; 形式
+Map&lt;Integer, List&lt;RecordBatch&gt;&gt; batches = this.accumulator.drain(cluster, result.readyNodes,
+                                                                 this.maxRequestSize, now);
+//...
+
+// 2.转换成ClientRequest形式，并“发送”
+sendProduceRequests(batches, now);
+</code></pre>
+<p>可以看到，上述操作对请求做了两次转换处理：</p>
+<ol>
+<li>按照Broker ID维度，对RecordAccumulator缓冲区中的消息进行归类；</li>
+<li>将要发送给一个Broker Node的所有batch进行报文拼装，转换成一个ClientRequest对象，然后“发送出去”。</li>
+</ol>
+<p>本章，我就来分析上述的这两个过程。</p>
+<h2 id="-">一、请求转换</h2>
+<h3 id="1-1-broker-">1.1 Broker维度归类</h3>
+<p>首先，我们来看<code>RecordAccumulator.drain()</code>的整体流程。它的核心思路就是，<strong>对于那些已经就绪的Broker，把要往它发送的所有消息归到一起</strong>：</p>
+<ol>
+<li>遍历每个就绪Broker的所有Partition；</li>
+<li>对每个Partition，从RecordAccumulator缓冲区获取到Deque队首的batch，放入一个<code>List&lt;RecordBatch&gt;</code>中，表示待发送到当前Broker的所有Batch列表。</li>
+</ol>
+<pre><code class="lang-JAVA">// RecordAccumulator.java
+
+private final ConcurrentMap&lt;TopicPartition, Deque&lt;RecordBatch&gt;&gt; batches;
+
+public Map&lt;Integer, List&lt;RecordBatch&gt;&gt; drain(Cluster cluster, Set&lt;Node&gt; nodes, int maxSize, long now) {
+    if (nodes.isEmpty())
+        return Collections.emptyMap();
+
+    Map&lt;Integer, List&lt;RecordBatch&gt;&gt; batches = new HashMap&lt;&gt;();
+
+    // 遍历所有就绪的Broker 
+    for (Node node : nodes) {
+        int size = 0;
+        // 获取该Broker的所有分区
+        List&lt;PartitionInfo&gt; parts = cluster.partitionsForNode(node.id());
+        List&lt;RecordBatch&gt; ready = new ArrayList&lt;&gt;();
+        int start = drainIndex = drainIndex % parts.size();
+
+        // 遍历每一个分区
+        do {
+            PartitionInfo part = parts.get(drainIndex);
+            TopicPartition tp = new TopicPartition(part.topic(), part.partition());
+
+            if (!muted.contains(tp)) {    // 不存在未响应的请求
+                // 获取该分区缓存的RecordBatch
+                Deque&lt;RecordBatch&gt; deque = getDeque(new TopicPartition(part.topic(), part.partition()));
+                if (deque != null) {
+                    synchronized (deque) {
+                        // 拿出第一个RecordBatch
+                        RecordBatch first = deque.peekFirst();
+                        if (first != null) {
+                            // 是否属于重试batch，backoff=true表示是
+                            boolean backoff = first.attempts &gt; 0 &amp;&amp; first.lastAttemptMs + retryBackoffMs &gt; now;
+                            if (!backoff) {
+                                // 请求数据大小超过限制
+                                if (size + first.sizeInBytes() &gt; maxSize &amp;&amp; !ready.isEmpty()) {
+                                    break;
+                                } else {
+                                    RecordBatch batch = deque.pollFirst();
+                                    batch.close();
+                                    size += batch.sizeInBytes();
+                                    ready.add(batch);    // 加入到List
+                                    batch.drainedMs = now;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            this.drainIndex = (this.drainIndex + 1) % parts.size();
+        } while (start != drainIndex);
+        batches.put(node.id(), ready);
+    }
+    return batches;
+}
+
+// 获取缓存的batch
+private Deque&lt;RecordBatch&gt; getDeque(TopicPartition tp) {
+    return batches.get(tp);
+}
+</code></pre>
+<h3 id="1-2-clientrequest-">1.2 ClientRequest对象</h3>
+<p>再来看ClientRequest对象是如何封装的。由于发送出去的请求，需要符合Kafka的二进制协议数据格式，所以客户端需要将一个个RecordBatch转换成二进制字节数组，主要包含以下内容：</p>
+<ul>
+<li>请求头：比如api key、api version、acks、request timeout等信息；</li>
+<li>请求体：RecordBatch消息内容。</li>
+</ul>
+<pre><code class="lang-JAVA">// Sender.java
+
+private void sendProduceRequests(Map&lt;Integer, List&lt;RecordBatch&gt;&gt; collated, long now) {
+    // 遍历每一个broker node
+    for (Map.Entry&lt;Integer, List&lt;RecordBatch&gt;&gt; entry : collated.entrySet())
+        // 封装成ClientRequest对象，并“发送”
+        sendProduceRequest(now, entry.getKey(), acks, requestTimeout, entry.getValue());
+}
+
+private void sendProduceRequest(long now, int destination, short acks, int timeout, List&lt;RecordBatch&gt; batches) {
+    Map&lt;TopicPartition, MemoryRecords&gt; produceRecordsByPartition = new HashMap&lt;&gt;(batches.size());
+    final Map&lt;TopicPartition, RecordBatch&gt; recordsByPartition = new HashMap&lt;&gt;(batches.size());
+    // 1.遍历destination这个broker的所有batch，分类暂存
+    for (RecordBatch batch : batches) {
+        TopicPartition tp = batch.topicPartition;
+        produceRecordsByPartition.put(tp, batch.records());    // 将batch转换成MemoryRecords形式
+        recordsByPartition.put(tp, batch);                    // 这个Map保存原始batch信息
+    }
+
+    // 2.ProduceRequest.Builder用来构造ClientRequest
+    ProduceRequest.Builder requestBuilder =
+        new ProduceRequest.Builder(acks, timeout, produceRecordsByPartition);
+    RequestCompletionHandler callback = new RequestCompletionHandler() {
+        public void onComplete(ClientResponse response) {
+            handleProduceResponse(response, recordsByPartition, time.milliseconds());
+        }
+    };
+
+    // 3.创建ClientRequest对象
+    String nodeId = Integer.toString(destination);    // broker ID
+    ClientRequest clientRequest = client.newClientRequest(nodeId, requestBuilder, now, acks != 0, callback);
+
+    // 4.发送请求
+    client.send(clientRequest, now);
+    log.trace("Sent produce request to {}: {}", nodeId, requestBuilder);
+}
+</code></pre>
+<p>上述构造过程我就不赘述了，最关键的是要清楚<strong>往一个Broker发送的所有batch消息，会被封装成一个ClientRequest对象</strong>。</p>
+<h2 id="-">二、请求缓存</h2>
+<p>请求转换完成后，请求的发送其实是一个异步的过程，调用了<code>NetworkClient.send()</code>方法，核心是做了两个事情：</p>
+<ol>
+<li>将请求封装成Send对象，然后缓存到InFlightRequests中；</li>
+<li>通过NIO组件，监听<strong><em>OP_WRITE</em></strong>事件，后续会异步发送请求。</li>
+</ol>
+<h3 id="2-1-inflightrequests">2.1 InFlightRequests</h3>
+<p><code>NetworkClient.send()</code>方法内部就是对请求做一些处理，核心是最后的几行代码：</p>
+<pre><code class="lang-JAVA">// NetworkClient.java
+
+public void send(ClientRequest request, long now) {
+    doSend(request, false, now);
+}
+
+private void doSend(ClientRequest clientRequest, boolean isInternalRequest, long now) {
+    String nodeId = clientRequest.destination();
+    if (!isInternalRequest) {
+        // Broker连接状态校验
+        if (!canSendRequest(nodeId))
+            throw new IllegalStateException("Attempt to send a request to node " + nodeId + " which is not ready.");
+    }
+    // 1.构造请求
+    AbstractRequest request = null;
+    AbstractRequest.Builder&lt;?&gt; builder = clientRequest.requestBuilder();
+    try {
+        NodeApiVersions versionInfo = nodeApiVersions.get(nodeId);
+        if (versionInfo == null) {
+            if (discoverBrokerVersions &amp;&amp; log.isTraceEnabled())
+                log.trace("No version information found when sending message of type {} to node {}. " +
+                          "Assuming version {}.", clientRequest.apiKey(), nodeId, builder.version());
+        } else {
+            short version = versionInfo.usableVersion(clientRequest.apiKey());
+            builder.setVersion(version);
+        }
+        request = builder.build();
+    } catch (UnsupportedVersionException e) {
+        log.debug("Version mismatch when attempting to send {} to {}",
+                  clientRequest.toString(), clientRequest.destination(), e);
+        ClientResponse clientResponse = new ClientResponse(clientRequest.makeHeader(),
+                                                           clientRequest.callback(),
+                                                           clientRequest.destination(), now, now,
+                                                           false, e, null);
+        abortedSends.add(clientResponse);
+        return;
+    }
+    RequestHeader header = clientRequest.makeHeader();
+    if (log.isDebugEnabled()) {
+        int latestClientVersion = ProtoUtils.latestVersion(clientRequest.apiKey().id);
+        if (header.apiVersion() == latestClientVersion) {
+            log.trace("Sending {} to node {}.", request, nodeId);
+        } else {
+            log.debug("Using older server API v{} to send {} to node {}.",
+                      header.apiVersion(), request, nodeId);
+        }
+    }
+
+    // 2.构造一个Send请求对象
+    Send send = request.toSend(nodeId, header);
+
+    // 3.添加到InFlightRequests缓存
+    InFlightRequest inFlightRequest = new InFlightRequest(
+        header, clientRequest.createdTimeMs(), clientRequest.destination(),
+        clientRequest.callback(), clientRequest.expectResponse(), isInternalRequest, send, now);
+    this.inFlightRequests.add(inFlightRequest);
+
+    // 4.设置监听OP_WRITE事件
+    selector.send(inFlightRequest.send);
+}
+</code></pre>
+<p>可以看到，首先构造了Send请求对象，然后把请求对象封装成了一个<strong>InFlightRequest</strong>对象，最后添加到了InFlightRequests中。<strong>InFlightRequests</strong>内部就是保存了最近每个Broker连接当前还没有收到响应的请求：</p>
+<pre><code class="lang-JAVA">final class InFlightRequests {
+    private final int maxInFlightRequestsPerConnection;
+    private final Map&lt;String, Deque&lt;NetworkClient.InFlightRequest&gt;&gt; requests = new HashMap&lt;&gt;();
+
+    public void add(NetworkClient.InFlightRequest request) {
+        String destination = request.destination;    // Broker ID
+        Deque&lt;NetworkClient.InFlightRequest&gt; reqs = this.requests.get(destination);
+        if (reqs == null) {
+            reqs = new ArrayDeque&lt;&gt;();
+            this.requests.put(destination, reqs);
+        }
+        reqs.addFirst(request);
+    }
+}
+</code></pre>
+<p><strong>InFlightRequests</strong>默认最多保存5个未收到响应的请求，通过参数<code>max.in.flight.requests.per.connection</code>设置：</p>
+<pre><code class="lang-JAVA">// NetworkClient.java
+
+private final InFlightRequests inFlightRequests;
+
+private NetworkClient(MetadataUpdater metadataUpdater, Metadata metadata, Selectable selector,
+                      String clientId, int maxInFlightRequestsPerConnection, long reconnectBackoffMs,
+                      int socketSendBuffer, int socketReceiveBuffer, int requestTimeoutMs, Time time,
+                      boolean discoverBrokerVersions) {
+
+    // maxInFlightRequestsPerConnection就是参数`max.in.flight.requests.per.connection`值
+    this.inFlightRequests = new InFlightRequests(maxInFlightRequestsPerConnection);
+    //...
+}
+</code></pre>
+<h3 id="2-2-selector">2.2 Selector</h3>
+<p>最后，我们来看下<code>org.apache.kafka.common.network.Selector</code>的send方法：</p>
+<pre><code class="lang-java">// Selector.java 
+
+public void send(Send send) {
+    String connectionId = send.destination();    // Broker ID
+    if (closingChannels.containsKey(connectionId))
+        this.failedSends.add(connectionId);
+    else {
+        // 获取Broker对应的SocketChannel
+        KafkaChannel channel = channelOrFail(connectionId, false);
+        try {
+            // 设置监听OP_WRITE事件
+            channel.setSend(send);
+        } catch (CancelledKeyException e) {
+            this.failedSends.add(connectionId);
+            close(channel, false);
+        }
+    }
+}
+</code></pre>
+<p>可以看到，请求对象Send还在KafkaChannel中进行了一次缓存，应为Selector.send并不是真正发送请求，而是设置Channel监听<code>OP_WRITE</code>事件，那么后续Selector.poll调用时，如果监听到了事件，就会将Channel中缓存的请求发送出去：</p>
+<pre><code class="lang-JAVA">// KafkaChannel.java
+
+public void setSend(Send send) {
+    if (this.send != null)
+        throw new IllegalStateException("Attempt to begin a send operation with prior send operation still in progress.");
+    this.send = send;
+    // 监听OP_WRITE事件
+    this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我对Sender线程Loop执行过程中创建ClientReqeust对象并“发送”的底层原理进行了讲解，核心流程可以用下面这张图总结：</p>
+<center><br/> <img src="./img/20210531220005570.png" style="zoom:60%"><br/></img></center>
+<p>可以看到，Kafka客户端的所有网络通信请求都是通过NIO进行的，<code>Sender.sendProduceRequests()</code>并不是真正发送网络请求，而是封装请求对象并缓存到InFlightRequests，同时将请求提交到发送连接对应的KafkaChannel中。</p>
+<p>Selector会监听各个Channel的OP_WRITE事件，那么当后续Sender线程执行<code>Selector.poll()</code>方法时，Selector如果轮询到了OP_WRITE事件的发生，就会将Channel中的请求发送给Broker。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

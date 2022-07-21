@@ -1,0 +1,409 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（十九）——分布式框架之可扩展：Spring Cloud</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（十九）——分布式框架之可扩展：Spring Cloud</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我曾在分布式理论篇——<a href="https://www.tpvlog.com/article/74">服务化拆分</a>中介绍过微服务，Spring Cloud就是微服务架构的集大成者，将一系列优秀的组件进行了整合。通过Spring Cloud，我们可以快速构建一套基于微服务架构的分布式系统。</p>
+<p>Spring Cloud的组件相当繁多，其提供的核心组件如下：</p>
+<ul>
+<li>Eureka：服务注册中心</li>
+<li>Feign：服务调用</li>
+<li>Ribbon：负载均衡</li>
+<li>Zuul / Spring Cloud Gatway：网关</li>
+</ul>
+<center><br/> <img src="./img/20200326210703085.png" style="zoom:65%"><br/></img></center>
+<p>纯粹的讲Spring Cloud的各个组件非常枯燥，对于很多初学者童鞋也不太友好。所以，本章我将引入一个电商系统作为案例背景，讲解Spring Cloud的各个核心组件的基本使用。</p>
+<blockquote>
+<p>读者可以参考Spring Cloud的官网资料： <a href="https://spring.io/projects/spring-cloud">https://spring.io/projects/spring-cloud</a> ，对其进行更多的了解。我如果后面有时间，也会在实战篇中详细讲解Spring Cloud的核心应用。</p>
+</blockquote>
+<h2 id="-">一、案例背景</h2>
+<p>我们的案例是一个普通的电商系统，拆分成四个子系统：订单系统、库存系统、仓储系统、积分系统，看过分布式理论篇的童鞋肯定已经不陌生了。系统的逻辑架构图如下：</p>
+<center><br/> <img src="./img/20200326210717566.png" style="zoom:55%"/><br/></center>
+<p>一次下订单的请求需要多个子系统协作完成，每个子系统都完成一部分的功能，多个子系统分别完成自己负责的事情，最终这个请求就处理完毕 。</p>
+<p>下面我们就来看下，如果引入Spring Cloud，如果对这些子系统进行管理，使他们能够有条不紊地相互协作。</p>
+<h2 id="-eureka-">二、服务注册中心（Eureka）</h2>
+<h3 id="2-1-">2.1 作用</h3>
+<p>首先，我们需要一个服务注册中心，当服务提供方启动后，需要向服务注册中心注册自己的服务信息（接口URI、机器地址、端口等），这一过程叫做<em>服务注册</em>。</p>
+<p>与此同时，服务消费方也要从<strong><em>Eureka</em></strong>拉取一份服务注册清单，方便自己后续调用其它服务使用，这一过程也叫做<em>服务发现</em>。</p>
+<p>在Spring Cloud中，由<strong><em>Eureka</em></strong>来担任注册中心的角色：</p>
+<center><br/> <img src="./img/20200326210727425.png" style="zoom:52%"/><br/></center>
+<h3 id="2-2-">2.2 使用方式</h3>
+<p>Eureka的使用方式很简单，首先，我们创建一个Spring Boot应用，配置<code>application.yml</code>文件：    </p>
+<pre><code class="lang-yml">server:
+  port: 8761
+
+eureka:
+  instance:
+    hostname: localhost
+    leaseExpirationDurationInSeconds: 2
+  client:
+    registerWithEureka: false
+    fetchRegistry: false
+    serviceUrl:
+      defaultZone: http://peer1:8761/eureka/
+  server:
+    enableSelfPreservation: false
+    responseCacheUpdateIntervalMs: 1000
+    evictionIntervalTimerInMs: 1000
+</code></pre>
+<p>上面各个参数的含义，我会在讲Eureka原理时详细讲解。这里注意下<code>defaultZone</code>这个参数，这个参数表示Eureka对外提供服务的一个地址。我们可以通过下面这样启动Eureka：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaServer
+public class EurekaServer {
+    public static void main(String[] args) {
+        SpringApplication.run(EurekaServer.class, args);
+    }
+}
+</code></pre>
+<h3 id="2-3-">2.3 服务注册</h3>
+<p>有了服务注册中心，我们就可以注册服务了。下面我们来创建库存、仓储、积分三个服务。</p>
+<h4 id="-">库存服务</h4>
+<pre><code class="lang-JAVA">// 库存服务接口
+public interface InventoryApi {
+    String deductStock(Long productId, Long stock);
+}
+
+// 库存API实现
+@RestController
+@RequestMapping("/inventory")
+public class InventoryService implements InventoryApi {
+
+    @RequestMapping(value = "/deduct/{productId}/{stock}", method = RequestMethod.PUT)
+    public String deductStock(@PathVariable("productId") Long productId, 
+            @PathVariable("stock") Long stock) {
+        System.out.println("对商品【productId=" + productId + "】扣减库存：" + stock);    
+        return "{'msg': 'success'}";
+    }
+}
+</code></pre>
+<p>然后是库存服务的yml配置：</p>
+<pre><code class="lang-YML">server:
+  port: 8080
+spring:
+  application:
+    name: inventory-service
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://peer1:8761/eureka
+    registryFetchIntervalSeconds: 1
+    leaseRenewalIntervalInSeconds: 1
+
+ribbon:
+  eager-load:
+    enable: true
+
+feign:
+  hystrix:
+    enabled: false
+</code></pre>
+<p>最后，我们可以这样启动库存服务：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+public class InventoryServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(InventoryServiceApplication.class, args);
+    }
+}
+</code></pre>
+<h4 id="-">仓储服务</h4>
+<pre><code class="lang-JAVA">// 仓储服务接口
+public interface WmsApi {
+    String delivery(Long productId);
+}
+
+// 仓储API实现
+@RestController
+@RequestMapping("/wms") 
+public class WmsService implements WmsApi {
+
+    @RequestMapping(value = "/delivery/{productId}", method = RequestMethod.PUT)
+    public String delivery(@PathVariable("productId") Long productId) {
+        System.out.println("对商品【productId=" + productId + "】进行发货");    
+        return "{'msg': 'success'}";
+    }
+}
+</code></pre>
+<p>然后是仓储服务的yml配置：</p>
+<pre><code class="lang-YML">server:
+  port: 8081
+
+spring:
+  application:
+    name: wms-service
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+    registryFetchIntervalSeconds: 1
+    leaseRenewalIntervalInSeconds: 1
+
+ribbon:
+  eager-load:
+    enable: true
+
+feign:
+  hystrix:
+    enabled: false
+</code></pre>
+<p>最后，我们可以这样启动仓储服务：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+public class WmsServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(WmsServiceApplication.class, args);
+    }
+}
+</code></pre>
+<h4 id="-">积分服务</h4>
+<pre><code class="lang-JAVA">// 积分服务接口
+public interface CreditApi {
+    String add(Long userId, Long credit);
+}
+
+// 积分API实现
+@RestController
+@RequestMapping("/credit") 
+public class CreditService implements CreditApi {
+
+    @RequestMapping(value = "/add/{userId}/{credit}", method = RequestMethod.PUT)
+    public String add(@PathVariable("userId") Long userId, 
+            @PathVariable("credit") Long credit) {
+        System.out.println("对用户【userId=" + userId + "】增加积分：" + credit);    
+        return "{'msg': 'success'}";
+    }
+}
+</code></pre>
+<p>然后是积分服务的yml配置：</p>
+<pre><code class="lang-YML">server:
+  port: 8082
+
+spring:
+  application:
+    name: credit-service
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+    registryFetchIntervalSeconds: 1
+    leaseRenewalIntervalInSeconds: 1
+
+ribbon:
+  eager-load:
+    enable: true
+
+feign:
+  hystrix:
+    enabled: false
+</code></pre>
+<p>最后，我们可以这样启动积分服务：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+public class CreditServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(CreditServiceApplication.class, args);
+    }
+}
+</code></pre>
+<h2 id="-feign-">三、服务调用（Feign）</h2>
+<h3 id="3-1-">3.1 作用</h3>
+<p>服务之间需要能够互相调用，我们曾经介绍过<a href="https://www.tpvlog.com/article/187">Dubbo的使用及其原理</a>，Spring Cloud也有类似的分布式服务调用框架——<strong><em>Feign</em></strong>。如下图所示，订单系统如果要调用其它系统提供的服务，在Spring Cloud中实际是通过Feign组件完成的：</p>
+<center><br/> <img src="./img/20200326210735578.png" style="zoom:52%"/><br/></center>
+<h3 id="3-2-">3.2 使用方式</h3>
+<p>我们以订单服务为例，看下如何使用Feign。首先，订单服务要通过Feign远程调用库存、积分、仓库服务，所以我们需要定义三个接口，加上@Feign注解。这些接口的签名需要与服务提供方完全一致，包含请求的URI：</p>
+<pre><code class="lang-JAVA">/**
+ * 库存服务Feign
+ */
+@FeignClient(value = "inventory-service")
+@RequestMapping("/inventory")
+public interface InventoryServiceFeign {
+    @RequestMapping(value = "/deduct/{productId}/{stock}", method = RequestMethod.PUT)
+    String deductStock(Long productId, Long stock);
+}
+
+/**
+ * 仓储服务Feign
+ */
+@FeignClient(value = "wms-service")
+@RequestMapping("/wms") 
+public interface WmsFeignService {
+    @RequestMapping(value = "/delivery/{productId}", method = RequestMethod.PUT)
+    String delivery(Long productId);
+}
+
+/**
+ * 积分服务Feign
+ */
+@FeignClient(value = "credit-service")
+@RequestMapping("/credit")
+public interface CreditFeignService {
+    @RequestMapping(value = "/add/{userId}/{credit}", method = RequestMethod.PUT)
+    String add(Long userId, Long credit);
+}
+</code></pre>
+<p>上面的@FeignClient注解的value表示要消费的服务名称，是在服务提供方的yml文件中配置的。Feign会自动生成访问后台服务的代理接口服务，后续我们讲Feign原理时会专门讲解。</p>
+<h3 id="3-3-">3.3 服务调用</h3>
+<p>订单服务的实现，主要用来接受客户端请求，然后创建订单，最后发起对下游依赖服务的调用：</p>
+<pre><code class="lang-JAVA">@RestController
+@RequestMapping("/order")
+public class OrderController {
+
+    @Autowired
+    private InventoryServiceFeign inventoryService;
+    @Autowired
+    private WmsServiceFeign wmsService;
+    @Autowired
+    private CreditServiceFeign creditService;
+
+    @RequestMapping(value = "/create", method = RequestMethod.GET)
+    public String greeting(
+            @RequestParam("productId") Long productId,
+            @RequestParam("userId") Long userId,
+            @RequestParam("count") Long count,
+            @RequestParam("totalPrice") Long totalPrice) {
+
+        System.out.println("创建订单");
+
+        inventoryService.deductStock(productId, count);
+        wmsService.delivery(productId);
+        creditService.add(userId, totalPrice);
+
+        return "success";
+    }
+
+}
+</code></pre>
+<p>然后是Spring Boot启动类：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+@EnableFeignClients
+public class OrderServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderServiceApplication.class, args);
+    }
+}
+</code></pre>
+<p>最后是订单服务的yml配置：</p>
+<pre><code class="lang-YML">server:
+  port: 9090
+
+spring:
+  application:
+    name: order-service
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+    registryFetchIntervalSeconds: 1
+    leaseRenewalIntervalInSeconds: 1
+
+ribbon:
+  eager-load:
+    enable: true
+
+# 默认先关掉的hystrix（设计好完整高可用方案再打开），防止因为hystrix的默认行为影响对程序结果的判断
+feign:
+  hystrix:
+    enabled: false
+</code></pre>
+<h2 id="-ribbon-">四、负载均衡（Ribbon）</h2>
+<p>如果某个子系统部署了多个对等服务，那也会在注册中心注册多个相同的服务，以订单系统来说，那可能拉取到的注册表中有多个库存系统服务，此时调用方就需要选择一个服务发起调用，这其实就是客户端负载均衡。</p>
+<p>Dubbo提供了Cluster路由层来完成客户端负载均衡，而Spring Cloud提供了<strong><em>Ribbon</em></strong>作为客户端负载均衡组件：</p>
+<center><br/> <img src="./img/20200326210744351.png" style="zoom:52%"/><br/></center>
+<h3 id="4-1-">4.1 超时配置</h3>
+<p>上述的库存、积分、仓库服务，第一次被请求的时候，都会去初始化一个Ribbon组件，初始化组件需要耗费一定的时间，很容易会导致超时问题。所以，生产环境一般都会对服务进行配置，使服务启动时就初始化Ribbon相关的组件，避免第一次请求时再初始化。 </p>
+<p>以库存服务为例，可以在<code>application.yml</code>中做加上如下Ribbon配置：</p>
+<pre><code class="lang-YML"># 启用饥饿加载，服务启动时即加载ribbon组件
+ribbon:
+  eager-load:
+      enable: true
+  ConnectTimeout: 1000
+  ReadTimeout: 1000
+  OkToRetryOnAllOperations: true
+  # 对于当前调用服务的重试次数 
+  MaxAutoRetries: 1
+  # 其它对等服务的重试次数
+  MaxAutoRetriesNextServer: 1
+</code></pre>
+<p>上述除了饥饿加载外，还加上了超时时间和重试次数的配置，这样就可以通过Ribbon来控制服务调用方发生调用超时时的行为。</p>
+<h2 id="-api-zuul-">五、API网关（Zuul）</h2>
+<p>客户端一般通过Nginx与后端服务进行交互，每个微服务一般会有不同的网络地址，当服务越来越多后，客户端可能需要调用多个服务的接口才能完成一次业务请求，如果让客户端直接与各个微服务通信，会有以下的问题：</p>
+<ol>
+<li>认证复杂，每个服务都需要独立认证；</li>
+<li>客户端会多次请求不同的微服务，增加了客户端的复杂性；</li>
+<li>难以重构，随着项目的迭代，可能需要重新划分微服务，如果客户端直接与微服务通信，那么重构将会很难实施。</li>
+</ol>
+<p>所以，我们需要一个统一的构件来处理上述问题。Spring Cloud Gateway 或者Zuul作为API网关可以解决上述问题。</p>
+<h3 id="5-1-">5.1 作用</h3>
+<p>以Zuul为例，Zuul是介于客户端和服务器端之间的中间层，所有的客户端请求都会先经过网关这一层。网关提供了API全托管服务，辅助管理大规模的API，还包括灰度发布、统一熔断、统一降级、统一缓存、统一限流、统一授权认证等功能。 </p>
+<center><br/> <img src="./img/20200326210753054.png" style="zoom:52%"/><br/></center>
+<h3 id="5-2-">5.2 使用方式</h3>
+<p>我们使用Zuul来作为API网关，可以新建一个Spring Boot应用，做如下配置：</p>
+<pre><code class="lang-YML">server:
+  port: 9000
+
+spring:
+  application:
+    name: zuul-gateway
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka/
+    registryFetchIntervalSeconds: 1
+    leaseRenewalIntervalInSeconds: 1
+
+zuul:
+  retryable: true
+  routes:
+    order-service:
+      path: /order/**
+
+ribbon:
+  eager-load:
+      enable: true
+  ConnectTimeout: 3000
+  ReadTimeout: 3000
+  OkToRetryOnAllOperations: true
+  # 对于当前调用服务的重试次数 
+  MaxAutoRetries: 1
+  # 其它对等服务的重试次数
+  MaxAutoRetriesNextServer: 1
+</code></pre>
+<p>网关的启动类如下：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableZuulProxy
+public class ZuulGatewayApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ZuulGatewayApplication.class, args);
+    }
+}
+</code></pre>
+<p>上述9000是网关的服务端口，处理<code>/order</code>路径的所有请求。</p>
+<h2 id="-">六、总结</h2>
+<p>综上，一套最简单的微服务系统就搭建起来了，整个项目的模块划分如下图：</p>
+<center><br/> <img src="./img/20200326210800767.png" style="zoom:100%"/><br/></center>
+<p>客户端要进行下单操作时，直接访问以下接口：<br/><a href="http://localhost:9000/order/order/create?productId=1&amp;userId=1&amp;count=3&amp;totalPrice=300">http://localhost:9000/order/order/create?productId=1&amp;userId=1&amp;count=3&amp;totalPrice=300</a></p>
+<p>其中 <a href="http://localhost:9000">http://localhost:9000</a> 是Zuul网关的地址，通过<code>/order</code>可以映射到后端的订单服务。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

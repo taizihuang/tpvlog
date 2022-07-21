@@ -1,0 +1,85 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（二二）——聚合分析：fielddata</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（二二）——聚合分析：fielddata</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>当我们使用聚合分析，对某个的字段进行分析时，如果该字段是可分词的类型，比如text这种，就会抛出异常：</p>
+<pre><code class="lang-JAVA">"caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Fielddata is disabled on text fields by default. Set fielddata=true on [test_field] in order to load fielddata in memory by uninverting the inverted index. Note that this can however use significant memory."
+}
+</code></pre>
+<p>上面报错大概的意思是说：必须要打开<code>fielddata</code>，然后将正排索引数据加载到内存中，才可以对分词field执行聚合操作，并且很消耗内存。</p>
+<p>所以，我们需要先改变字段的mapping，将<code>fielddata</code>置为true：</p>
+<pre><code class="lang-JAVA">POST /test_index/_mapping 
+{
+  "properties": {
+    "test_field": {
+      "type": "text",
+      "fielddata": true
+    }
+  }
+}
+</code></pre>
+<h2 id="-fielddata-">一、fielddata原理</h2>
+<p>当开启<code>fielddata: true</code>后，Elasticsearch会在执行聚合操作时，实时地将field对应的数据建立一份fielddata正排索引，索引会被加载到JVM内存中，然后基于内存中的索引执行分词field的聚合操作。</p>
+<p>所以，如果doc数量非常多，这个过程会非常消耗内存，因为分词的field需要按照term进行聚合，其中涉及很多复杂的算法和操作，Elasticsearch为了提升性能，对于这些操作全部是基于JVM内存进行的。</p>
+<h3 id="1-1-">1.1 懒加载</h3>
+<p>fielddata是通过懒加载的方式加载到内存中的，所以只有对一个analzyed field执行聚合操作时，才会执行加载。这种懒加载的方式更加降低了性能。</p>
+<h3 id="1-2-">1.2 内存限制</h3>
+<p>Elasticsearch可以通过配置<code>indices.fielddata.cache.size</code>参数来限制fielddata对内存的使用。超出限制，就会清除内存已有的fielddata数据，但是一旦限制内存使用，又会导致频繁的evict和reload，产生大量内存碎片，同时降低IO性能。</p>
+<h3 id="1-3-circuit-breaker">1.3 circuit breaker</h3>
+<p>如果一次query 操作加载的feilddata数据量大小超过了总内存，就会发生内存溢出，circuit breaker会估算query要加载的fielddata大小，如果超出总内存就短路，query直接失败。可以通过以下参数进行设置：</p>
+<pre><code class="lang-JAVA">indices.breaker.fielddata.limit：fielddata的内存限制，默认60%
+indices.breaker.request.limit：执行聚合的内存限制，默认40%
+indices.breaker.total.limit：综合上面两个，限制在70%以内
+</code></pre>
+<h2 id="-fielddata-">二、fielddata优化</h2>
+<p>一般来讲，不会对text类型的字段执行聚合操作，也不建议做这个操作。如果确实有这个需求，需要对fielddata做些优化，以提升性能。</p>
+<h3 id="2-1-fielddata-">2.1 fielddata预加载</h3>
+<p>第一个优化点是<em>预加载</em> （与默认的 延迟加载相对）。随着新segment的创建（通过刷新、写入或合并等方式）， 启动字段预加载可以使那些对搜索不可见的分段里的 fielddata <em>提前</em> 加载。这就意味着首次命中分段的查询不需要促发 fielddata 的加载，因为 fielddata 已经被载入到内存，避免了用户遇到搜索卡顿的情形。</p>
+<p>预加载是按字段启用的，所以我们可以控制具体哪个字段可以预先加载：</p>
+<pre><code class="lang-JAVA">POST /test_index/_mapping
+{
+  "properties": {
+    "test_field": {
+      "type": "string",
+      "fielddata": {
+        "loading" : "eager" 
+      }
+    }
+  }
+}
+</code></pre>
+<blockquote>
+<p>预加载只是简单的将载入 fielddata 的代价转移到索引刷新的时候，而不是查询时，从而大大提高了搜索体验。 </p>
+</blockquote>
+<h3 id="2-2-">2.2 全局序号</h3>
+<p>另一种用来降低 fielddata 内存使用的技术叫做 全局序号（Global Ordinals）。</p>
+<p>设想我们有十亿文档，每个文档都有自己的 <code>status</code> 状态字段，状态总共有三种： <code>status_pending</code> 、 <code>status_published</code> 、 <code>status_deleted</code> 。如果我们为每个文档都保留其状态的完整字符串形式，那么每个文档就需要使用 14 到 16 字节，或总共 15 GB。</p>
+<p>取而代之的是，我们可以指定三个不同的字符串对其排序、编号：0，1，2。</p>
+<pre><code>Ordinal | Term
+-------------------
+0       | status_deleted
+1       | status_pending
+2       | status_published
+</code></pre><p>序号字符串在序号列表中只存储一次，每个文档只要使用数值编号的序号来替代它原始的值。</p>
+<pre><code>Doc     | Ordinal
+-------------------------
+0       | 1  # pending
+1       | 1  # pending
+2       | 2  # published
+3       | 0  # deleted
+</code></pre><p>这样可以将内存使用从 15 GB 降到 1 GB 以下！</p>
+<p>全局序号是一个构建在 fielddata 之上的数据结构，它只占用少量内存。唯一值是 <em>跨所有分段</em> 识别的，然后将它们存入一个序号列表中，<code>terms</code> 聚合可以对全局序号进行聚合操作，将序号转换成真实字符串值的过程只会在聚合结束时发生一次。这会将聚合（和排序）的性能提高三到四倍。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了Elasticsearch中的<code>fielddata</code>的作用和优化方式。一般来讲，我们最好不要对string、text等可分词类型的字段进行聚合操作，因为即使进行了优化，性能开销也会非常大。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,76 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二九）——分布式框架之高可用：Hystrix熔断</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二九）——分布式框架之高可用：Hystrix熔断</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Hystrix熔断，其实就是打开了断路器（Circuit Breaker）。Hystrix在运行过程中会向每个<code>commandKey</code>对应的断路器报告<strong>成功、失败、超时</strong>和<strong>拒绝</strong>的状态，断路器会统计并维护这些数据，根据这些统计信息来确定断路器的状态：<strong>打开（open）</strong>、<strong>半开（half-open）</strong>、<strong>关闭（close）</strong>。</p>
+<ul>
+<li>打开状态：后续的请求都会被截断，直接走fallback降级；</li>
+<li>半开状态：默认每隔5s，尝试半开，放入一部分流量进来，相当于对依赖服务进行一次健康检查，如果服务恢复了，则断路器关闭，随后完全恢复调用；</li>
+<li>关闭状态：断路器完全关闭，走正常的请求调用流程。</li>
+</ul>
+<center><br/> <img src="./img/20200331154101413.png" style="zoom:80%"><br/></img></center>
+<h2 id="-">一、工作原理</h2>
+<p>我们先来看下断路器的基本工作流程，还是下面这张老图，可以看到只要执行command，请求就一定会经过断路器：</p>
+<center><br/> <img src="./img/20200331154111171.png" style="zoom:80%"/><br/></center>
+<h3 id="1-1-">1.1 关闭-&gt;打开</h3>
+<p>如果配置了<code>circuitBreaker.enabled = true</code>，即允许断路器工作，那么初始时断路器的状态为<strong>关闭</strong>。当在一个时间窗口内（默认10s），请求流量超过了一定的阈值（默认20次），Hristrix就会去判断要不要断路，断路的依据是：<strong>异常请求数量占总请求量的比值是否超过某个阈值，此时断路器就会打开</strong>。</p>
+<p>举个例子，假设时间窗口为10s，请求阈值为20次，如果10s内经过短路器的请求共10次，那么根本不会去判断要不要断路，即使这10次请求全部是异常的。如果10s内经过短路器的请求超过20次，同时其中异常的请求数量，占到了一定的比例，就会开启断路，断路器从close状态转换到open状态。此时，再有请求过来，都不会走后端服务，而是全部走fallback降级。</p>
+<blockquote>
+<p>circuitBreaker.requestVolumeThreshold：请求总量阈值，默认20<br/>circuitBreaker.errorThresholdPercentage：异常请求百分比，默认50，即50%</p>
+</blockquote>
+<h3 id="1-2-">1.2 打开-&gt;半开</h3>
+<p>当断路器开启一段时间之后（默认5s），会尝试放过去一部分流量进行试探，确定依赖服务是否恢复了。此时断路器的状态为变成半开（half-open）， 如果服务完全恢复了，则断路器状态会转换成关闭，随后完全恢复调用。  </p>
+<blockquote>
+<p>circuitBreaker.sleepWindowInMilliseconds：半开试探休眠时间，默认值5000ms。</p>
+</blockquote>
+<h2 id="-">二、示例</h2>
+<p>接下来，我们通过示例来看下如何使用Hystrix的熔断功能。</p>
+<h3 id="2-1-command-">2.1 command改写</h3>
+<pre><code class="lang-java">/**
+ * 封装获取商品信息的请求，采用线程池隔离。
+ * HystrixCommand中的泛型是请求返回的类型，此处是商品信息ProductInfo
+ */
+public class GetProductInfoCommand extends HystrixCommand&lt;ProductInfo&gt; {
+
+    private final Long productId;
+
+    public GetProductInfoCommand(Long productId) {
+        // 将command与线程池关联
+        super(HystrixCommandGroupKey.Factory.asKey("GetProductInfoCommandGroup")
+             .andCommandPropertiesDefaults(
+                 HystrixCommandProperties.Setter()
+                     .withCircuitBreakerRequestVolumeThreshold(30)
+                     .withCircuitBreakerErrorThresholdPercentage(40))
+                     .withCircuitBreakerSleepWindowInMilliseconds(6000));
+        this.productId = productId;
+    }
+
+    /**
+      * run方法里执行的是真正请求处理逻辑
+      */
+    @Override
+    protected ProductInfo run() {
+        // 拿到一个商品id
+        // 调用商品服务的接口，获取商品id对应的商品的最新数据
+        // 用HttpClient去调用商品服务的http接口
+        String url = "http://127.0.0.1:8082/getProductInfo?productId=" + productId;
+        String response = HttpClientUtils.sendGetRequest(url);
+
+        return JSONObject.parseObject(response, ProductInfo.class);
+    }
+}
+</code></pre>
+<p>上述构造函数中，设置了请求总量阈值为30，异常请求百分比为40%，半开试探休眠时间6s。</p>
+<p>这样，如果10s内总请求数超过30次，且异常请求占40%，就会打开断路器，后续的所有请求都会走fallback降级。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了Hystrix的熔断功能，读者要特别注意断路器的三种状态之间的转换关系，Hystrix对所有command请求进行监控统计，当异常请求达到一定比例时，就会触发熔断机制。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,47 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（十七）——Broker：API层——KafkaApis</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（十七）——Broker：API层——KafkaApis</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我讲到KafkaRequestHandlerPool最终会将请求交给API层的KafkaApis处理。本章，我们就来看下KafkaApis的整体架构。</p>
+<p>KafkaApis 类定义在源码文件 <code>KafkaApis.scala</code> 中：</p>
+<pre><code class="lang-java">class KafkaApis(val requestChannel: RequestChannel,
+                val replicaManager: ReplicaManager,
+                val adminManager: AdminManager,
+                val coordinator: GroupCoordinator,
+                val controller: KafkaController,
+                val zkUtils: ZkUtils,
+                val brokerId: Int,
+                val config: KafkaConfig,
+                val metadataCache: MetadataCache,
+                val metrics: Metrics,
+                val authorizer: Option[Authorizer],
+                val quotas: QuotaManagers,
+                val clusterId: String,
+                time: Time) extends Logging {
+//...
+}
+</code></pre>
+<p>它的内部封装了许多核心组件：</p>
+<center><br/> <img src="./img/20210613232834086.png" style="zoom:60%"><br/></img></center>
+<h2 id="-">一、整体架构</h2>
+<p>KafkaApis 可以看成是一个门面类，是 Broker 端所有功能的入口，同时关联了超多的 Kafka 组件。如果你翻开 KafkaApis 类的代码，你会发现，它封装了很多以 handle 开头的方法。每一个这样的方法都对应于一类请求类型，而它们的总方法入口就是 handle 方法。</p>
+<p>实际上，你完全可以在 handle 方法间不断跳转，去到任意一类请求被处理的实际代码中。</p>
+<p>我们总结一下 KafkaApis 类的要点。</p>
+<ol>
+<li>handle 方法封装了所有 RPC 请求的具体处理逻辑。每当社区新增 RPC 协议时，增加对应的 handle×××Request 方法和 case 分支都是首要的；</li>
+<li>sendResponse 系列方法负责发送 Response 给请求发送方。发送 Response 的逻辑是将 Response 对象放置在 Processor 线程的 Response 队列中，然后交由 Processor 线程实现网络发送；</li>
+<li>authorize 方法是请求处理前权限校验层的主要逻辑实现。你可以查看一下官方文档，了解一下当前都有哪些权限，然后对照着具体的方法，找出每类 RPC 协议都要求 Clients 端具备什么权限。</li>
+</ol>
+<center><br/> <img src="./img/20210613232851311.png" style="zoom:60%"/><br/></center>
+<h2 id="-">二、总结</h2>
+<p>KafkaApis的整体结构是非常清晰的，本章我就不过多展开了，读者完全可以自己打开KafkaApis.scala的源码去看下它的具体功能。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

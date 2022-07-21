@@ -1,0 +1,149 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（七）——装饰器模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（七）——装饰器模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>装饰器模式（Decorator Design Pattern）</strong>，也是一种结构型模式。装饰器模式主要用于类的功能的增强，它使用组合来替代继承，解决了类继承关系过于复杂的问题。除此之外，装饰器模式还有一个特点，那就是可以对原始类嵌套使用多个装饰器。为了满足这个应用场景，在设计的时候，装饰器类需要跟原始类继承相同的抽象类或者接口。</p>
+<h2 id="-java-io">一、Java IO</h2>
+<p>装饰器模式最典型的应用就是Java IO 类库。如果对Java IO 做一下分类，我们可以从“字节流”和“字符流”两个维度将它划分为四类：InputStream、OutputStream、Reader、Writer。针对不同的读取和写入场景，Java IO 又在这四个父类基础之上，扩展出了很多子类：</p>
+<center><br/> <img src="./img/20200419220918737.png" style="zoom:25%"><br/></img></center>
+<p>我们可以像下面这样来使用Java IO：</p>
+<pre><code class="lang-JAVA">InputStream in = new FileInputStream("/user/wangzheng/test.txt");
+InputStream bin = new BufferedInputStream(in);
+byte[] data = new byte[128];
+while (bin.read(data) != -1) {
+  //...
+}
+</code></pre>
+<p>看上面的代码，我们会觉得 Java IO 的用法比较麻烦，需要先创建一个 FileInputStream 对象，然后再传递给 BufferedInputStream 对象来使用。</p>
+<p>Java IO 为什么不设计一个继承 FileInputStream 并且支持缓存的 BufferedFileInputStream 类呢？这样我们就可以像下面的代码中这样，直接创建一个 BufferedFileInputStream 类对象，打开文件读取数据，用起来岂不是更加简单？</p>
+<pre><code class="lang-JAVA">InputStream bin = new BufferedFileInputStream("/user/wangzheng/test.txt");
+byte[] data = new byte[128];
+while (bin.read(data) != -1) {
+  //...
+}
+</code></pre>
+<p>事实上，如果采用继承的方式对类的功能进行扩展，那么当我们需要附加更多的功能时，就会导致类继承结构变得无比复杂，代码既不好扩展，也不好维护。</p>
+<h2 id="-">二、基本原理</h2>
+<p>Java IO 的设计思路就是将继承关系改为组合关系，下面是装饰器模式的基本代码结构：</p>
+<pre><code class="lang-JAVA">// 装饰器模式的代码结构(下面的接口也可以替换成抽象类)
+public interface IA {
+  void f();
+}
+
+public class A impelements IA {
+  public void f() { //... }
+}
+
+public class ADecorator impements IA {
+  private IA a;
+  public ADecorator(IA a) {
+    this.a = a;
+  }
+
+  public void f() {
+    // 功能增强代码
+    a.f();
+    // 功能增强代码
+  }
+}
+</code></pre>
+<p>可以看到，装饰器类和原始类继承同样的父类，这样我们可以对原始类“嵌套”多个装饰器类。事实上，Java IO 抽象出了一个装饰器父类 FilterInputStream。InputStream 的所有的装饰器类（BufferedInputStream、DataInputStream等）都继承自这个FilterInputStream。这样，装饰器类只需要实现它需要增强的方法就可以了，其他方法继承装饰器父类的默认实现：</p>
+<pre><code class="lang-JAVA">public class FilterInputStream extends InputStream {
+  protected volatile InputStream in;
+
+  protected FilterInputStream(InputStream in) {
+    this.in = in;
+  }
+
+  public int read() throws IOException {
+    return in.read();
+  }
+
+  public int read(byte b[]) throws IOException {
+    return read(b, 0, b.length);
+  }
+
+  public int read(byte b[], int off, int len) throws IOException {
+    return in.read(b, off, len);
+  }
+
+  public long skip(long n) throws IOException {
+    return in.skip(n);
+  }
+
+  public int available() throws IOException {
+    return in.available();
+  }
+
+  public void close() throws IOException {
+    in.close();
+  }
+
+  public synchronized void mark(int readlimit) {
+    in.mark(readlimit);
+  }
+
+  public synchronized void reset() throws IOException {
+    in.reset();
+  }
+
+  public boolean markSupported() {
+    return in.markSupported();
+  }
+}
+</code></pre>
+<h2 id="-">三、开源示例</h2>
+<p>Netty 中 的 WrappedByteBuf 就是对 ByteBuf 进行了装饰，源码如下所示：</p>
+<pre><code class="lang-JAVA">class WrappedByteBuf extends ByteBuf {
+
+    protected final ByteBuf buf;
+
+    protected WrappedByteBuf(ByteBuf buf) {
+        if (buf == null) {
+            throw new NullPointerException("buf");
+        }
+        this.buf = buf;
+    }
+
+    @Override
+    public final boolean hasMemoryAddress() {
+        return buf.hasMemoryAddress();
+    }
+
+    @Override
+    public final long memoryAddress() {
+        return buf.memoryAddress();
+    }
+    //...
+}
+</code></pre>
+<p>WrappedByteBuf 是所有 ByteBuf 装饰器的基类，它并没有什么特别的，也是在构造函数里传入了原始的 ByteBuf 实例作为被装饰者。</p>
+<p>WrappedByteBuf 有两个子类 <code>UnreleasableByteBuf</code> 和 <code>SimpleLeakAwareByteBuf</code>，它们是真正实现对 ByteBuf 的功能增强，例如 UnreleasableByteBuf 类的 release() 方法是直接返回 false 表示不可被释放，源码实现如下所示：</p>
+<pre><code class="lang-JAVA">final class UnreleasableByteBuf extends WrappedByteBuf {
+
+    private SwappedByteBuf swappedBuf;
+
+    UnreleasableByteBuf(ByteBuf buf) {
+        super(buf instanceof UnreleasableByteBuf ? buf.unwrap() : buf);
+    }
+
+    @Override
+    public boolean release() {
+        return false;
+    }
+    //...
+}
+</code></pre>
+<h2 id="-">四、总结</h2>
+<p>装饰器模式主要解决继承关系过于复杂的问题，通过组合来替代继承。它主要的作用是给原始类添加增强功能。这也是判断是否该用装饰器模式的一个重要的依据。</p>
+<p>除此之外，装饰器模式还有一个特点，那就是可以对原始类嵌套使用多个装饰器。为了满足这个应用场景，在设计的时候，装饰器类需要跟原始类继承相同的抽象类或者接口。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

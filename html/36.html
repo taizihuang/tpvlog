@@ -1,0 +1,192 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（二十）—— J.U.C之synchronizer框架：Semaphore</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（二十）—— J.U.C之synchronizer框架：Semaphore</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-semaphore-">一、Semaphore简介</h2>
+<p><code>Semaphore</code>，又名信号量，这个类的作用有点类似于“许可证”。有时，我们因为一些原因需要控制同时访问共享资源的最大线程数量，比如出于系统性能的考虑需要限流，或者共享资源是稀缺资源，我们需要有一种办法能够协调各个线程，以保证合理的使用公共资源。</p>
+<p>Semaphore维护了一个许可集，其实就是一定数量的“许可证”。<br/>当有线程想要访问共享资源时，需要先获取(acquire)的许可；如果许可不够了，线程需要一直等待，直到许可可用。当线程使用完共享资源后，可以归还(release)许可，以供其它需要的线程使用。</p>
+<p>另外，Semaphore支持公平/非公平策略，这和ReentrantLock类似，后面讲Semaphore原理时会看到，它们的实现本身就是类似的。</p>
+<h2 id="-semaphore-">二、Semaphore示例</h2>
+<p>我们来看下Oracle官方给出的示例：</p>
+<pre><code class="lang-java">class Pool {
+    private static final int MAX_AVAILABLE = 100; // 可同时访问资源的最大线程数
+    private final Semaphore available = new Semaphore(MAX_AVAILABLE, true);
+    protected Object[] items = new Object[MAX_AVAILABLE];   //共享资源
+    protected boolean[] used = new boolean[MAX_AVAILABLE];
+    public Object getItem() throws InterruptedException {
+        available.acquire();
+        return getNextAvailableItem();
+    }
+    public void putItem(Object x) {
+        if (markAsUnused(x))
+            available.release();
+    }
+    private synchronized Object getNextAvailableItem() {
+        for (int i = 0; i &lt; MAX_AVAILABLE; ++i) {
+            if (!used[i]) {
+                used[i] = true;
+                return items[i];
+            }
+        }
+        return null;
+    }
+    private synchronized boolean markAsUnused(Object item) {
+        for (int i = 0; i &lt; MAX_AVAILABLE; ++i) {
+            if (item == items[i]) {
+                if (used[i]) {
+                    used[i] = false;
+                    return true;
+                } else
+                    return false;
+            }
+        }
+        return false;
+    }
+}
+</code></pre>
+<p><code>items</code>数组可以看成是我们的共享资源，当有线程尝试使用共享资源时，我们要求线程先获得“许可”（调用<strong>Semaphore</strong> 的<strong>acquire</strong>方法），这样线程就拥有了权限，否则就需要等待。当使用完资源后，线程需要调用<strong>Semaphore</strong> 的<strong>release</strong>方法释放许可。</p>
+<blockquote>
+<p>注意：上述示例中，对于共享资源访问需要由锁来控制，Semaphore仅仅是保证了线程由权限使用共享资源，至于使用过程中是否由并发问题，需要通过锁来保证。</p>
+</blockquote>
+<p>总结一下，许可数 ≤ 0代表共享资源不可用。许可数 ＞ 0，代表共享资源可用，且多个线程可以同时访问共享资源。这是不是和CountDownLatch有点像？</p>
+<p>我们来比较下：</p>
+<table>
+<thead>
+<tr>
+<th>同步器</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CountDownLatch</td>
+<td>同步状态<code>State &gt; 0</code>表示资源不可用，所有线程需要等待；<code>State == 0</code>表示资源可用，所有线程可以同时访问</td>
+</tr>
+<tr>
+<td>Semaphore</td>
+<td><code>剩余许可数 &lt; 0</code>表示资源不可用，所有线程需要等待； <code>许可剩余数 ≥ 0</code>表示资源可用，所有线程可以同时访问</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>如果读者阅读过本系列的AQS相关文章，应该立马可以反应过来，这其实就是对同步状态的定义不同。</p>
+</blockquote>
+<p><strong>CountDownLatch</strong>内部实现了AQS的共享功能，那么<strong>Semaphore</strong>是否也一样是利用内部类实现了AQS的共享功能呢？</p>
+<h2 id="-semaphore-">三、Semaphore原理</h2>
+<h3 id="3-1-semaphore-">3.1 Semaphore的内部结构</h3>
+<p>我们先来看下<strong>Semaphore</strong>的内部：<br/><img alt="img" src="./img/20191027163537675.png" style="zoom: 80%;"/></p>
+<p>可以看到，Semaphore果然是通过内部类实现了AQS框架提供的接口，而且基本结构几乎和ReentrantLock完全一样，通过内部类分别实现了公平/非公平策略。</p>
+<h3 id="3-2-semaphore-">3.2 Semaphore对象的构造</h3>
+<p><code>Semaphore sm = new Semaphore (3, true);</code></p>
+<p><strong>Semaphore</strong>有两个构造器：</p>
+<p><strong><em>构造器1：</em></strong><br/><img alt="img" src="./img/20191027163543671.png" style="zoom: 80%;"/></p>
+<p><strong><em>构造器2：</em></strong><br/><img alt="img" src="./img/20191027163549549.png" style="zoom: 80%;"/></p>
+<p>构造时需要指定“许可”的数量——<strong>permits</strong>，内部结构如下：<br/><img alt="img" src="./img/20191027163556880.png" style="zoom: 80%;"/></p>
+<h2 id="-semaphore-">四、Semaphore的公平策略分析</h2>
+<p>我们还是通过示例来分析：</p>
+<blockquote>
+<p>假设现在一共3个线程：<strong>ThreadA</strong>、<strong>ThreadB</strong>、<strong>ThreadC</strong>。一个许可数为2的公平策略的<strong>Semaphore</strong>。线程的调用顺序如下：</p>
+</blockquote>
+<pre><code class="lang-java">Semaphore sm = new Semaphore (2, true);
+
+// ThreadA: sm.acquire()
+
+// ThreadB: sm.acquire(2)
+
+// ThreadC: sm.acquire()
+
+// ThreadA: sm.release()
+
+// ThreadB: sm.release(2)
+</code></pre>
+<h3 id="4-1-semaphore-">4.1 创建公平策略的Semaphore对象</h3>
+<pre><code class="lang-java">Semaphore sm = new Semaphore (2, true);
+</code></pre>
+<p><img alt="img" src="./img/20191027163603030.png" style="zoom:80%;"/></p>
+<p>可以看到，内部创建了一个<strong>FairSync</strong>对象，并传入许可数<strong>permits</strong>：<br/><img alt="img" src="./img/20191027163609841.png" style="zoom:80%;"/></p>
+<p><strong>Sync</strong>是<strong>Semaphore</strong>的一个内部抽象类，公平策略的<strong>FairSync</strong>和非公平策略的<strong>NonFairSync</strong>都继承该类。<br/>可以看到，构造器传入的permits值就是同步状态的值，这也体现了我们在AQS系列中说过的：<br/>AQS框架的设计思想就是分离构建同步器时的一系列关注点，它的所有操作都围绕着资源——<em>同步状态（synchronization state）</em>来展开，并将资源的定义和访问留给用户解决：<br/><img alt="img" src="./img/20191027163615822.png" style="zoom: 80%;"/></p>
+<h3 id="4-2-threada-acqure-">4.2 ThreadA调用acqure方法</h3>
+<p><strong>Semaphore</strong>的<strong>acquire</strong>方法内部调用了AQS的方法，入参"1"表示尝试获取1个许可：<br/><img alt="img" src="./img/20191027163622468.png"/></p>
+<p>AQS的<strong>acquireSharedInterruptibly</strong>方式是共享功能的一部分，我们在AQS系列中就已经对它很熟悉了：<br/><img alt="img" src="./img/20191027163628675.png"/></p>
+<p>关键来看下<strong>Semaphore</strong>是如何实现<strong>tryAcquireShared</strong>方法的：<br/><img alt="img" src="./img/20191027163635035.png" style="zoom: 67%;"/></p>
+<blockquote>
+<p>对于<strong>Semaphore</strong>来说，线程是可以一次性尝试获取多个许可的，此时只要剩余的许可数量够，最终会通过自旋操作更新成功。如果剩余许可数量不够，会返回一个负数，表示获取失败。</p>
+</blockquote>
+<p>显然，<strong>ThreadA</strong>获取许可成功。此时，同步状态值<code>State == 1</code>，等待队列的结构如下：<br/><img alt="img" src="./img/20191027163641478.png"/></p>
+<h3 id="4-3-threadb-acqure-2-">4.3 ThreadB调用acqure(2)方法</h3>
+<p>带入参的<strong>aquire</strong>方法内部和无参的一样，都是调用了AQS的acquireSharedInterruptibly方法：<br/><img alt="img" src="./img/20191027163647937.png" style="zoom:80%;"/><br/><img alt="img" src="./img/20191027163656984.png" style="zoom:80%;"/></p>
+<p>此时，ThreadB一样进入<strong>tryAcquireShared</strong>方法。不同的是，此时剩余许可数不足，因为ThreadB一次性获取2个许可，<strong>tryAcquireShared</strong>方法返回一个负数，表示获取失败：<br/>$$<br/>remaining = available - acquires = 1- 2 = -1<br/>$$</p>
+<p>ThreadB会调用<strong>doAcquireSharedInterruptibly</strong>方法：<br/><img alt="img" src="./img/20191027163704151.png" style="zoom:80%;"/></p>
+<p>上述方法首先通过<strong>addWaiter</strong>方法将ThreadB包装成一个共享结点，加入等待队列：<br/><img alt="img" src="./img/20191027163709831.png" style="zoom: 80%;"/></p>
+<p>然后会进入自旋操作，先尝试获取一次资源，显然此时是获取失败的，然后判断是否要进入阻塞（<strong>shouldParkAfterFailedAcquire</strong>）：<br/><img alt="img" src="./img/20191027163722521.png" style="zoom:80%;"/></p>
+<p>上述方法会先将前驱结点的状态置为<strong>SIGNAL</strong>，表示ThreadB需要阻塞，但在阻塞之前需要将前驱置为<strong>SIGNAL</strong>，以便将来可以唤醒ThreadB。</p>
+<p>最终ThreadB会在<strong>parkAndCheckInterrupt</strong>中进入阻塞：</p>
+<p><img alt="img" src="./img/20191027163730328.png" style="zoom:80%;"/></p>
+<p>此时，同步状态值依然是<code>State == 1</code>，等待队列的结构如下：<br/><img alt="img" src="./img/20191027163737764.png" style="zoom:80%;"/></p>
+<h3 id="4-4-threadc-acqure-">4.4 ThreadC调用acqure()方法</h3>
+<p>流程和步骤3完全相同，ThreadC被包装成结点加入等待队列后：<br/><img alt="img" src="./img/20191027163747597.png" style="zoom:80%;"/></p>
+<p>同步状态：<code>State == 1</code></p>
+<h3 id="4-5-threada-release-">4.5 ThreadA调用release()方法</h3>
+<p><strong>Semaphore</strong>的<strong>realse</strong>方法调用了AQS的<strong>releaseShared</strong>方法，默认入参为"1"，表示归还一个许可：<br/><img alt="img" src="./img/20191027163755238.png" style="zoom:80%;"/></p>
+<p>来看下<strong>Semaphore</strong>是如何实现<strong>tryReleaseShared</strong>方法的，<strong>tryReleaseShared</strong>方法是一个自旋操作，直到更新State成功：<br/><img alt="img" src="./img/20191027163802970.png" style="zoom:80%;"/></p>
+<p>更新完成后，<code>State == 2</code>,ThreadA会进入<strong>doReleaseShared</strong>方法，先将头结点状态置为0，表示即将唤醒后继结点：<br/><img alt="img" src="./img/20191027163810851.png" style="zoom:80%;"/></p>
+<p>此时，等待队列结构：<br/><img alt="img" src="./img/20191027163817850.png" style="zoom:80%;"/></p>
+<p>然后调用<strong>unparkSuccessor</strong>方法唤醒后继结点：<br/><img alt="img" src="./img/20191027163826345.png" style="zoom:80%;"/></p>
+<p>此时，ThreadB被唤醒，会从原阻塞处继续向下执行：<br/><img alt="img" src="./img/20191027163835012.png" style="zoom:80%;"/></p>
+<p>此时，同步状态：<code>State == 2</code></p>
+<h3 id="4-6-threadb-">4.6 ThreadB从原阻塞处继续执行</h3>
+<p>ThreadB被唤醒后，从下面开始继续往下执行，进入下一次自旋：<br/><img alt="img" src="./img/20191027163841841.png" style="zoom:80%;"/></p>
+<p>在下一次自旋中，ThreadB调用<strong>tryAcquireShared</strong>方法成功获取到共享资源（State修改为0），<strong>setHeadAndPropagate</strong>方法把ThreadB变为头结点，并根据传播状态判断是否要唤醒并释放后继结点：<br/><img alt="img" src="./img/20191027163849182.png" style="zoom:80%;"/></p>
+<p><img alt="img" src="./img/20191027163859774.png" style="zoom:80%;"/></p>
+<p>同步状态：<code>State == 0</code></p>
+<p>ThreadB会调用<strong>doReleaseShared</strong>方法，继续尝试唤醒后继的共享结点（也就是ThreadC），这个过程和ThreadB被唤醒完全一样：<br/><img alt="img" src="./img/20191027163907937.png" style="zoom:80%;"/></p>
+<p><img alt="img" src="./img/20191027163915728.png" style="zoom:80%;"/></p>
+<p>同步状态：<code>State == 0</code></p>
+<h3 id="4-7-threadc-">4.7 ThreadC从原阻塞处继续执行</h3>
+<p>由于目前共享资源仍为0，所以ThreadC被唤醒后，在经过尝试获取资源失败后，又进入了阻塞：<br/><img alt="img" src="./img/20191027163923592.png" style="zoom:80%;"/></p>
+<p><img alt="img" src="./img/20191027163931857.png" style="zoom:80%;"/></p>
+<h3 id="4-8-threada-release-2-">4.8 ThreadA调用release(2)方法</h3>
+<p>内部和无参的release方法一样：<br/><img alt="img" src="./img/20191027163941014.png" style="zoom:80%;"/></p>
+<p>更新完成后，<code>State == 2</code>,ThreadA会进入<strong>doReleaseShared</strong>方法，唤醒后继结点：<br/><img alt="img" src="./img/20191027163948232.png" style="zoom:80%;"/></p>
+<p>此时，等待队列结构：<br/><img alt="img" src="./img/20191027163959134.png" style="zoom:80%;"/></p>
+<p>同步状态：<code>State == 2</code></p>
+<h3 id="4-9-threadc-">4.9 ThreadC从原阻塞处继续执行</h3>
+<p>由于目前共享资源为2，所以ThreadC被唤醒后，获取资源成功：<br/><img alt="img" src="./img/20191027164006042.png" style="zoom:80%;"/></p>
+<p>最终同步队列的结构如下：<br/><img alt="img" src="./img/20191027164013303.png" style="zoom:80%;"/></p>
+<p>同步状态：<code>State == 0</code></p>
+<h2 id="-">五、总结</h2>
+<p><strong>Semaphore</strong>其实就是实现了AQS共享功能的同步器，对于<strong>Semaphore</strong>来说，资源就是许可证的数量：</p>
+<ul>
+<li>剩余许可证数（State值） - 尝试获取的许可数（<strong>acquire</strong>方法入参） ≥ 0：资源可用</li>
+<li>剩余许可证数（State值） - 尝试获取的许可数（<strong>acquire</strong>方法入参）  &lt;  0：资源不可用</li>
+</ul>
+<p>这里共享的含义是多个线程可以同时获取资源，当计算出的剩余资源不足时，线程就会阻塞。</p>
+<blockquote>
+<p><strong>注意：</strong>Semaphore不是锁，只能限制同时访问资源的线程数，至于对数据一致性的控制，Semaphore是不关心的。当前，如果是只有一个许可的Semaphore，可以当作锁使用。</p>
+</blockquote>
+<h3 id="5-1-semaphore-">5.1 Semaphore的非公平策略</h3>
+<p>另外，上述我们讨论的是<strong>Semaphore</strong>的公平策略，非公平策略的差异并不大：<br/><img alt="img" src="./img/20191027164022403.png" style="zoom:80%;"/></p>
+<p>可以看到，非公平策略不会去查看等待队列的队首是否有其它线程正在等待，而是直接尝试修改State值。</p>
+<h3 id="5-2-semaphore-">5.2 Semaphore的其它方法</h3>
+<p><strong>Semaphore</strong>还有两个比较特殊的方法，这两个方法的特点是采用自旋操作State变量，直到成功为止。所以，并不会阻塞调用线程。</p>
+<p><strong><em>reducePermits</em></strong><br/><img alt="img" src="./img/20191027164029253.png" style="zoom:80%;"/></p>
+<p><strong>reducePermits</strong>立即减少指定数目的可用许可数。</p>
+<p><strong><em>drainPermits</em></strong><br/><img alt="img" src="./img/20191027164036179.png" style="zoom:80%;"/></p>
+<p><strong>drainPermits</strong>方法用于将可用许可数清零，并返回清零前的许可数</p>
+<h2 id="-semaphore-">六、Semaphore的类/接口声明</h2>
+<h3 id="6-1-">6.1 类声明</h3>
+<p><img alt="img" src="./img/20191027164043033.png" style="zoom:80%;"/></p>
+<h3 id="6-2-">6.2 构造器</h3>
+<p><img alt="img" src="./img/20191027164049819.png" style="zoom:80%;"/></p>
+<h3 id="6-3-">6.3 接口声明</h3>
+<p><img alt="img" src="./img/20191027164056710.png" style="zoom:80%;"/><br/><img alt="img" src="./img/20191027164103164.png" style="zoom:80%;"/></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,222 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（二四）——Broker：副本同步——延迟读写</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（二四）——Broker：副本同步——延迟读写</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将对副本同步过程中的<strong>延迟读写</strong>情况进行讲解。什么是延迟读写？</p>
+<p>这要分两种情况：</p>
+<ol>
+<li>延迟读取：也就是说，生产者可能发送消息并不频繁，各个分区的Leader和Follower完全处于同步一致的状态，这时，<strong>Leader本身没什么消息写入，而此时Follower又发送了Fetch请求过来同步消息</strong>，此时Leader就会延迟读取消息；</li>
+<li>延迟写入：主要就是Producer的acks参数设置为all 或 -1，必须等待所有ISR中的Follower都拉取到了这批数据后，才可以响应。</li>
+</ol>
+<p>本章，我就对这两种情况进行讲解。</p>
+<h2 id="-">一、延迟读取</h2>
+<p>首先，我们来看如果Broker端接受到Fetch请求后，没有最新的消息可供读取会怎么做？</p>
+<h3 id="1-1-">1.1 等待</h3>
+<p>事实上，Kafka Broker利用了<strong>时间轮机制</strong>来处理这种情况：把一个DelayedFetch任务插入到500毫秒之后的时间格里去，随着轮子的运转，最多就是500毫秒之后就会执行这个Fetch任务。如果在这个500毫秒之内，有新的数据进入到了Leader中，就会触发Fetch任务的执行：</p>
+<pre><code class="lang-java">// ReplicaManager.scala
+
+def fetchMessages(timeout: Long,
+                  replicaId: Int,
+                  fetchMinBytes: Int,
+                  fetchMaxBytes: Int,
+                  hardMaxBytesLimit: Boolean,
+                  fetchInfos: Seq[(TopicPartition, PartitionData)],
+                  quota: ReplicaQuota = UnboundedQuota,
+                  responseCallback: Seq[(TopicPartition, FetchPartitionData)] =&gt; Unit) {
+  val isFromFollower = replicaId &gt;= 0
+  val fetchOnlyFromLeader: Boolean = replicaId != Request.DebuggingConsumerId
+  val fetchOnlyCommitted: Boolean = ! Request.isValidBrokerId(replicaId)
+
+  // 从本地磁盘读取消息
+  val logReadResults = readFromLocalLog(
+    replicaId = replicaId,
+    fetchOnlyFromLeader = fetchOnlyFromLeader,
+    readOnlyCommitted = fetchOnlyCommitted,
+    fetchMaxBytes = fetchMaxBytes,
+    hardMaxBytesLimit = hardMaxBytesLimit,
+    readPartitionInfo = fetchInfos,
+    quota = quota)
+  //...
+  if (timeout &lt;= 0 || fetchInfos.isEmpty || bytesReadable &gt;= fetchMinBytes || errorReadingData) {
+    val fetchPartitionData = logReadResults.map { case (tp, result) =&gt;
+      tp -&gt; FetchPartitionData(result.error, result.hw, result.info.records)
+    }
+    responseCallback(fetchPartitionData)
+  } else {
+    // 进入到这个分支，说明没有最新的消息可供读取
+    val fetchPartitionStatus = logReadResults.map { case (topicPartition, result) =&gt;
+      val fetchInfo = fetchInfos.collectFirst {
+        case (tp, v) if tp == topicPartition =&gt; v
+      }.getOrElse(sys.error(s"Partition $topicPartition not found in fetchInfos"))
+      (topicPartition, FetchPartitionStatus(result.info.fetchOffsetMetadata, fetchInfo))
+    }
+    val fetchMetadata = FetchMetadata(fetchMinBytes, fetchMaxBytes, hardMaxBytesLimit, fetchOnlyFromLeader,
+      fetchOnlyCommitted, isFromFollower, replicaId, fetchPartitionStatus)
+
+    // 创建一个DelayedFetch任务，进行延时调度
+    val delayedFetch = new DelayedFetch(timeout, fetchMetadata, this, quota, responseCallback)
+    val delayedFetchKeys = fetchPartitionStatus.map { case (tp, _) =&gt; 
+        new TopicPartitionOperationKey(tp) }
+    // 由时间轮进行调度
+    delayedFetchPurgatory.tryCompleteElseWatch(delayedFetch, delayedFetchKeys)
+  }
+}
+</code></pre>
+<p>关键是上述的delayedFetchPurgatory，这个就是时间轮的核心组件，Kafka会将请求封装成一个DelayedFetch任务，交给DelayedOperationPurgatory进行调度处理。</p>
+<blockquote>
+<p>DelayedOperationPurgatory的代码我就不深入了，读者可以顺着我的思路去研读它的代码。</p>
+</blockquote>
+<h3 id="1-2-">1.2 唤醒</h3>
+<p>在创建上述的DelayedFetch延时任务时，实际上传入了一个<code>responseCallback</code>回调函数。所以，一旦Broker接受到新的消息，并完成向分区写入消息后，就会唤醒延时任务，并触发回调函数：</p>
+<pre><code class="lang-java">// Partition.scala
+
+def appendRecordsToLeader(records: MemoryRecords, requiredAcks: Int = 0) = {
+val (info, leaderHWIncremented) = inReadLock(leaderIsrUpdateLock) {
+  leaderReplicaIfLocal match {
+    case Some(leaderReplica) =&gt;
+      //...
+
+      // 1.向分区写入消息
+      val info = log.append(records, assignOffsets = true)
+      // 2.唤醒延时任务
+      replicaManager.tryCompleteDelayedFetch(TopicPartitionOperationKey(this.topic, this.partitionId))
+      (info, maybeIncrementLeaderHW(leaderReplica))
+    case None =&gt;
+      throw new NotLeaderForPartitionException("Leader not local for partition %s on broker %d"
+        .format(topicPartition, localBrokerId))
+  }
+}
+</code></pre>
+<pre><code class="lang-java">// ReplicaManager.scala
+def tryCompleteDelayedFetch(key: DelayedOperationKey) {
+  // 通过时间轮组件完成调度
+  val completed = delayedFetchPurgatory.checkAndComplete(key)
+  debug("Request key %s unblocked %d fetch requests.".format(key.keyLabel, completed))
+}
+</code></pre>
+<h2 id="-">二、延迟写入</h2>
+<p>我们再来看延迟写入的情况。</p>
+<h3 id="2-1-">2.1 等待</h3>
+<p>ReplicaManager在写入消息时，有下面这样的一段逻辑，本质还是利用了时间轮，创建了一个DelayedProduce延迟任务：</p>
+<pre><code class="lang-java">// ReplicaManager.scala
+
+def appendRecords(timeout: Long,
+                  requiredAcks: Short,
+                  internalTopicsAllowed: Boolean,
+                  entriesPerPartition: Map[TopicPartition, MemoryRecords],
+                  responseCallback: Map[TopicPartition, PartitionResponse] =&gt; Unit) {
+
+  if (isValidRequiredAcks(requiredAcks)) {
+    val sTime = time.milliseconds
+    val localProduceResults = appendToLocalLog(internalTopicsAllowed, entriesPerPartition, requiredAcks)
+    debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
+
+    val produceStatus = localProduceResults.map { case (topicPartition, result) =&gt;
+      topicPartition -&gt;
+              ProducePartitionStatus(
+                result.info.lastOffset + 1, // required offset
+                new PartitionResponse(result.error, result.info.firstOffset, result.info.logAppendTime)) // response status
+    }
+
+    // 如果需要延迟写入
+    if (delayedRequestRequired(requiredAcks, entriesPerPartition, localProduceResults)) {
+      // 1.创建延迟写入调度任务DelayedProduce
+      val produceMetadata = ProduceMetadata(requiredAcks, produceStatus)
+      val delayedProduce = new DelayedProduce(timeout, produceMetadata, this, responseCallback)
+      val producerRequestKeys = entriesPerPartition.keys.map(new TopicPartitionOperationKey(_)).toSeq
+      // 2.利用时间轮进行调度
+      delayedProducePurgatory.tryCompleteElseWatch(delayedProduce, producerRequestKeys)
+
+    } else {
+      // we can respond immediately
+      val produceResponseStatus = produceStatus.mapValues(status =&gt; status.responseStatus)
+      responseCallback(produceResponseStatus)
+    }
+  } else {
+    // If required.acks is outside accepted range, something is wrong with the client
+    // Just return an error and don't handle the request at all
+    val responseStatus = entriesPerPartition.map { case (topicPartition, _) =&gt;
+      topicPartition -&gt; new PartitionResponse(Errors.INVALID_REQUIRED_ACKS,
+        LogAppendInfo.UnknownLogAppendInfo.firstOffset, Record.NO_TIMESTAMP)
+    }
+    responseCallback(responseStatus)
+  }
+}
+</code></pre>
+<p>我们来看下delayedRequestRequired方法，就是说当acks==-1时，也就是需要ISR中的Follower都写入完成时，才会触发延迟写入：</p>
+<pre><code class="lang-java">// ReplicaManager.scalaF
+private def delayedRequestRequired(requiredAcks: Short,
+                                   entriesPerPartition: Map[TopicPartition, MemoryRecords],
+                                   localProduceResults: Map[TopicPartition, LogAppendResult]): Boolean = {
+  requiredAcks == -1 &amp;&amp;
+  entriesPerPartition.nonEmpty &amp;&amp;
+  localProduceResults.values.count(_.exception.isDefined) &lt; entriesPerPartition.size
+}
+</code></pre>
+<h3 id="2-2-">2.2 唤醒</h3>
+<p>最后，我们来看下Broker是在哪里唤醒DelayedProduce任务的。既然等待的是各个Fellower进行数据同步，那肯定是在数据同步的代码里，每个Follower同步完一次数据就要检查一下，是否可以唤醒DelayedProduce延时任务。</p>
+<p>所以，又回到了Fetch请求对应的<code>ReplicaManager.fetchMessages()</code>方法，层层调用后，就是在调用<code>ReplicaManager.updateFollowerLogReadResults()</code>方法时进行判断的：</p>
+<pre><code class="lang-java">// ReplicaManager.scala
+def fetchMessages(timeout: Long,
+                  replicaId: Int,
+                  fetchMinBytes: Int,
+                  fetchMaxBytes: Int,
+                  hardMaxBytesLimit: Boolean,
+                  fetchInfos: Seq[(TopicPartition, PartitionData)],
+                  quota: ReplicaQuota = UnboundedQuota,
+                  responseCallback: Seq[(TopicPartition, FetchPartitionData)] =&gt; Unit) {
+  val isFromFollower = replicaId &gt;= 0
+  val fetchOnlyFromLeader: Boolean = replicaId != Request.DebuggingConsumerId
+  val fetchOnlyCommitted: Boolean = ! Request.isValidBrokerId(replicaId)
+
+  // read from local logs
+  val logReadResults = readFromLocalLog(
+    replicaId = replicaId,
+    fetchOnlyFromLeader = fetchOnlyFromLeader,
+    readOnlyCommitted = fetchOnlyCommitted,
+    fetchMaxBytes = fetchMaxBytes,
+    hardMaxBytesLimit = hardMaxBytesLimit,
+    readPartitionInfo = fetchInfos,
+    quota = quota)
+
+  // Fetch请求
+  if(Request.isValidBrokerId(replicaId))
+    // 更新Follower的消息读取结果
+    updateFollowerLogReadResults(replicaId, logReadResults)
+    //...
+}
+</code></pre>
+<pre><code class="lang-java">// ReplicaManager.scala
+private def updateFollowerLogReadResults(replicaId: Int, readResults: Seq[(TopicPartition, LogReadResult)]) {
+  debug("Recording follower broker %d log read results: %s ".format(replicaId, readResults))
+  readResults.foreach { case (topicPartition, readResult) =&gt;
+    getPartition(topicPartition) match {
+      case Some(partition) =&gt;
+        partition.updateReplicaLogReadResult(replicaId, readResult)
+
+        // 对应ACKS&gt;1的情况，检查Follower是否都已经同步完成
+        tryCompleteDelayedProduce(new TopicPartitionOperationKey(topicPartition))
+      case None =&gt;
+        warn("While recording the replica LEO, the partition %s hasn't been created.".format(topicPartition))
+    }
+  }
+}
+
+def tryCompleteDelayedProduce(key: DelayedOperationKey) {
+  // 检查是否可以唤醒延时任务
+  val completed = delayedProducePurgatory.checkAndComplete(key)
+  debug("Request key %s unblocked %d producer requests.".format(key.keyLabel, completed))
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我对副本同步中的最后一块内容——延迟读写进行了讲解。Kafka就是利用了时间轮机制对这种延迟读写的情况进行处理。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

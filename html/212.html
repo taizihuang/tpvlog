@@ -1,0 +1,226 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（三）——建造者模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（三）——建造者模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>建造者模式（Builder Pattern），有时也叫做生成器模式，是一种比较常用的创建型设计模式。建造者模式的原理和代码实现非常简单，掌握起来并不难，<strong>难点在于应用场景</strong>。</p>
+<h2 id="-">一、模式介绍</h2>
+<p>既然new方式、工厂模式都可以用来创建对象，那为什么我们要用建造者模式呢？</p>
+<h3 id="1-1-builder-">1.1 为何使用Builder模式</h3>
+<p>我们考虑下面这样一种场景，假设需要创建一个资源池配置类 ResourcePoolConfig（可以简单理解为线程池、连接池、对象池等），在这个资源池配置类中，有一些成员变量，部分必输，部分非必输。</p>
+<p>最简单的实现方式是下面这样的：</p>
+<pre><code class="lang-JAVA">public class ResourcePoolConfig {
+  private static final int DEFAULT_MAX_TOTAL = 8;
+  private static final int DEFAULT_MAX_IDLE = 8;
+  private static final int DEFAULT_MIN_IDLE = 0;
+
+  private String name;
+  private int maxTotal = DEFAULT_MAX_TOTAL;
+  private int maxIdle = DEFAULT_MAX_IDLE;
+  private int minIdle = DEFAULT_MIN_IDLE;
+
+  public ResourcePoolConfig(String name, Integer maxTotal, Integer maxIdle, Integer minIdle) {
+    if (StringUtils.isBlank(name)) {
+      throw new IllegalArgumentException("name should not be empty.");
+    }
+    this.name = name;
+
+    if (maxTotal != null) {
+      if (maxTotal &lt;= 0) {
+        throw new IllegalArgumentException("maxTotal should be positive.");
+      }
+      this.maxTotal = maxTotal;
+    }
+
+    if (maxIdle != null) {
+      if (maxIdle &lt; 0) {
+        throw new IllegalArgumentException("maxIdle should not be negative.");
+      }
+      this.maxIdle = maxIdle;
+    }
+
+    if (minIdle != null) {
+      if (minIdle &lt; 0) {
+        throw new IllegalArgumentException("minIdle should not be negative.");
+      }
+      this.minIdle = minIdle;
+    }
+  }
+  //...省略getter方法...
+}
+</code></pre>
+<p>上述代码中，我们通过往构造函数传参来设置对象的字段值。但是，如果可配置项逐渐增多，变成了 8 个、10 个，甚至更多，那继续沿用现在的设计思路，构造函数的参数列表会变得很长，代码在可读性和易用性上都会变差。</p>
+<p>解决这个问题的办法，一种是利用 set() 函数来给成员变量赋值，构造函数中只放必输参数：</p>
+<pre><code class="lang-JAVA">public class ResourcePoolConfig {
+  private static final int DEFAULT_MAX_TOTAL = 8;
+  private static final int DEFAULT_MAX_IDLE = 8;
+  private static final int DEFAULT_MIN_IDLE = 0;
+
+  private String name;
+  private int maxTotal = DEFAULT_MAX_TOTAL;
+  private int maxIdle = DEFAULT_MAX_IDLE;
+  private int minIdle = DEFAULT_MIN_IDLE;
+
+  public ResourcePoolConfig(String name) {
+    if (StringUtils.isBlank(name)) {
+      throw new IllegalArgumentException("name should not be empty.");
+    }
+    this.name = name;
+  }
+
+  public void setMaxTotal(int maxTotal) {
+    if (maxTotal &lt;= 0) {
+      throw new IllegalArgumentException("maxTotal should be positive.");
+    }
+    this.maxTotal = maxTotal;
+  }
+
+  public void setMaxIdle(int maxIdle) {
+    if (maxIdle &lt; 0) {
+      throw new IllegalArgumentException("maxIdle should not be negative.");
+    }
+    this.maxIdle = maxIdle;
+  }
+
+  public void setMinIdle(int minIdle) {
+    if (minIdle &lt; 0) {
+      throw new IllegalArgumentException("minIdle should not be negative.");
+    }
+    this.minIdle = minIdle;
+  }
+  //...省略getter方法...
+}
+</code></pre>
+<p>但是，这种设计思路有如下问题：</p>
+<ul>
+<li>如果必填的配置项有很多，把这些必填配置项都放到构造函数中设置，那构造函数就又会出现参数列表很长的问题。如果我们把必填项也通过 set() 方法设置，那校验这些必填项是否已经填写的逻辑就无处安放了。</li>
+<li>如果配置项之间有一定的依赖关系，比如，如果用户设置了 maxTotal、maxIdle、minIdle 其中一个，就必须显式地设置另外两个；或者配置项之间有一定的约束条件，比如maxIdle 和 minIdle 要小于等于 maxTotal；如果我们继续使用现在的设计思路，那这些配置项之间的依赖关系或者约束条件的校验逻辑就无处安放了。</li>
+<li>如果我们希望 ResourcePoolConfig 类对象是不可变对象，也就是说，对象在创建好之后，就不能再修改内部的属性值，要实现这个功能，我们就不能在 ResourcePoolConfig 类中暴露 set() 方法。</li>
+</ul>
+<p>为了解决这些问题，建造者模式就派上用场了。</p>
+<h3 id="1-2-builder-">1.2 Builder模式</h3>
+<p>我们通过Builder模式，做如下改造：</p>
+<ol>
+<li>把校验逻辑放置到 Builder 类中，先创建建造者，并且通过 set() 方法设置建造者的变量值，然后在使用 build() 方法真正创建对象之前，做集中的校验，校验通过之后才会创建对象。</li>
+<li>把 ResourcePoolConfig 的构造函数改为 private 私有权限，这样就只能通过建造者来创建 ResourcePoolConfig 对象。并且，ResourcePoolConfig 没有提供任何 set() 方法，这样创建出来的对象就是不可变对象了。</li>
+</ol>
+<pre><code class="lang-JAVA">public class ResourcePoolConfig {
+  private String name;
+  private int maxTotal;
+  private int maxIdle;
+  private int minIdle;
+
+  private ResourcePoolConfig(Builder builder) {
+    this.name = builder.name;
+    this.maxTotal = builder.maxTotal;
+    this.maxIdle = builder.maxIdle;
+    this.minIdle = builder.minIdle;
+  }
+  //...省略getter方法...
+
+  //我们将Builder类设计成了ResourcePoolConfig的内部类。
+  //我们也可以将Builder类设计成独立的非内部类ResourcePoolConfigBuilder。
+  public static class Builder {
+    private static final int DEFAULT_MAX_TOTAL = 8;
+    private static final int DEFAULT_MAX_IDLE = 8;
+    private static final int DEFAULT_MIN_IDLE = 0;
+
+    private String name;
+    private int maxTotal = DEFAULT_MAX_TOTAL;
+    private int maxIdle = DEFAULT_MAX_IDLE;
+    private int minIdle = DEFAULT_MIN_IDLE;
+
+    public ResourcePoolConfig build() {
+      // 校验逻辑放到这里来做，包括必填项校验、依赖关系校验、约束条件校验等
+      if (StringUtils.isBlank(name)) {
+        throw new IllegalArgumentException("...");
+      }
+      if (maxIdle &gt; maxTotal) {
+        throw new IllegalArgumentException("...");
+      }
+      if (minIdle &gt; maxTotal || minIdle &gt; maxIdle) {
+        throw new IllegalArgumentException("...");
+      }
+
+      return new ResourcePoolConfig(this);
+    }
+
+    public Builder setName(String name) {
+      if (StringUtils.isBlank(name)) {
+        throw new IllegalArgumentException("...");
+      }
+      this.name = name;
+      return this;
+    }
+
+    public Builder setMaxTotal(int maxTotal) {
+      if (maxTotal &lt;= 0) {
+        throw new IllegalArgumentException("...");
+      }
+      this.maxTotal = maxTotal;
+      return this;
+    }
+
+    public Builder setMaxIdle(int maxIdle) {
+      if (maxIdle &lt; 0) {
+        throw new IllegalArgumentException("...");
+      }
+      this.maxIdle = maxIdle;
+      return this;
+    }
+
+    public Builder setMinIdle(int minIdle) {
+      if (minIdle &lt; 0) {
+        throw new IllegalArgumentException("...");
+      }
+      this.minIdle = minIdle;
+      return this;
+    }
+  }
+}
+</code></pre>
+<p>使用建造者模式创建对象：</p>
+<pre><code class="lang-JAVA">// 这段代码会抛出IllegalArgumentException，因为minIdle&gt;maxIdle
+ResourcePoolConfig config = new ResourcePoolConfig.Builder()
+        .setName("dbconnectionpool")
+        .setMaxTotal(16)
+        .setMaxIdle(10)
+        .setMinIdle(12)
+        .build();
+</code></pre>
+<p>建造者模式，避免了对象创建时“无效状态”的存在，所以如果构造函数参数过多，我们就需要考虑使用建造者模式，先设置建造者的变量，然后再一次性地创建对象，让对象一直处于有效状态。</p>
+<h2 id="-">二、开源示例</h2>
+<p>Netty 中 ServerBootStrap 和 Bootstrap 引导器是最经典的建造者模式实现，在构建过程中需要设置非常多的参数，例如配置线程池 EventLoopGroup、设置 Channel 类型、注册 ChannelHandler、设置 Channel 参数、端口绑定等。使用建造者模式可以灵活构建对象：</p>
+<pre><code class="lang-JAVA">ServerBootstrap serverBootstrap = new ServerBootstrap();
+serverBootstrap.group(mainGroup, subGroup)
+    .channel(NioServerSocketChannel.class)
+    .option(ChannelOption.SO_BACKLOG, 1024)
+    .localAddress("127.0.0.1", PORT)
+    .childOption(ChannelOption.SO_KEEPALIVE, true)
+    .childOption(ChannelOption.TCP_NODELAY, true)
+    .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {
+        @Override
+        protected void initChannel(SocketChannel socketChannel) {
+            System.out.println("Server receive socket:" + socketChannel);
+        }
+    });
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>工厂模式是用来创建不同但是相关类型的对象（继承同一父类或者接口的一组子类），由给定的参数来决定创建哪种类型的对象。而建造者模式是用来创建一种类型的复杂对象，通过设置不同的可选参数，“定制化”地创建不同的对象。</p>
+<p>如果一个类中有很多属性，为了避免构造函数的参数列表过长，影响代码的可读性和易用性，我们可以通过构造函数配合 set() 方法来解决。但是，如果存在下面情况中的任意一种，我们就要考虑使用建造者模式了：</p>
+<ul>
+<li><p>类有许多必填属性，如果把这些必填属性都放到构造函数中，那构造函数的参数列表就会很长；</p>
+</li>
+<li><p>类的属性之间有一定的依赖关系或约束条件；</p>
+</li>
+<li>我们希望创建不可变对象，也就是说，对象在创建好之后，就不能再修改内部的属性值，要实现这个功能，我们就不能在类中暴露 set() 方法；</li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

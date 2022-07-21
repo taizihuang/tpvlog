@@ -1,0 +1,291 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（二三）——Ribbon初始化流程：整合Eureka</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（二三）——Ribbon初始化流程：整合Eureka</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将讲解与Eureka整合使用时，Spring Cloud Netflix Ribbon的初始化流程。掌握了Spring Cloud Netflix Ribbon的客户端配置的底层原理及其初始化流程，我们再学习Eureka的整合流程其实就很轻松了。读者可以先自己思考下，如果要与Eureka整合，需要对Ribbon做哪些改造？</p>
+<p>其实核心就是一点：<strong>如何在Spring Boot应用启动时，创建与Eureka功能相关的Ribbon客户端？</strong></p>
+<h2 id="-">一、初始化流程</h2>
+<p>我们已经知道，Spring Cloud会为我们创建一个<code>RibbonLoadBalancerClient</code>对象，作为默认的Ribbon客户端实现类，与此同时会根据<code>RibbonClientConfiguration</code>创建很多默认的Ribbon核心组件，并与RibbonLoadBalancerClient绑定。</p>
+<p>所以，当Ribbon与Eureka结合使用时，Spring Cloud肯定会<strong>创建与Eureka功能相关的Ribbon组件</strong>。</p>
+<h3 id="1-1-spring-boot-">1.1 Spring Boot自动装配</h3>
+<p>当我们在项目中引入Spring Cloud Netflix Eureka相关的jar依赖（<code>spring-cloud-netflix-eureka-client</code>）后，应用启动时就会触发Eureka的自动装配：</p>
+<p><img alt="" src="./img/20210202222448770.png"/></p>
+<pre><code class="lang-properties">org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+org.springframework.cloud.netflix.eureka.config.EurekaClientConfigServerAutoConfiguration,\
+org.springframework.cloud.netflix.eureka.config.DiscoveryClientOptionalArgsConfiguration,\
+org.springframework.cloud.netflix.eureka.EurekaClientAutoConfiguration,\
+org.springframework.cloud.netflix.ribbon.eureka.RibbonEurekaAutoConfiguration,\
+org.springframework.cloud.netflix.eureka.EurekaDiscoveryClientConfiguration,\
+org.springframework.cloud.netflix.eureka.reactive.EurekaReactiveDiscoveryClientConfiguration,\
+org.springframework.cloud.netflix.eureka.loadbalancer.LoadBalancerEurekaAutoConfiguration
+
+org.springframework.cloud.bootstrap.BootstrapConfiguration=\
+org.springframework.cloud.netflix.eureka.config.EurekaConfigServerBootstrapConfiguration
+</code></pre>
+<p>上述与Ribbon相关的自动装配类中，最重要的就是<code>RibbonEurekaAutoConfiguration</code>和<code>LoadBalancerEurekaAutoConfiguration</code>。</p>
+<h3 id="1-2-ribboneurekaautoconfiguration">1.2 RibbonEurekaAutoConfiguration</h3>
+<p>RibbonEurekaAutoConfiguration是Eureka和Ribbon结合使用的”胶水“：</p>
+<pre><code class="lang-JAVA">@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties
+@ConditionalOnRibbonAndEurekaEnabled
+@AutoConfigureAfter(RibbonAutoConfiguration.class)
+@RibbonClients(defaultConfiguration = EurekaRibbonClientConfiguration.class)
+public class RibbonEurekaAutoConfiguration {
+}
+</code></pre>
+<p>RibbonEurekaAutoConfiguration的核心就是<code>@RibbonClients</code>注解，它会指定全局的Ribbon客户端配置类<code>EurekaRibbonClientConfiguration</code>，Spring Cloud会利用这个配置类创建一些自定义的Ribbon核心组件，并覆盖掉<code>RibbonAutoConfiguration</code>中的默认配置。</p>
+<h3 id="1-3-eurekaribbonclientconfiguration">1.3 EurekaRibbonClientConfiguration</h3>
+<p>EurekaRibbonClientConfiguration就是自定义了一些Ribbon组件，这些组件可以将Ribbon与Eureka整合起来：</p>
+<pre><code class="lang-JAVA">@Configuration(proxyBeanMethods = false)
+public class EurekaRibbonClientConfiguration {
+
+    @Value("${ribbon.eureka.approximateZoneFromHostname:false}")
+    private boolean approximateZoneFromHostname = false;
+
+    @RibbonClientName
+    private String serviceId = "client";
+
+    @Autowired(required = false)
+    private EurekaClientConfig clientConfig;
+
+    @Autowired(required = false)
+    private EurekaInstanceConfig eurekaConfig;
+
+    @Autowired
+    private PropertiesFactory propertiesFactory;
+
+    public EurekaRibbonClientConfiguration() {
+    }
+
+    public EurekaRibbonClientConfiguration(EurekaClientConfig clientConfig,
+            String serviceId, EurekaInstanceConfig eurekaConfig,
+            boolean approximateZoneFromHostname) {
+        this.clientConfig = clientConfig;
+        this.serviceId = serviceId;
+        this.eurekaConfig = eurekaConfig;
+        this.approximateZoneFromHostname = approximateZoneFromHostname;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public IPing ribbonPing(IClientConfig config) {
+        if (this.propertiesFactory.isSet(IPing.class, serviceId)) {
+            return this.propertiesFactory.get(IPing.class, config, serviceId);
+        }
+        // NIWSDiscoveryPing会覆盖掉默认的Ribbon客户端配置——ZoneAvoidanceRule
+        NIWSDiscoveryPing ping = new NIWSDiscoveryPing();
+        ping.initWithNiwsConfig(config);
+        return ping;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ServerList&lt;?&gt; ribbonServerList(IClientConfig config,
+            Provider&lt;EurekaClient&gt; eurekaClientProvider) {
+        if (this.propertiesFactory.isSet(ServerList.class, serviceId)) {
+            return this.propertiesFactory.get(ServerList.class, config, serviceId);
+        }
+         // DiscoveryEnabledNIWSServerList会覆盖掉默认的Ribbon客户端配置——ConfigurationBasedServerList
+        DiscoveryEnabledNIWSServerList discoveryServerList = new DiscoveryEnabledNIWSServerList(
+                config, eurekaClientProvider);
+        DomainExtractingServerList serverList = new DomainExtractingServerList(
+                discoveryServerList, config, this.approximateZoneFromHostname);
+        return serverList;
+    }
+
+    @Bean
+    public ServerIntrospector serverIntrospector() {
+        // 这里会覆盖掉默认的Ribbon客户端配置——ConfigurationBasedServerList
+        return new EurekaServerIntrospector();
+    }
+
+    @PostConstruct
+    public void preprocess() {
+        String zone = ConfigurationManager.getDeploymentContext()
+                .getValue(ContextKey.zone);
+        if (this.clientConfig != null &amp;&amp; StringUtils.isEmpty(zone)) {
+            if (this.approximateZoneFromHostname &amp;&amp; this.eurekaConfig != null) {
+                String approxZone = ZoneUtils
+                        .extractApproximateZone(this.eurekaConfig.getHostName(false));
+                log.debug("Setting Zone To " + approxZone);
+                ConfigurationManager.getDeploymentContext().setValue(ContextKey.zone, approxZone);
+            }
+            else {
+                String availabilityZone = this.eurekaConfig == null ? null
+                        : this.eurekaConfig.getMetadataMap().get("zone");
+                if (availabilityZone == null) {
+                    String[] zones = this.clientConfig
+                            .getAvailabilityZones(this.clientConfig.getRegion());
+                    // Pick the first one from the regions we want to connect to
+                    availabilityZone = zones != null &amp;&amp; zones.length &gt; 0 ? zones[0] : null;
+                }
+                if (availabilityZone != null) {
+                    ConfigurationManager.getDeploymentContext().setValue(ContextKey.zone,
+                            availabilityZone);
+                }
+            }
+        }
+        RibbonUtils.initializeRibbonDefaults(serviceId);
+    }
+}
+</code></pre>
+<h3 id="1-4-loadbalancereurekaautoconfiguration">1.4 LoadBalancerEurekaAutoConfiguration</h3>
+<p>我们再来看下LoadBalancerEurekaAutoConfiguration，它是负责组装Spring Cloud通用的负载均衡组件：</p>
+<pre><code class="lang-JAVA">@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties
+@ConditionalOnClass(LoadBalancerClientConfigurationRegistrar.class)
+@LoadBalancerClients(defaultConfiguration = EurekaLoadBalancerClientConfiguration.class)
+@ConditionalOnProperty(name = "eureka.client.enabled", matchIfMissing = true)
+public class LoadBalancerEurekaAutoConfiguration {
+
+    public static final String LOADBALANCER_ZONE = "spring.cloud.loadbalancer.zone";
+
+    @Bean
+    @ConditionalOnMissingBean
+    EurekaLoadBalancerProperties eurekaLoadBalancerProperties() {
+        return new EurekaLoadBalancerProperties();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    LoadBalancerZoneConfig zoneConfig(Environment environment) {
+        return new LoadBalancerZoneConfig(environment.getProperty(LOADBALANCER_ZONE));
+    }
+}
+</code></pre>
+<p>LoadBalancerEurekaAutoConfiguration的核心是下面这个注解，它声明了一个全局的Ribbon客户端配置类<code>EurekaLoadBalancerClientConfiguration</code>：</p>
+<pre><code class="lang-JAVA">@LoadBalancerClients(defaultConfiguration = EurekaLoadBalancerClientConfiguration.class)
+</code></pre>
+<p>那这个配置类是什么时候注入到Spring IoC容器中的呢？我们看下<code>LoadBalancerClients</code>注解：</p>
+<pre><code class="lang-JAVA">@Configuration(proxyBeanMethods = false)
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ ElementType.TYPE })
+@Documented
+@Import(LoadBalancerClientConfigurationRegistrar.class)
+public @interface LoadBalancerClients {
+
+    LoadBalancerClient[] value() default {};
+
+    Class&lt;?&gt;[] defaultConfiguration() default {};
+}
+</code></pre>
+<p>通过注解我们可以看到，在Spring Boot应用启动时，会触发<code>LoadBalancerClientConfigurationRegistrar.registerBeanDefinitions()</code>方法的执行，此时会将<code>EurekaLoadBalancerClientConfiguration</code>这个默认配置类注入容器。这个思路和<code>@RibbonClients</code>完全相同，只不过不是特定针对Ribbon这个负载均衡组件而已，Spring Cloud把它通用化了：</p>
+<pre><code class="lang-JAVA">public class LoadBalancerClientConfigurationRegistrar implements ImportBeanDefinitionRegistrar {
+
+    private static void registerClientConfiguration(BeanDefinitionRegistry registry,
+            Object name, Object configuration) {
+        BeanDefinitionBuilder builder = BeanDefinitionBuilder
+                .genericBeanDefinition(LoadBalancerClientSpecification.class);
+        builder.addConstructorArgValue(name);
+        builder.addConstructorArgValue(configuration);
+        registry.registerBeanDefinition(name + ".LoadBalancerClientSpecification",
+                builder.getBeanDefinition());
+    }
+
+    @Override
+    public void registerBeanDefinitions(AnnotationMetadata metadata, BeanDefinitionRegistry registry) {
+        Map&lt;String, Object&gt; attrs = metadata
+                .getAnnotationAttributes(LoadBalancerClients.class.getName(), true);
+        if (attrs != null &amp;&amp; attrs.containsKey("value")) {
+            AnnotationAttributes[] clients = (AnnotationAttributes[]) attrs.get("value");
+            for (AnnotationAttributes client : clients) {
+                registerClientConfiguration(registry, getClientName(client),
+                        client.get("configuration"));
+            }
+        }
+        // 将默认配置类注入到Spring容器
+        if (attrs != null &amp;&amp; attrs.containsKey("defaultConfiguration")) {
+            String name;
+            if (metadata.hasEnclosingClass()) {
+                name = "default." + metadata.getEnclosingClassName();
+            }
+            else {
+                name = "default." + metadata.getClassName();
+            }
+            registerClientConfiguration(registry, name,
+                    attrs.get("defaultConfiguration"));
+        }
+        Map&lt;String, Object&gt; client = metadata
+                .getAnnotationAttributes(LoadBalancerClient.class.getName(), true);
+        String name = getClientName(client);
+        if (name != null) {
+            registerClientConfiguration(registry, name, client.get("configuration"));
+        }
+    }
+
+}
+</code></pre>
+<h3 id="1-5-eurekaloadbalancerclientconfiguration">1.5 EurekaLoadBalancerClientConfiguration</h3>
+<p>EurekaLoadBalancerClientConfiguration其实就是定义了一些与Eureka相关的负载均衡核心组件的初始化：</p>
+<pre><code class="lang-JAVA">@Configuration
+@ConditionalOnBean({ LoadBalancerZoneConfig.class, EurekaLoadBalancerProperties.class })
+public class EurekaLoadBalancerClientConfiguration {
+
+    private final EurekaClientConfig clientConfig;
+
+    private final EurekaInstanceConfig eurekaConfig;
+
+    private final LoadBalancerZoneConfig zoneConfig;
+
+    private final EurekaLoadBalancerProperties eurekaLoadBalancerProperties;
+
+    public EurekaLoadBalancerClientConfiguration(
+            @Autowired(required = false) EurekaClientConfig clientConfig,
+            @Autowired(required = false) EurekaInstanceConfig eurekaInstanceConfig,
+            LoadBalancerZoneConfig zoneConfig,
+            EurekaLoadBalancerProperties eurekaLoadBalancerProperties) {
+        this.clientConfig = clientConfig;
+        this.eurekaConfig = eurekaInstanceConfig;
+        this.zoneConfig = zoneConfig;
+        this.eurekaLoadBalancerProperties = eurekaLoadBalancerProperties;
+    }
+
+    @PostConstruct
+    public void postprocess() {
+        if (!StringUtils.isEmpty(zoneConfig.getZone())) {
+            return;
+        }
+        String zone = getZoneFromEureka();
+        if (!StringUtils.isEmpty(zone)) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Setting the value of '" + LOADBALANCER_ZONE + "' to " + zone);
+            }
+            zoneConfig.setZone(zone);
+        }
+    }
+
+    private String getZoneFromEureka() {
+        String zone;
+        boolean approximateZoneFromHostname = eurekaLoadBalancerProperties
+                .isApproximateZoneFromHostname();
+        if (approximateZoneFromHostname &amp;&amp; eurekaConfig != null) {
+            return ZoneUtils.extractApproximateZone(this.eurekaConfig.getHostName(false));
+        }
+        else {
+            zone = eurekaConfig == null ? null
+                    : eurekaConfig.getMetadataMap().get("zone");
+            if (StringUtils.isEmpty(zone)) {
+                String[] zones = clientConfig
+                        .getAvailabilityZones(clientConfig.getRegion());
+                // Pick the first one from the regions we want to connect to
+                zone = zones != null &amp;&amp; zones.length &gt; 0 ? zones[0] : null;
+            }
+            return zone;
+        }
+    }
+
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>本章，我主要讲解了与Eureka整合使用时，Spring Cloud Netflix Ribbon的初始化流程，整体流程还是比较清晰的，就是初始化并注入了一些与Eureka相关的Ribbon核心组件，整个流程我用下面这张图表示：</p>
+<p><img alt="" src="./img/20210203215910596.png"/></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,376 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（二）——工厂模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（二）——工厂模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>工厂模式是一种常见的<strong><em>创建型</em></strong> 模式。在 GoF 的《设计模式》一书中，<strong>工厂模式（Factory Design Pattern）</strong>一共分为两种：工厂方法和抽象工厂。一般情况下，我们所说的工厂模式，还包含<strong>简单工厂模式</strong>，它是工厂方法模式的一种特例。 </p>
+<p>简单工厂、工厂方法的原理比较简单，在实际的项目中也比较常用。而抽象工厂的原理稍微复杂，在实际的项目中也不常用。 所以，本章的重点是搞清楚工厂模式的应用场景，并且我会结合Spring IOC的源码来分析下工厂模式的实际应用。</p>
+<h2 id="-">一、模式介绍</h2>
+<p>工厂模式分为三种：<strong>简单工厂模式</strong>、<strong>工厂方法模式</strong>和<strong>抽象工厂模式</strong>。</p>
+<ul>
+<li><strong>简单工厂模式</strong>。定义一个工厂类，根据参数类型返回不同类型的实例。适用于对象实例类型不多的场景，如果对象实例类型太多，每增加一种类型就要在工厂类中增加相应的创建逻辑，这是违背开放封闭原则的。</li>
+<li><strong>工厂方法模式</strong>。简单工厂模式的升级版，不再是提供一个统一的工厂类来创建所有对象的实例，而是每种类型的对象实例都对应不同的工厂类，每个具体的工厂类只能创建一个类型的对象实例。</li>
+<li><strong>抽象工厂模式</strong>。较少使用，适用于创建多个产品的场景。如果按照工厂方法模式的实现思路，需要在具体工厂类中实现多个工厂方法，是非常不友好的。抽象工厂模式就是把这些工厂方法单独剥离到抽象工厂类中，然后创建工厂对象并通过组合的方式来获取工厂方法。</li>
+</ul>
+<h3 id="1-1-">1.1 简单工厂</h3>
+<p>简单工厂模式还叫作静态工厂方法模式（Static Factory Method Pattern）。</p>
+<p>我们先来看一个简单工厂的示例。假设我们需要根据配置文件的后缀（json、xml、yaml、properties），选择不同的解析器（JsonRuleConfigParser、XmlRuleConfigParser……），将存储在文件中的配置解析成内存对象 RuleConfig ，那么可以像下面这样实现：</p>
+<pre><code class="lang-JAVA">public class RuleConfigParserFactory {
+  public static IRuleConfigParser createParser(String configFormat) {
+    IRuleConfigParser parser = null;
+    if ("json".equalsIgnoreCase(configFormat)) {
+      parser = new JsonRuleConfigParser();
+    } else if ("xml".equalsIgnoreCase(configFormat)) {
+      parser = new XmlRuleConfigParser();
+    } else if ("yaml".equalsIgnoreCase(configFormat)) {
+      parser = new YamlRuleConfigParser();
+    } else if ("properties".equalsIgnoreCase(configFormat)) {
+      parser = new PropertiesRuleConfigParser();
+    }
+    return parser;
+  }
+}
+</code></pre>
+<p>上述就是一种简单工厂模式，是不是很熟悉？ 简单工厂模式的实现中，通常会根据入参作 if 分支判断，以创建不同的对象。 如果我们要添加新的 parser ，就需要修改代码，虽然这违背了开闭原则，但权衡扩展性和可读性，在大多数情况下（比如不需要频繁添加 parser，也没有太多的 parser）是没有问题的。 </p>
+<h3 id="1-2-">1.2 工厂方法</h3>
+<p>如果我们非要将 if 分支逻辑去掉，那该怎么办呢？比较经典处理方法就是利用多态。按照多态的实现思路，对上面的代码进行重构。首先，新建一个工厂接口，用于创建各种parser： </p>
+<pre><code class="lang-JAVA">public interface IRuleConfigParserFactory {
+  IRuleConfigParser createParser();
+}
+</code></pre>
+<p>然后实现这个工厂接口，当我们需要新增一种 parser 的时候，只需要新增一个实现了 IRuleConfigParserFactory 接口的 Factory 类即可：</p>
+<pre><code class="lang-JAVA">public class JsonRuleConfigParserFactory implements IRuleConfigParserFactory {
+  @Override
+  public IRuleConfigParser createParser() {
+    return new JsonRuleConfigParser();
+  }
+}
+
+public class XmlRuleConfigParserFactory implements IRuleConfigParserFactory {
+  @Override
+  public IRuleConfigParser createParser() {
+    return new XmlRuleConfigParser();
+  }
+}
+
+public class YamlRuleConfigParserFactory implements IRuleConfigParserFactory {
+  @Override
+  public IRuleConfigParser createParser() {
+    return new YamlRuleConfigParser();
+  }
+}
+
+public class PropertiesRuleConfigParserFactory implements IRuleConfigParserFactory {
+  @Override
+  public IRuleConfigParser createParser() {
+    return new PropertiesRuleConfigParser();
+  }
+}
+</code></pre>
+<blockquote>
+<p>事实上，工厂方法模式并没有解决 if 分支的判断问题，因为我们还是需要根据参数选择到底创建哪一种工厂。但是，使用工厂方法模式最主要的作用是封装复杂对象的创建过程， 而且创建代码抽离到独立的工厂类之后可以复用。 </p>
+</blockquote>
+<h3 id="1-3-">1.3 抽象工厂</h3>
+<p>讲完了简单工厂、工厂方法，我们再来看下抽象工厂模式。抽象工厂模式的应用场景比较特殊，没有前两种常用，所以简单了解一下就可以了。</p>
+<p>在简单工厂和工厂方法中，类只有一种分类方式。比如，在规则配置解析那个例子中，解析器类只会根据配置文件格式（Json、Xml、Yaml……）来分类。但是，如果类有两种分类方式：比如，我们既可以按照配置文件格式来分类，也可以按照解析的对象（Rule 规则配置还是 System 系统配置）来分类，那就会对应下面这 8 个 parser 类：</p>
+<pre><code class="lang-JAVA">针对规则配置的解析器：基于接口IRuleConfigParser
+JsonRuleConfigParser
+XmlRuleConfigParser
+YamlRuleConfigParser
+PropertiesRuleConfigParser
+
+针对系统配置的解析器：基于接口ISystemConfigParser
+JsonSystemConfigParser
+XmlSystemConfigParser
+YamlSystemConfigParser
+PropertiesSystemConfigParser
+</code></pre>
+<p>我们知道，过多的类会让系统的维护成本大幅增加。这个问题该怎么解决呢？抽象工厂就是针对这种非常特殊的场景而诞生的。我们可以<strong>让一个工厂负责创建多个不同类型的对象</strong>（IRuleConfigParser、ISystemConfigParser 等），而不是只创建一种 parser 对象，这样就可以有效地减少工厂类的个数：</p>
+<pre><code class="lang-JAVA">public interface IConfigParserFactory {
+  IRuleConfigParser createRuleParser();
+  ISystemConfigParser createSystemParser();
+  //此处可以扩展新的parser类型，比如IBizConfigParser
+}
+
+public class JsonConfigParserFactory implements IConfigParserFactory {
+  @Override
+  public IRuleConfigParser createRuleParser() {
+    return new JsonRuleConfigParser();
+  }
+
+  @Override
+  public ISystemConfigParser createSystemParser() {
+    return new JsonSystemConfigParser();
+  }
+}
+
+public class XmlConfigParserFactory implements IConfigParserFactory {
+  @Override
+  public IRuleConfigParser createRuleParser() {
+    return new XmlRuleConfigParser();
+  }
+
+  @Override
+  public ISystemConfigParser createSystemParser() {
+    return new XmlSystemConfigParser();
+  }
+}
+
+// 省略YamlConfigParserFactory和PropertiesConfigParserFactory代码
+</code></pre>
+<h2 id="-di-">二、DI容器示例</h2>
+<p>当我们创建的对象是一个“大工程”时，我们一般会选择使用工厂模式，将对象的创建和使用分离，让代码更加清晰。一个工厂类只负责某个类对象或者某一组相关类对象（继承自同一抽象类或者接口的子类）的创建，而 依赖注入框架负责的是整个应用中所有类的对象的创建。</p>
+<p>依赖注入框架（也叫做DI 容器），底层最基本的设计思路也是基于工厂模式的。DI 容器相当于一个大的工厂类，负责在程序启动的时候，根据配置（要创建哪些类对象，每个类对象的创建需要依赖哪些其他类对象）事先创建好对象。当应用程序需要使用某个类对象的时候，直接从容器中获取即可。正是因为它持有一堆对象，所以这个框架才被称为“容器”。</p>
+<p>一个简单的 DI 容器的核心功能一般有三个：<strong>配置解析</strong>、<strong>对象创建</strong>和<strong>对象生命周期管理</strong>。</p>
+<h3 id="2-1-">2.1 配置解析</h3>
+<p>我们需要通过一种形式，让应用告知 DI 容器要创建哪些对象，这种形式就是我们要讲的配置。我们将类对象和创建类对象的必要信息放到配置文件中。容器读取配置文件，根据配置文件提供的信息来创建对象。下面是一个典型的 Spring 容器的配置文件：</p>
+<pre><code class="lang-XML">&lt;!--bean.xml--&gt;
+&lt;beans&gt;
+   &lt;bean id="rateLimiter" class="com.xzg.RateLimiter"&gt;
+      &lt;constructor-arg ref="redisCounter"/&gt;
+   &lt;/bean&gt;
+
+   &lt;bean id="redisCounter" class="com.xzg.redisCounter"&gt;
+     &lt;constructor-arg type="String" value="127.0.0.1"&gt;
+     &lt;constructor-arg type="int" value=1234&gt;
+   &lt;/bean&gt;
+&lt;/beans&gt;
+</code></pre>
+<p>Spring 容器读取这个配置文件，解析出要创建的两个对象：rateLimiter 和 redisCounter，并且得到两者的依赖关系：rateLimiter 依赖 redisCounter。我们可以通过下面这种方式来使用对象：</p>
+<pre><code class="lang-JAVA">public class Demo {
+  public static void main(String[] args) {
+    ApplicationContext applicationContext = new ClassPathXmlApplicationContext(
+            "beans.xml");
+    RateLimiter rateLimiter = (RateLimiter) applicationContext.getBean("rateLimiter");
+    rateLimiter.test();
+    //...
+  }
+}
+</code></pre>
+<p>执行入口主要包含两部分：ApplicationContext 和 ClassPathXmlApplicationContext。其中，ApplicationContext 是接口，ClassPathXmlApplicationContext 是接口的实现类：</p>
+<pre><code class="lang-JAVA">public interface ApplicationContext {
+  Object getBean(String beanId);
+}
+
+public class ClassPathXmlApplicationContext implements ApplicationContext {
+  private BeansFactory beansFactory;
+  private BeanConfigParser beanConfigParser;
+
+  public ClassPathXmlApplicationContext(String configLocation) {
+    this.beansFactory = new BeansFactory();
+    this.beanConfigParser = new XmlBeanConfigParser();
+    loadBeanDefinitions(configLocation);
+  }
+
+  private void loadBeanDefinitions(String configLocation) {
+    InputStream in = null;
+    try {
+      in = this.getClass().getResourceAsStream("/" + configLocation);
+      if (in == null) {
+        throw new RuntimeException("Can not find config file: " + configLocation);
+      }
+      List&lt;BeanDefinition&gt; beanDefinitions = beanConfigParser.parse(in);
+      beansFactory.addBeanDefinitions(beanDefinitions);
+    } finally {
+      if (in != null) {
+        try {
+          in.close();
+        } catch (IOException e) {
+          // TODO: log error
+        }
+      }
+    }
+  }
+
+  @Override
+  public Object getBean(String beanId) {
+    return beansFactory.getBean(beanId);
+  }
+}
+</code></pre>
+<p>从上面代码可以看出，ClassPathXmlApplicationContext 负责组装 BeansFactory 和 BeanConfigParser 两个类，串联执行流程：从 classpath 中加载 XML 格式的配置文件，通过 BeanConfigParser 解析为统一的 BeanDefinition 格式，然后，BeansFactory 根据 BeanDefinition 来创建对象。</p>
+<p>配置文件解析主要包含 BeanConfigParser 接口和 XmlBeanConfigParser 实现类，负责将配置文件解析为 BeanDefinition 结构，以便 BeansFactory 根据这个结构来创建对象。</p>
+<p>配置文件的解析比较繁琐，不是我们讲解的重点，所以这里我只给出两个类的大致设计思路，并未给出具体的实现代码。如果感兴趣的话，你可以自行补充完整。具体的代码框架如下所示：</p>
+<pre><code class="lang-JAVA">
+public interface BeanConfigParser {
+  List&lt;BeanDefinition&gt; parse(InputStream inputStream);
+  List&lt;BeanDefinition&gt; parse(String configContent);
+}
+
+public class XmlBeanConfigParser implements BeanConfigParser {
+
+  @Override
+  public List&lt;BeanDefinition&gt; parse(InputStream inputStream) {
+    String content = null;
+    // TODO:...
+    return parse(content);
+  }
+
+  @Override
+  public List&lt;BeanDefinition&gt; parse(String configContent) {
+    List&lt;BeanDefinition&gt; beanDefinitions = new ArrayList&lt;&gt;();
+    // TODO:...
+    return beanDefinitions;
+  }
+
+}
+
+public class BeanDefinition {
+  private String id;
+  private String className;
+  private List&lt;ConstructorArg&gt; constructorArgs = new ArrayList&lt;&gt;();
+  private Scope scope = Scope.SINGLETON;
+  private boolean lazyInit = false;
+  // 省略必要的getter/setter/constructors
+
+  public boolean isSingleton() {
+    return scope.equals(Scope.SINGLETON);
+  }
+
+
+  public static enum Scope {
+    SINGLETON,
+    PROTOTYPE
+  }
+
+  public static class ConstructorArg {
+    private boolean isRef;
+    private Class type;
+    private Object arg;
+    // 省略必要的getter/setter/constructors
+  }
+}
+</code></pre>
+<h3 id="2-2-">2.2 对象创建</h3>
+<p>在 DI 容器中，如果我们给每个类都对应创建一个工厂类，那项目中类的个数会成倍增加，这会增加代码的维护成本。要解决这个问题并不难。我们只需要将所有类对象的创建都放到一个工厂类中完成就可以了，比如 BeansFactory。</p>
+<p>你可能会说，如果要创建的类对象非常多，BeansFactory 中的代码会不会线性膨胀（代码量跟创建对象的个数成正比）呢？实际上并不会。DI 容器的具体实现的时候，采用了“反射”机制，它能在程序运行的过程中，动态地加载类、创建对象，不需要事先在代码中写死要创建哪些对象。所以，不管是创建一个对象还是十个对象，BeansFactory 工厂类代码都是一样的。</p>
+<pre><code class="lang-JAVA">public class BeansFactory {
+  private ConcurrentHashMap&lt;String, Object&gt; singletonObjects = new ConcurrentHashMap&lt;&gt;();
+  private ConcurrentHashMap&lt;String, BeanDefinition&gt; beanDefinitions = new ConcurrentHashMap&lt;&gt;();
+
+  public void addBeanDefinitions(List&lt;BeanDefinition&gt; beanDefinitionList) {
+    for (BeanDefinition beanDefinition : beanDefinitionList) {
+      this.beanDefinitions.putIfAbsent(beanDefinition.getId(), beanDefinition);
+    }
+
+    for (BeanDefinition beanDefinition : beanDefinitionList) {
+      if (beanDefinition.isLazyInit() == false &amp;&amp; beanDefinition.isSingleton()) {
+        createBean(beanDefinition);
+      }
+    }
+  }
+
+  public Object getBean(String beanId) {
+    BeanDefinition beanDefinition = beanDefinitions.get(beanId);
+    if (beanDefinition == null) {
+      throw new NoSuchBeanDefinitionException("Bean is not defined: " + beanId);
+    }
+    return createBean(beanDefinition);
+  }
+
+  @VisibleForTesting
+  protected Object createBean(BeanDefinition beanDefinition) {
+    if (beanDefinition.isSingleton() &amp;&amp; singletonObjects.contains(beanDefinition.getId())) {
+      return singletonObjects.get(beanDefinition.getId());
+    }
+
+    Object bean = null;
+    try {
+      Class beanClass = Class.forName(beanDefinition.getClassName());
+      List&lt;BeanDefinition.ConstructorArg&gt; args = beanDefinition.getConstructorArgs();
+      if (args.isEmpty()) {
+        bean = beanClass.newInstance();
+      } else {
+        Class[] argClasses = new Class[args.size()];
+        Object[] argObjects = new Object[args.size()];
+        for (int i = 0; i &lt; args.size(); ++i) {
+          BeanDefinition.ConstructorArg arg = args.get(i);
+          if (!arg.getIsRef()) {
+            argClasses[i] = arg.getType();
+            argObjects[i] = arg.getArg();
+          } else {
+            BeanDefinition refBeanDefinition = beanDefinitions.get(arg.getArg());
+            if (refBeanDefinition == null) {
+              throw new NoSuchBeanDefinitionException("Bean is not defined: " + arg.getArg());
+            }
+            argClasses[i] = Class.forName(refBeanDefinition.getClassName());
+            argObjects[i] = createBean(refBeanDefinition);
+          }
+        }
+        bean = beanClass.getConstructor(argClasses).newInstance(argObjects);
+      }
+    } catch (ClassNotFoundException | IllegalAccessException
+            | InstantiationException | NoSuchMethodException | InvocationTargetException e) {
+      throw new BeanCreationFailureException("", e);
+    }
+
+    if (bean != null &amp;&amp; beanDefinition.isSingleton()) {
+      singletonObjects.putIfAbsent(beanDefinition.getId(), bean);
+      return singletonObjects.get(beanDefinition.getId());
+    }
+    return bean;
+  }
+}
+</code></pre>
+<p>上述代码中，BeansFactory 负责根据 BeanDefinition 来创建对象。如果对象的 scope 属性是 singleton，那对象创建之后会缓存在 singletonObjects 这样一个 map 中，下次再请求此对象的时候，直接从 map 中取出返回，不需要重新创建。如果对象的 scope 属性是 prototype，那每次请求对象，BeansFactory 都会创建一个新的对象返回。</p>
+<h3 id="2-3-">2.3 生命周期管理</h3>
+<p>简单工厂模式有两种实现方式，一种是每次都返回新创建的对象，另一种是每次都返回同一个事先创建好的对象，也就是所谓的单例对象。在 Spring 框架中，我们可以通过配置 scope 属性，来区分这两种不同类型的对象。scope=prototype 表示返回新创建的对象，scope=singleton 表示返回单例对象。</p>
+<p>除此之外，我们还可以配置对象是否支持懒加载。如果 lazy-init=true，对象在真正被使用到的时候才被被创建；如果 lazy-init=false，对象在应用启动的时候就事先创建好。</p>
+<p>不仅如此，我们还可以配置对象的 init-method 和 destroy-method 方法，比如 init-method=loadProperties()，destroy-method=updateConfigFile()。DI 容器在创建好对象之后，会主动调用 init-method 属性指定的方法来初始化对象。在对象被最终销毁之前，DI 容器会主动调用 destroy-method 属性指定的方法来做一些清理工作，比如释放数据库连接池、关闭文件。</p>
+<h2 id="-">三、开源示例</h2>
+<p>Netty 在创建 Channel 的时候使用的就是工厂方法模式，因为服务端和客户端的 Channel 是不一样的。Netty 将反射和工厂方法模式结合在一起，只使用一个工厂类，然后根据传入的 Class 参数来构建出对应的 Channel，不需要再为每一种 Channel 类型创建一个工厂类。具体源码实现如下：</p>
+<pre><code class="lang-JAVA">public interface ChannelFactory&lt;T extends Channel&gt; {
+
+    @Override
+    T newChannel();
+}
+</code></pre>
+<pre><code class="lang-JAVA">public class ReflectiveChannelFactory&lt;T extends Channel&gt; implements ChannelFactory&lt;T&gt; {
+
+    private final Constructor&lt;? extends T&gt; constructor;
+
+    public ReflectiveChannelFactory(Class&lt;? extends T&gt; clazz) {
+        ObjectUtil.checkNotNull(clazz, "clazz");
+
+        try {
+            this.constructor = clazz.getConstructor();
+        } catch (NoSuchMethodException e) {
+            throw new IllegalArgumentException("Class " + StringUtil.simpleClassName(clazz) +
+                    " does not have a public non-arg constructor", e);
+        }
+    }
+
+    @Override
+    public T newChannel() {
+        try {
+            return constructor.newInstance();
+        } catch (Throwable t) {
+            throw new ChannelException("Unable to create Channel from class " + constructor.getDeclaringClass(), t);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return StringUtil.simpleClassName(ReflectiveChannelFactory.class) +
+                '(' + StringUtil.simpleClassName(constructor.getDeclaringClass()) + ".class)";
+    }
+}
+</code></pre>
+<blockquote>
+<p>工厂方法模式与反射进行组合使用，在项目开发中非常常见。</p>
+</blockquote>
+<h2 id="-">四、总结</h2>
+<p>简单工厂和工厂方法比较常用，抽象工厂的应用场景比较特殊，所以很少用到。总结一下简单工厂和工厂方法的应用场景：</p>
+<ul>
+<li>当对象的创建逻辑都比较简单时，推荐使用简单工厂模式，将多个对象的创建逻辑放到一个工厂类中；</li>
+<li>当每个对象的创建逻辑比较复杂时，为了避免设计一个过于庞大的简单工厂类，推荐使用工厂方法模式，将创建逻辑拆分得更细，每个对象的创建逻辑独立到各自的工厂类中。 </li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

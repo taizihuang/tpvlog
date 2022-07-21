@@ -1,0 +1,335 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十九）——聚合分析：histogram区间分组</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十九）——聚合分析：histogram区间分组</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我们在上一章讲到了Elasticsearch在聚合分析中，可以使用“term”对指定field按照数量分组。本章，我们将介绍另一种区间分组的方式——histogram。</p>
+<h2 id="-">一、简介</h2>
+<h3 id="1-1-histogram">1.1 histogram</h3>
+<p>histogram，它会接收一个field，然后按照这个field值的各个范围区间，进行bucket分组操作：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search
+{
+   "size" : 0,
+   "aggs":{
+      "price":{
+         "histogram":{ 
+            "field": "price",
+            "interval": 2000
+         }
+      }
+   }
+}
+</code></pre>
+<p>上述请求中，我们对“price”字段进行区间分组，区间间隔为2000，返回结果如下：</p>
+<pre><code class="lang-JAVA">{
+  "took" : 3,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 8,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [ ]
+  },
+  "aggregations" : {
+    "price" : {
+      "buckets" : [
+        {
+          "key" : 0.0,
+          "doc_count" : 3
+        },
+        {
+          "key" : 2000.0,
+          "doc_count" : 4
+        },
+        {
+          "key" : 4000.0,
+          "doc_count" : 0
+        },
+        {
+          "key" : 6000.0,
+          "doc_count" : 0
+        },
+        {
+          "key" : 8000.0,
+          "doc_count" : 1
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<p>按照区间分组之后，我们就可以对各个bucket执行metric操作了，比如计算总和：</p>
+<pre><code>GET /tvs/_search
+{
+   "size" : 0,
+   "aggs":{
+      "price":{
+         "histogram":{ 
+            "field": "price",
+            "interval": 2000
+         },
+         "aggs":{
+            "revenue": {
+               "sum": { 
+                 "field" : "price"
+               }
+             }
+         }
+      }
+   }
+}
+</code></pre><h3 id="1-2-date_histogram">1.2 date_histogram</h3>
+<p>如果我们希望的按区间分组的字段是date类型的，那么需要用到<code>date_histogram</code>关键字。比如：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search
+{
+   "size" : 0,
+   "aggs": {
+      "sales": {
+         "date_histogram": {
+            "field": "sold_date",
+            "interval": "month", 
+            "format": "yyyy-MM-dd",
+            "min_doc_count" : 0, 
+            "extended_bounds" : { 
+                "min" : "2016-01-01",
+                "max" : "2017-12-31"
+            }
+         }
+      }
+   }
+}
+</code></pre>
+<p>解释下上述几个关键参数：</p>
+<ul>
+<li>min_doc_count：某个日期区间内的doc数量至少要等于这个参数，这个区间才会返回；</li>
+<li>extended_bounds：划分bucket的时候，会限定在这个起始日期和截止日期内。</li>
+</ul>
+<h2 id="-">二、实战</h2>
+<h3 id="2-1-date_histogram">2.1 date_histogram</h3>
+<p>假设我们现在的需求是：统计每季度每个品牌的电视销售额，那么可以这样构造请求：</p>
+<pre><code class="lang-JAVA">GET /tvs/_search 
+{
+  "size": 0,
+  "aggs": {
+    "group_by_sold_date": {
+      "date_histogram": {
+        "field": "sold_date",
+        "interval": "quarter",
+        "format": "yyyy-MM-dd",
+        "min_doc_count": 0,
+        "extended_bounds": {
+          "min": "2016-01-01",
+          "max": "2017-12-31"
+        }
+      },
+      "aggs": {
+        "total_sum_price": {
+          "sum": {
+            "field": "price"
+          }
+        },  
+        "group_by_brand": {
+          "terms": {
+            "field": "brand"
+          },
+          "aggs": {
+            "sum_price": {
+              "sum": {
+                "field": "price"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>上述请求其实就是先按日期进行分组，然后下钻到组内再按照品牌分组，最后对每个子组执行求和metric操作，结果如下：</p>
+<pre><code class="lang-JAVA">{
+  "took" : 97,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 8,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [ ]
+  },
+  "aggregations" : {
+    "group_by_sold_date" : {
+      "buckets" : [
+        {
+          "key_as_string" : "2016-01-01",
+          "key" : 1451606400000,
+          "doc_count" : 0,
+          "total_sum_price" : {
+            "value" : 0.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [ ]
+          }
+        },
+        {
+          "key_as_string" : "2016-04-01",
+          "key" : 1459468800000,
+          "doc_count" : 1,
+          "total_sum_price" : {
+            "value" : 3000.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "小米",
+                "doc_count" : 1,
+                "sum_price" : {
+                  "value" : 3000.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string" : "2016-07-01",
+          "key" : 1467331200000,
+          "doc_count" : 2,
+          "total_sum_price" : {
+            "value" : 2700.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "TCL",
+                "doc_count" : 2,
+                "sum_price" : {
+                  "value" : 2700.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string" : "2016-10-01",
+          "key" : 1475280000000,
+          "doc_count" : 3,
+          "total_sum_price" : {
+            "value" : 5000.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "长虹",
+                "doc_count" : 3,
+                "sum_price" : {
+                  "value" : 5000.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string" : "2017-01-01",
+          "key" : 1483228800000,
+          "doc_count" : 2,
+          "total_sum_price" : {
+            "value" : 10500.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "三星",
+                "doc_count" : 1,
+                "sum_price" : {
+                  "value" : 8000.0
+                }
+              },
+              {
+                "key" : "小米",
+                "doc_count" : 1,
+                "sum_price" : {
+                  "value" : 2500.0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string" : "2017-04-01",
+          "key" : 1491004800000,
+          "doc_count" : 0,
+          "total_sum_price" : {
+            "value" : 0.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [ ]
+          }
+        },
+        {
+          "key_as_string" : "2017-07-01",
+          "key" : 1498867200000,
+          "doc_count" : 0,
+          "total_sum_price" : {
+            "value" : 0.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [ ]
+          }
+        },
+        {
+          "key_as_string" : "2017-10-01",
+          "key" : 1506816000000,
+          "doc_count" : 0,
+          "total_sum_price" : {
+            "value" : 0.0
+          },
+          "group_by_brand" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [ ]
+          }
+        }
+      ]
+    }
+  }
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了聚合分析中的区间分组，Elasticsearch采用<code>histogram</code>关键字来完成对指定字段值的区间分组，如果我们想要分组的字段类型为日期，则需要使用<code>date_histogram</code>关键字。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

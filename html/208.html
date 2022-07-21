@@ -1,0 +1,100 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式实战（二）——系统环境搭建</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式实战（二）——系统环境搭建</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>为了后续实战演练的方便，本章我将从零开始，一步一步搭建出一个4节点的CentOS集群。后续章节，我们会在这个集群上部署Redis、Nginx、MySQL、Storm等分布式框架。</p>
+<p>我的笔记本配置是4核12G，所以4台虚拟机，每台虚拟机分配1G的内存。涉及到的主要软件如下：</p>
+<ul>
+<li>VirtualBox虚拟机 5.2</li>
+<li>CentOS-6.5-i386-minimal</li>
+<li>jdk-7u65-linux-i586</li>
+<li>VanDyke SecureCRT v7.3.5 </li>
+</ul>
+<h2 id="-centos-">一、CentOS安装</h2>
+<p>首先，安装完VirtualBox后，我们新建虚拟机，进行CentOS的安装，这里节点名称可以自定义，我这里叫做“ressmix-dsf01”，后面还要重复相同的步骤装3个节点，版本注意选择Red Hat：</p>
+<center><br/> <img src="./img/20200406160712611.png" style="zoom:70%"><br/></img></center>
+<p>然后一路下一步，注意文件位置根据自己硬盘空间的情况进行选择：</p>
+<center><br/> <img src="./img/20200406160719387.png" style="zoom:70%"/><br/></center>
+<p>创建完后，注意设置下网卡的模式为“桥接模式”：</p>
+<center><br/> <img src="./img/20200406160725765.png" style="zoom:70%"/><br/></center>
+<p>然后启动，选择第一项：</p>
+<center><br/> <img src="./img/20200406160733045.png" style="zoom:70%"/><br/></center>
+<p>点击"skip"：</p>
+<center><br/> <img src="./img/20200406160739972.png" style="zoom:70%"/><br/></center>
+<p>然后改下主机名：</p>
+<center><br/> <img src="./img/20200406160956144.png" style="zoom:70%"/><br/></center>
+<p>最后安装：</p>
+<center><br/> <img src="./img/20200406160747781.png" style="zoom:70%"/><br/></center>
+<blockquote>
+<p>注意，如果读者是WIndows 10的系统，可能因为Hyper-V导致无法启动镜像，可以参考<a href="https://www.jianshu.com/p/2e3429d45aea">这篇文章</a>解决。</p>
+</blockquote>
+<h2 id="-">二、系统配置</h2>
+<h3 id="2-1-">2.1 网络配置</h3>
+<p>安装完成后，需要进行基本的网络配置，便于连接到Internet，修改<code>/etc/sysconfig/network-scripts/ifcfg-eth0</code>文件：</p>
+<pre><code class="lang-JAVA">DEVICE=eth0
+TYPE=Ethernet
+ONBOOT=yes
+BOOTPROTO=dhcp
+</code></pre>
+<p>然后执行<code>service network restart</code>重启下网卡。通过<code>ifconfig</code>可以看到这台机器的IP信息：</p>
+<center><br/> <img src="./img/20200406160755146.png" style="zoom:70%"/><br/></center>
+<p>为了方便后续节点间的通信，我们需要把这台机器的IP固化下，继续修改<code>/etc/sysconfig/network-scripts/ifcfg-eth0</code>文件，然后重启<code>service network restart</code>：</p>
+<pre><code class="lang-JAVA">BOOTPROTO=static
+IPADDR=192.168.0.106
+NETMASK=255.255.255.0
+GATEWAY=192.168.0.1
+</code></pre>
+<blockquote>
+<p>GATEWAY就是默认网关，在你自己本机通过<code>ipconfig</code>查看。</p>
+</blockquote>
+<h3 id="2-2-host-">2.2 host配置</h3>
+<p>修改<code>/etc/hosts</code>文件，配置hostname到IP地址(192.168.0.106)的映射：</p>
+<center><br/> <img src="./img/20200406160801417.png" style="zoom:90%"/><br/></center>
+<p>之后，我们就可以在本机通过SecureCRT连接了：</p>
+<center><br/> <img src="./img/20200406160809653.png" style="zoom:90%"/><br/></center>
+<h3 id="2-3-">2.3 关闭防火墙</h3>
+<p>为了我们后面的实操不出问题，把系统的火墙关闭：</p>
+<pre><code class="lang-JAVA">service iptables stop
+service ip6tables stop
+chkconfig iptables off
+chkconfig ip6tables off
+</code></pre>
+<p>然后修改<code>/etc/selinux/config</code>：</p>
+<pre><code class="lang-JAVA">SELINUX=disabled
+</code></pre>
+<h3 id="2-4-yum-">2.4 yum配置</h3>
+<p>后面我们需要通过yum安装一些软件，所以进行yum配置：</p>
+<pre><code class="lang-JAVA">yum clean all
+yum makecache
+yum install wget
+</code></pre>
+<h3 id="2-5-gcc-jdk-perl">2.5 安装GCC、JDK和Perl</h3>
+<p>安装完成后，修改环境变量<code>~/.bashrc</code>，然后执行<code>source .bashrc</code>：</p>
+<center><br/> <img src="./img/20200406160817185.png" style="zoom:90%"/><br/></center>
+<p>Perl的话直接用<code>wget</code>命令安装就可以了，先执行<code>yum install -y gcc</code>安装GCC，然后执行如下命令：</p>
+<pre><code class="lang-JAVA">wget http://www.cpan.org/src/5.0/perl-5.16.1.tar.gz
+tar -xzf perl-5.16.1.tar.gz
+cd perl-5.16.1
+./Configure -des -Dprefix=/usr/local/perl
+make &amp;&amp; make test &amp;&amp; make install
+perl -v
+</code></pre>
+<h3 id="2-6-">2.6 免密通信配置</h3>
+<p>首先在机器上配置对本机的ssh免密码登录，执行<code>ssh-keygen -t rsa</code>，生成本机的公钥，过程中不断敲回车即可，ssh-keygen命令默认会将公钥放在<code>/root/.ssh</code>目录下。</p>
+<p>然后执行以下命令，将公钥复制为authorized_keys文件，此时使用ssh连接本机就不需要输入密码了：</p>
+<pre><code class="lang-JAVA">cd /root/.ssh
+cp id_rsa.pub authorized_keys
+</code></pre>
+<p>接着配置三台机器互相之间的ssh免密码登录，使用<code>ssh-copy-id -i hostname</code>命令将本机的公钥拷贝到指定机器的<code>authorized_keys</code>文件中。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我带领大家搭建了一个4节点的CentOS集群。这个集群将作为我们后续分布式实战的基础。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

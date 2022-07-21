@@ -1,0 +1,83 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（二十）——命令模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（二十）——命令模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>命令模式（Command Design Pattern ）</strong>， 是一种行为型模式。命令模式将请求（命令）封装为一个对象，这样可以使用不同的请求参数化其他对象（将不同请求依赖注入到其他对象），并且能够支持请求（命令）的排队执行、记录日志、撤销等（附加控制）功能。</p>
+<p>在大部分编程语言中，函数没法儿作为参数传递给其他函数，也没法儿赋值给变量。借助命令模式，我们可以将函数封装成对象。具体来说就是，设计一个包含这个函数的类，实例化一个对象传来传去，这样就可以实现把函数像对象一样使用。从实现的角度来说，它类似我们之前讲过的回调。</p>
+<p>当我们把函数封装成对象之后，对象就可以存储下来，方便控制执行。所以，命令模式的主要应用场景，是用来控制命令的执行，比如，异步、延迟、排队执行命令、撤销重做命令、存储命令、给命令记录日志等等，这才是命令模式能发挥独一无二作用的地方。</p>
+<h2 id="-">一、基本原理</h2>
+<p>我以游戏开发为例，讲解下命名模式的基本原理。一般来说，游戏客户端和服务器之间的数据交互是比较频繁的，为了节省网络连接建立的开销，客户端和服务器之间一般采用长连接的方式来通信。通信的格式有多种，比如 Protocol Buffer、JSON、XML等。不管是什么格式，客户端发送给服务器的请求，一般都包括两部分内容：指令和数据。其中，指令我们也可以叫作事件，数据是执行这个指令所需的数据。</p>
+<p>服务器在接收到客户端的请求之后，会解析出指令和数据，并且根据指令的不同，执行不同的处理逻辑。对于这样的一个业务场景，一般有两种架构实现思路：</p>
+<ol>
+<li>服务端利用多线程，一个线程接收请求，接收到请求之后，启动一个新的线程来处理请求；</li>
+<li>服务端在一个线程内轮询接收请求和处理请求，有点类似于Reactor模式。</li>
+</ol>
+<p>通常来说，第二种是手游后端服务器开发中比较常见的架构模式。</p>
+<p>后端服务器轮询获取客户端发来的请求，获取到请求之后，借助命令模式，把请求包含的数据和处理逻辑封装为命令对象，并存储在内存队列中。然后，再从队列中取出一定数量的命令来执行。执行完成之后，再重新开始新的一轮轮询。具体的示例代码如下所示：</p>
+<pre><code class="lang-JAVA">public interface Command {
+  void execute();
+}
+
+public class GotDiamondCommand implements Command {
+  public GotDiamondCommand() {
+    //...
+  }
+
+  @Override
+  public void execute() {
+    //...
+  }
+}
+
+public class GameApplication {
+  private static final int MAX_HANDLED_REQ_COUNT_PER_LOOP = 100;
+  private Queue&lt;Command&gt; queue = new LinkedList&lt;&gt;();
+
+  public void mainloop() {
+    while (true) {
+      List&lt;Request&gt; requests = new ArrayList&lt;&gt;();
+
+      //省略从epoll或者select中获取数据，并封装成Request的逻辑，
+      //注意设置超时时间，如果很长时间没有接收到请求，就继续下面的逻辑处理。
+
+      for (Request request : requests) {
+        Event event = request.getEvent();
+        Command command = null;
+        if (event.equals(Event.GOT_DIAMOND)) {
+          command = new GotDiamondCommand(/*数据*/);
+        } else if (event.equals(Event.GOT_STAR)) {
+          command = new GotStartCommand(/*数据*/);
+        } else if (event.equals(Event.HIT_OBSTACLE)) {
+          command = new HitObstacleCommand(/*数据*/);
+        } else if (event.equals(Event.ARCHIVE)) {
+          command = new ArchiveCommand(/*数据*/);
+        } // ...一堆else if...
+
+        queue.add(command);
+      }
+
+      int handledCount = 0;
+      while (handledCount &lt; MAX_HANDLED_REQ_COUNT_PER_LOOP) {
+        if (queue.isEmpty()) {
+          break;
+        }
+        Command command = queue.poll();
+        command.execute();
+      }
+    }
+  }
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>命令模式在平时工作中并不常用，稍微了解一下就可以了。学习设计模式的关键是了解它的设计意图，也就是能解决什么问题。落实到编码实现，命令模式用到最核心的实现手段，就是将函数封装成对象。<br/>我们知道，在大部分编程语言中，函数是没法作为参数传递给其他函数的，也没法赋值给变量。借助命令模式，我们将函数封装成对象，这样就可以实现把函数像对象一样使用。</p>
+<p>命令模式的主要作用和应用场景，是用来控制命令的执行，比如，异步、延迟、排队执行命令、撤销重做命令、存储命令、给命令记录日志等等，这才是命令模式能发挥独一无二作用的地方。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

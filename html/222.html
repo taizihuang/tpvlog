@@ -1,0 +1,434 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（十三）——模板模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（十三）——模板模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>模板模式（Template Design Pattern）</strong>，也被称为模板方法模式，是一种行为型模式。 模板方法模式在一个方法中定义一个算法骨架，并将某些步骤推迟到子类中实现。模板方法模式可以让子类在不改变算法整体结构的情况下，重新定义算法中的某些步骤。 </p>
+<p>这里的“算法”，我们可以理解为广义上的“业务逻辑”，并不特指数据结构和算法中的“算法”。 </p>
+<h2 id="-">一、基本原理</h2>
+<p>模板方式模式的基本原理非常简单，其基本结构就是下面的代码所示：</p>
+<pre><code class="lang-JAVA">public abstract class AbstractClass {
+  public final void templateMethod() {
+    //...
+    method1();
+    //...
+    method2();
+    //...
+  }
+
+  protected abstract void method1();
+  protected abstract void method2();
+}
+
+public class ConcreteClass1 extends AbstractClass {
+  @Override
+  protected void method1() {
+    //...
+  }
+
+  @Override
+  protected void method2() {
+    //...
+  }
+}
+
+public class ConcreteClass2 extends AbstractClass {
+  @Override
+  protected void method1() {
+    //...
+  }
+
+  @Override
+  protected void method2() {
+    //...
+  }
+}
+</code></pre>
+<p>上述AbstractClass.templateMethod() 函数就是所谓的“算法骨架”，定义为 final，是为了避免子类重写它。method1() 和 method2() 定义为 abstract，是为了强迫子类去实现，也就是重新定义算法中的某些步骤。 </p>
+<h2 id="-">二、使用场景</h2>
+<p>我们通过几个JDK和开源框架中例子来讲解下模板模式的使用场景。</p>
+<h3 id="2-1-java-inputstream">2.1  Java InputStream</h3>
+<p>Java IO 类库中，有很多类的设计用到了模板模式，比如 InputStream、OutputStream、Reader、Writer。我们拿 InputStream 来举例说明一下。</p>
+<p>下面代码中，read() 函数是一个模板方法，定义了读取数据的整个流程，并且暴露了一个可以由子类来定制的抽象方法：</p>
+<pre><code class="lang-JAVA">public abstract class InputStream implements Closeable {
+  //...
+
+  public int read(byte b[], int off, int len) throws IOException {
+    if (b == null) {
+      throw new NullPointerException();
+    } else if (off &lt; 0 || len &lt; 0 || len &gt; b.length - off) {
+      throw new IndexOutOfBoundsException();
+    } else if (len == 0) {
+      return 0;
+    }
+
+    int c = read();
+    if (c == -1) {
+      return -1;
+    }
+    b[off] = (byte)c;
+
+    int i = 1;
+    try {
+      for (; i &lt; len ; i++) {
+        c = read();
+        if (c == -1) {
+          break;
+        }
+        b[off + i] = (byte)c;
+      }
+    } catch (IOException ee) {
+    }
+    return i;
+  }
+
+  public abstract int read() throws IOException;
+}
+
+public class ByteArrayInputStream extends InputStream {
+  //...
+
+  @Override
+  public synchronized int read() {
+    return (pos &lt; count) ? (buf[pos++] &amp; 0xff) : -1;
+  }
+}
+</code></pre>
+<h3 id="2-2-java-abstractlist">2.2  Java AbstractList</h3>
+<p>在 Java AbstractList 类中，addAll() 函数可以看作模板方法，add() 是子类需要重写的方法，尽管没有声明为 abstract 的，但函数实现直接抛出了 UnsupportedOperationException 异常，如果子类不重写是不能使用的：</p>
+<pre><code class="lang-JAVA">public boolean addAll(int index, Collection&lt;? extends E&gt; c) {
+    rangeCheckForAdd(index);
+    boolean modified = false;
+    for (E e : c) {
+        add(index++, e);
+        modified = true;
+    }
+    return modified;
+}
+
+public void add(int index, E element) {
+    throw new UnsupportedOperationException();
+}
+</code></pre>
+<h3 id="2-3-java-servlet">2.3  Java Servlet</h3>
+<p>对于 Java Web 项目开发来说，常用的开发框架是 SpringMVC。但是SpringMVC的底层依然是Servlet。在早期的项目中，如果直接使用底层的 Servlet 来开发 Web 项目，我们需要定义一个继承 HttpServlet 的类，并且重写其中的 doGet() 或 doPost() 方法，来分别处理 get 和 post 请求：</p>
+<pre><code class="lang-JAVA">public class HelloServlet extends HttpServlet {
+  @Override
+  protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+    this.doPost(req, resp);
+  }
+
+  @Override
+  protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+    resp.getWriter().write("Hello World.");
+  }
+}
+</code></pre>
+<p>当我们在浏览器中输入网址（比如，<a href="http://127.0.0.1:8080/hello">http://127.0.0.1:8080/hello</a> ）的时候，Servlet 容器会接收到相应的请求，并且根据 URL 和 Servlet 之间的映射关系，找到相应的 Servlet（HelloServlet），然后执行它的 service() 方法。</p>
+<p>HttpServlet 的 service() 方法就是一个模板方法，它实现了整个 HTTP 请求的执行流程，doGet()、doPost() 是模板中可以由子类来定制的部分。实际上，这就相当于 Servlet 框架提供了一个扩展点（doGet()、doPost() 方法），让框架用户在不用修改 Servlet 框架源码的情况下，将业务代码通过扩展点镶嵌到框架中执行：</p>
+<pre><code class="lang-JAVA">public void service(ServletRequest req, ServletResponse res)
+    throws ServletException, IOException
+{
+    HttpServletRequest  request;
+    HttpServletResponse response;
+    if (!(req instanceof HttpServletRequest &amp;&amp;
+            res instanceof HttpServletResponse)) {
+        throw new ServletException("non-HTTP request or response");
+    }
+    request = (HttpServletRequest) req;
+    response = (HttpServletResponse) res;
+    service(request, response);
+}
+
+protected void service(HttpServletRequest req, HttpServletResponse resp)
+    throws ServletException, IOException
+{
+    String method = req.getMethod();
+    if (method.equals(METHOD_GET)) {
+        long lastModified = getLastModified(req);
+        if (lastModified == -1) {
+            // servlet doesn't support if-modified-since, no reason
+            // to go through further expensive logic
+            doGet(req, resp);
+        } else {
+            long ifModifiedSince = req.getDateHeader(HEADER_IFMODSINCE);
+            if (ifModifiedSince &lt; lastModified) {
+                // If the servlet mod time is later, call doGet()
+                // Round down to the nearest second for a proper compare
+                // A ifModifiedSince of -1 will always be less
+                maybeSetLastModified(resp, lastModified);
+                doGet(req, resp);
+            } else {
+                resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+            }
+        }
+    } else if (method.equals(METHOD_HEAD)) {
+        long lastModified = getLastModified(req);
+        maybeSetLastModified(resp, lastModified);
+        doHead(req, resp);
+    } else if (method.equals(METHOD_POST)) {
+        doPost(req, resp);
+    } else if (method.equals(METHOD_PUT)) {
+        doPut(req, resp);
+    } else if (method.equals(METHOD_DELETE)) {
+        doDelete(req, resp);
+    } else if (method.equals(METHOD_OPTIONS)) {
+        doOptions(req,resp);
+    } else if (method.equals(METHOD_TRACE)) {
+        doTrace(req,resp);
+    } else {
+        String errMsg = lStrings.getString("http.method_not_implemented");
+        Object[] errArgs = new Object[1];
+        errArgs[0] = method;
+        errMsg = MessageFormat.format(errMsg, errArgs);
+        resp.sendError(HttpServletResponse.SC_NOT_IMPLEMENTED, errMsg);
+    }
+}
+</code></pre>
+<h3 id="2-4-junit-testcase">2.4 JUnit TestCase</h3>
+<p>跟 Java Servlet 类似，JUnit 框架也通过模板模式提供了一些功能扩展点（setUp()、tearDown() 等），让框架用户可以在这些扩展点上扩展功能。 </p>
+<p>在使用 JUnit 测试框架来编写单元测试的时候，我们编写的测试类都要继承框架提供的 TestCase 类。在 TestCase 类中，runBare() 函数是模板方法，它定义了执行测试用例的整体流程：先执行 setUp() 做些准备工作，然后执行 runTest() 运行真正的测试代码，最后执行 tearDown() 做扫尾工作。 </p>
+<p>TestCase 类的具体代码如下所示。尽管 setUp()、tearDown() 并不是抽象函数，还提供了默认的实现，不强制子类去重新实现，但这部分也是可以在子类中定制的，所以也符合模板模式的定义：</p>
+<pre><code class="lang-JAVA">public abstract class TestCase extends Assert implements Test {
+  public void runBare() throws Throwable {
+    Throwable exception = null;
+    setUp();
+    try {
+      runTest();
+    } catch (Throwable running) {
+      exception = running;
+    } finally {
+      try {
+        tearDown();
+      } catch (Throwable tearingDown) {
+        if (exception == null) exception = tearingDown;
+      }
+    }
+    if (exception != null) throw exception;
+  }
+
+  /**
+  * Sets up the fixture, for example, open a network connection.
+  * This method is called before a test is executed.
+  */
+  protected void setUp() throws Exception {
+  }
+
+  /**
+  * Tears down the fixture, for example, close a network connection.
+  * This method is called after a test is executed.
+  */
+  protected void tearDown() throws Exception {
+  }
+}
+</code></pre>
+<h2 id="-">三、回调原理</h2>
+<p>在实际的开发过程中，有一项技术能起到跟模板模式相同的作用，那就是回调（Callback）。<br/>相对于普通的函数调用来说，回调是一种双向调用关系。 另外，回调基于组合关系来实现，把一个对象传递给另一个对象，是一种对象之间的关系；模板模式基于继承关系来实现，子类重写父类的抽象方法，是一种类之间的关系。 </p>
+<p>Java 使用包裹了回调函数的类对象（简称回调对象）来实现：</p>
+<pre><code class="lang-JAVA">public interface ICallback {
+  void methodToCallback();
+}
+
+public class BClass {
+  public void process(ICallback callback) {
+    //...
+    callback.methodToCallback();
+    //...
+  }
+}
+
+public class AClass {
+  public static void main(String[] args) {
+    BClass b = new BClass();
+    b.process(new ICallback() { //回调对象
+      @Override
+      public void methodToCallback() {
+        System.out.println("Call back me.");
+      }
+    });
+  }
+}
+</code></pre>
+<p>从上面代码我们可以看出，回调跟模板模式一样，也具有复用和扩展的功能。如果 ICallback、BClass 类是框架代码，AClass 是使用框架的客户端代码，我们可以通过 ICallback 定制 process() 函数，也就是说，框架因此具有了扩展的能力。 </p>
+<p>实际上，回调不仅可以应用在代码设计上，在更高层次的架构设计上也比较常用。比如，通过三方支付系统来实现支付功能，用户在发起支付请求之后，一般不会一直阻塞到支付结果返回，而是注册回调接口（类似回调函数，一般是一个回调用的 URL）给三方支付系统，等三方支付系统执行完成之后，将结果通过回调接口返回给用户。 </p>
+<h3 id="3-1-jdbctemplate">3.1  JdbcTemplate</h3>
+<p>Spring 提供了很多 Template 类，比如，JdbcTemplate、RedisTemplate、RestTemplate。尽管都叫作 xxxTemplate，但它们并非基于模板模式来实现的，而是基于回调来实现的，确切地说应该是同步回调。</p>
+<p>这些 Template 类的设计思路都很相近，所以，我只拿其中的 JdbcTemplate 来分析一下。我们先看下JdbcTempalte的基本使用：</p>
+<pre><code class="lang-JAVA">public class JdbcTemplateDemo {
+  private JdbcTemplate jdbcTemplate;
+
+  public User queryUser(long id) {
+    String sql = "select * from user where id="+id;
+    return jdbcTemplate.query(sql, new UserRowMapper()).get(0);
+  }
+
+  class UserRowMapper implements RowMapper&lt;User&gt; {
+    public User mapRow(ResultSet rs, int rowNum) throws SQLException {
+      User user = new User();
+      user.setId(rs.getLong("id"));
+      user.setName(rs.getString("name"));
+      user.setTelephone(rs.getString("telephone"));
+      return user;
+    }
+  }
+}
+</code></pre>
+<p>Spring 提供的 JdbcTemplate，对 JDBC 进一步封装，将跟业务无关的逻辑，比如加载驱动、创建数据库连接、创建 statement、关闭连接、关闭 statement、处理异常等封装起来，简化了数据库编程。 那 JdbcTemplate 底层具体是如何实现的呢？我们来看一下它的源码，我只摘抄了部分相关代码，贴到了下面 ：</p>
+<pre><code class="lang-JAVA">@Override
+public &lt;T&gt; List&lt;T&gt; query(String sql, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+ return query(sql, new RowMapperResultSetExtractor&lt;T&gt;(rowMapper));
+}
+
+@Override
+public &lt;T&gt; T query(final String sql, final ResultSetExtractor&lt;T&gt; rse) throws DataAccessException {
+ Assert.notNull(sql, "SQL must not be null");
+ Assert.notNull(rse, "ResultSetExtractor must not be null");
+ if (logger.isDebugEnabled()) {
+  logger.debug("Executing SQL query [" + sql + "]");
+ }
+
+ class QueryStatementCallback implements StatementCallback&lt;T&gt;, SqlProvider {
+  @Override
+  public T doInStatement(Statement stmt) throws SQLException {
+   ResultSet rs = null;
+   try {
+    rs = stmt.executeQuery(sql);
+    ResultSet rsToUse = rs;
+    if (nativeJdbcExtractor != null) {
+     rsToUse = nativeJdbcExtractor.getNativeResultSet(rs);
+    }
+    return rse.extractData(rsToUse);
+   }
+   finally {
+    JdbcUtils.closeResultSet(rs);
+   }
+  }
+  @Override
+  public String getSql() {
+   return sql;
+  }
+ }
+
+ return execute(new QueryStatementCallback());
+}
+
+@Override
+public &lt;T&gt; T execute(StatementCallback&lt;T&gt; action) throws DataAccessException {
+ Assert.notNull(action, "Callback object must not be null");
+
+ Connection con = DataSourceUtils.getConnection(getDataSource());
+ Statement stmt = null;
+ try {
+  Connection conToUse = con;
+  if (this.nativeJdbcExtractor != null &amp;&amp;
+    this.nativeJdbcExtractor.isNativeConnectionNecessaryForNativeStatements()) {
+   conToUse = this.nativeJdbcExtractor.getNativeConnection(con);
+  }
+  stmt = conToUse.createStatement();
+  applyStatementSettings(stmt);
+  Statement stmtToUse = stmt;
+  if (this.nativeJdbcExtractor != null) {
+   stmtToUse = this.nativeJdbcExtractor.getNativeStatement(stmt);
+  }
+  T result = action.doInStatement(stmtToUse);
+  handleWarnings(stmt);
+  return result;
+ }
+ catch (SQLException ex) {
+  // Release Connection early, to avoid potential connection pool deadlock
+  // in the case when the exception translator hasn't been initialized yet.
+  JdbcUtils.closeStatement(stmt);
+  stmt = null;
+  DataSourceUtils.releaseConnection(con, getDataSource());
+  con = null;
+  throw getExceptionTranslator().translate("StatementCallback", getSql(action), ex);
+ }
+ finally {
+  JdbcUtils.closeStatement(stmt);
+  DataSourceUtils.releaseConnection(con, getDataSource());
+ }
+}
+</code></pre>
+<p>上述代码中，JdbcTemplate 通过回调的机制，将不变的执行流程抽离出来，放到模板方法 execute() 中，将可变的部分设计成回调 StatementCallback，由用户来定制。query() 函数是对 execute() 函数的二次封装，让接口用起来更加方便。 </p>
+<h3 id="3-2-jvm-shutdownhook">3.2 JVM  ShutdownHook</h3>
+<p>JVM 提供了 <code>Runtime.addShutdownHook(Thread hook)</code> 方法，可以注册一个 JVM 关闭的 Hook。当应用程序关闭的时候，JVM 会自动调用 Hook 代码。我们可以像下面这样使用： </p>
+<pre><code class="lang-JAVA">public class ShutdownHookDemo {
+  private static class ShutdownHook extends Thread {
+    public void run() {
+      System.out.println("I am called during shutting down.");
+    }
+  }
+
+  public static void main(String[] args) {
+    Runtime.getRuntime().addShutdownHook(new ShutdownHook());
+  }
+
+}
+</code></pre>
+<p>我们来看下 addShutdownHook() 的内部代码实现，如下所示：</p>
+<pre><code class="lang-JAVA">public class Runtime {
+  public void addShutdownHook(Thread hook) {
+    SecurityManager sm = System.getSecurityManager();
+    if (sm != null) {
+      sm.checkPermission(new RuntimePermission("shutdownHooks"));
+    }
+    ApplicationShutdownHooks.add(hook);
+  }
+}
+
+class ApplicationShutdownHooks {
+    /* The set of registered hooks */
+    private static IdentityHashMap&lt;Thread, Thread&gt; hooks;
+    static { 
+        } catch (IllegalStateException e) {
+            hooks = null;
+        }
+    }
+
+    static synchronized void add(Thread hook) {
+        if(hooks == null)
+            throw new IllegalStateException("Shutdown in progress");
+
+        if (hook.isAlive())
+            throw new IllegalArgumentException("Hook already running");
+
+        if (hooks.containsKey(hook))
+            throw new IllegalArgumentException("Hook previously registered");
+
+        hooks.put(hook, hook);
+    }
+
+    static void runHooks() {
+        Collection&lt;Thread&gt; threads;
+        synchronized(ApplicationShutdownHooks.class) {
+            threads = hooks.keySet();
+            hooks = null;
+        }
+
+        for (Thread hook : threads) {
+            hook.start();
+        }
+        for (Thread hook : threads) {
+            while (true) {
+                try {
+                    hook.join();
+                    break;
+                } catch (InterruptedException ignored) {
+                }
+            }
+        }
+    }
+}
+</code></pre>
+<p>从上述代码中，我们可以发现，有关 Hook 的逻辑都被封装到 ApplicationShutdownHooks 类中了。当应用程序关闭的时候，JVM 会调用这个类的 runHooks() 方法，创建多个线程，并发地执行多个 Hook。我们在注册完 Hook 之后，并不需要等待 Hook 执行完成，所以，这也算是一种异步回调。</p>
+<h2 id="-">四、总结</h2>
+<p>模板模式有两大作用：复用和扩展。其中，复用指的是，所有的子类可以复用父类中提供的模板方法的代码。扩展指的是，框架通过模板模式提供功能扩展点，让框架用户可以在不修改框架源码的情况下，基于扩展点定制化框架的功能。 </p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

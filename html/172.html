@@ -1,0 +1,74 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch进阶（三）——生产部署：集群参数配置</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch进阶（三）——生产部署：集群参数配置</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在生产环境进行Elasticsearch集群部署时，涉及很多的参数配置，其中又涉及Elasticsearch的底层原理。本章，我们就来聊聊生产环境中这些集群参数的含义和配置。</p>
+<p>首先说明一点，Elasticsearch的默认参数已经经过了相当好的优化，适合绝大多数的情况，尤其是一些性能相关的配置。因此，生产环境下的ES集群，几乎所有的配置参数都可以用默认的。也许MySQL或Oracle这种关系型数据库，非常看重调优，但是Elasticsearch真的不需要。如果我们真的面临一些Elasticsearch的性能问题，通常建议的解决方案是更好的进行数学建模，或者增加更多的机器资源。</p>
+<p>但是在生产环境中，还是有一些业务相关的配置是需要我们修改的，这些配置往往和具体的业务场景相关联，是没法预先给予最好的默认配置的。</p>
+<h2 id="-">一、名称配置</h2>
+<h3 id="1-1-">1.1 集群名称</h3>
+<p>我们首先来看下集群名称的配置，可以在<code>elasticsearch.yml</code>中配置Elasticsearch集群的名称：</p>
+<pre><code>cluster.name: your_es_name
+</code></pre><p>默认情况下，Elasticsearch会启动一个名称为<code>elasticsearch</code>的集群，建议一定要将集群名称重新进行命名，主要是避免公司网络环境中，也许某个开发人员的开发机无意中加入你的集群。</p>
+<h3 id="1-2-">1.2 节点名称</h3>
+<p>每个node启动的时候，Elasticsearch会分配一个随机的名称，这个不适合在生产环境中使用，因为这会导致我们没法记住每台机器，而且每次重启节点都会随机分配，就导致node名称每次重启都会变化。因此，我们在生产环境中是需要给每个node都分配一个名称的，可以在<code>elasticsearch.yml</code>中配置node节点的名称：</p>
+<pre><code class="lang-java">node.name: es_node_name
+</code></pre>
+<h2 id="-">二、路径配置</h2>
+<h3 id="2-1-">2.1 目录</h3>
+<p>默认情况下，Elasticsearch会将plugin、log、data、config等都放在安装目录中。这有一个问题，就是在进行ES升级的时候，这些目录可能会被覆盖掉，导致我们丢失之前安装好的plugin、log、data、config等。</p>
+<p>所以建议在生产环境中，必须将这些重要的文件路径都重新设置一下，放在ES安装目录以外的地方，可以通过配置<code>elasticsearch.yml</code>来改变这些目录位置：</p>
+<ul>
+<li>path.data：用于设置数据文件的目录，可以指定多个目录，用逗号分隔即可，如果多个目录在不同的磁盘上，那么这就是一个最简单的RAID 0方式；</li>
+<li>path.logs：用于设置日志文件的目录；</li>
+<li>path.plugins：用于设置插件存放的目录。</li>
+</ul>
+<p>一般建议的目录地址是：</p>
+<pre><code class="lang-JAVA">path.logs: /var/log/elasticsearch
+path.data: /var/data/elasticsearch
+path.plugins: /var/plugin/elasticsearch
+</code></pre>
+<h3 id="2-2-">2.2 配置文件</h3>
+<p>我们还可以自定义Elasticsearch的配置文件的目录，可以通过以下命令来重新设置：</p>
+<pre><code class="lang-JAVA">./bin/elasticsearch -Epath.conf=/etc/elasticsearch/
+</code></pre>
+<h2 id="-">三、脑裂配置</h2>
+<p>所谓脑裂问题，其实就是因为网络问题导致的网络分区，比如集群被划分成了两片，每片都有多个data node以及一个master node，那么整个集群中就出现了两个master node。但是因为master node是集群中非常重要的一个角色，主宰了集群状态的维护、shard分配，所以如果有两个master的话就会造成数据不一致。</p>
+<h3 id="3-1-master-">3.1 最少master候选节点</h3>
+<p>Elasticsearch中有一个很重要的参数：<code>discovery.zen.minimum_master_nodes</code>。</p>
+<p>这个参数告诉Elasticsearch：只有master候选节点的数量满足这个值时，才可以进行master选举。这个参数的值，必须设置为集群中master候选节点的quorum数量，也就是大多数（master候选节点数量 / 2 + 1）。</p>
+<p>所以，<strong>一个生产环境的Elasticsearch集群，至少要有3个节点，同时将这个参数设置为master候选节点数的quorum，就可以防止脑裂问题的产生</strong>。</p>
+<p>但是因为es集群是可以动态增加和下线节点的，所以可能随时会改变quorum。所以这个参数也是可以通过API随时修改的，特别是在节点上线和下线的时候，都需要作出对应的修改。而且一旦修改过后，这个配置就会持久化保存下来：</p>
+<pre><code class="lang-JAVA">PUT /_cluster/settings
+{
+    "persistent" : {
+        "discovery.zen.minimum_master_nodes" : 2
+    }
+}
+</code></pre>
+<h2 id="-shard-recovery-">四、shard recovery配置</h2>
+<p>在集群启动的时候，有一些配置会影响shard恢复的过程。首先，我们需要理解在默认配置下，shard恢复的过程会发生什么事情：</p>
+<p>首先，假设我们有10个node，每个node都有一个shard（总共5个primary shard，5个replica shard）。如果我们将集群关闭后进行一些维护性的操作，当我们重启集群的时候，此时可能会出现5个节点先启动了，然后剩下5个节点还没启动。</p>
+<p>接着，这5个启动的节点会通过gossip协议互相通信，选举出一个master，然后组成一个集群。他们会发现数据没有被均匀的分布，因为有5个节点没有启动，那么那5个节点上的shard就是不可用的。此时在线的5个node就会将部分replica shard提升为primary shard，同时为每个primary shard复制足够的replica shard。</p>
+<p>最后，剩下的5个节点加入了集群。但是这些节点发现本应该由他们持有的shard已经被复制了，此时他们就会删除自己本地的数据。然后集群又会开始进行shard的rebalance操作，将最早启动的5个node上的shard均匀分布到后来启动的5个node上去。</p>
+<p>在这个过程中，shard重新复制、移动、删除、再次移动的过程，会耗费大量的网络和磁盘资源。对于数据量庞大的集群来说，可能导致每次集群重启时都有TB级别的数据移动，导致集群启动会耗费很长时间。</p>
+<h3 id="4-1-gateway-expected_nodes">4.1 gateway.expected_nodes</h3>
+<p>如果可以让整个集群中的所有节点都完全上线之后，再进行复制和移动shard，那情况就会好很多。所以，Elasticsearch提供了一个<code>gateway.recover_after_nodes</code>参数，这个参数可以让ES等待足够的node都上线之后，再开始进行shard recovery的过程。</p>
+<p><code>gateway.recover_after_nodes</code>参数一般和<code>gateway.recover_after_time</code>、<code>gateway.expected_nodes</code>配合使用，比如进行如下设置：</p>
+<pre><code class="lang-JAVA">gateway.recover_after_nodes: 8
+gateway.recover_after_time: 5m
+gateway.expected_nodes: 10
+</code></pre>
+<p>上述配置后，Elasticsearch集群的行为会变成这样：等待至少8个节点在线，然后等待最多5分钟或者10个节点都在线，才开始进行shard recovery的过程。这样就可以避免少数node启动时，就立即开始shard recovery，消耗大量的网络和磁盘资源，甚至可以将shard recovery过程从数小时缩短为数分钟（大数据量场景下）。</p>
+<h2 id="-">五、总结</h2>
+<p>本章，我主要介绍了Elasticsearch的一些通用参数配置，包括集群的名称配置、node名称配置，以及配置文件的默认路径修改。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

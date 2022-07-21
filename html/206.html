@@ -1,0 +1,78 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（十）——分布式理论之分布式一致性：ZAB协议</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（十）——分布式理论之分布式一致性：ZAB协议</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>ZAB协议，全称 Zookeeper Atomic Broadcast（Zookeeper 原子广播协议）。它是专门为分布式协调服务——Zookeeper，设计的一种支持<strong>崩溃恢复</strong>和<strong>原子广播</strong>的协议。</p>
+<p>从设计上看，ZAB协议和 <a href="https://www.tpvlog.com/article/66">Raft</a> 很类似。ZooKeeper集群中，只有一个Leader节点，其余均为Follower节点。整个ZAB协议一共定义了三个阶段：<strong>发现（Discovery）</strong>、<strong>同步（Synchronization）</strong>、<strong>广播（Broadcast）</strong>。</p>
+<p>三个阶段执行完为一个周期，在Zookeeper集群的整个生命周期中，这三个阶段会不断进行，如果Leader崩溃或因其它原因导致Leader缺失，ZAB协议会再次进入阶段一。</p>
+<h2 id="-">一、角色</h2>
+<p>在ZooKeeper中，一共有两类节点（一个Leader节点和N个Follower节点），每个节点都会在<strong>Looking</strong>、<strong>Following</strong>、<strong>Leading</strong>状态间不断转换：</p>
+<ol>
+<li>ZooKeeper启动时（或新一轮选举时）所有节点初始状态为<strong>Looking</strong>，表明此时集群中没有Leader；</li>
+<li>这时集群尝试选举出一个Leader节点，选举出的Leader节点切换为<strong>Leading</strong>状态；</li>
+<li>当其它节点发现集群中已经选举出Leader，则这些节点会切换到<strong>Following</strong>状态，然后和Leader节点保持同步；</li>
+<li>如果Follower节点与Leader节点失去联系，则Follower节点则会切换到<strong>Looking</strong>状态，开始新一轮选举。</li>
+</ol>
+<center><br/> <img src="./img/20200403213225847.png" style="zoom:120%"><br/></img></center>
+<h2 id="-discovery-">二、发现（Discovery）</h2>
+<p>发现（Discovery），类似于Raft中的领导者选举，该阶段会要求zookeeper集群必须选出一个Leader节点，该Leader的ZXID是全局最大的。</p>
+<h3 id="2-1-zxid">2.1 ZXID</h3>
+<p>ZAB协议中，使用ZXID作为事务编号，针对每个客户端的一个请求，Leader都会产生一个Proposal事务，以ZXID作为全局唯一标识：</p>
+<center><br/> <img src="./img/20200403213236989.png" style="zoom:40%"/><br/></center>
+<p>ZXID的低32位是一个递增的计数器，表示该事务的序号；高32位是Leader的任期编号（epoch）。每个新选举出的Leader节点，会取出本地日志中最大事务Proposal的ZXID，然后解析出对应的epoch，把该值加1作为该新Leader节点的epoch，然后将低32位重新从0开始计。</p>
+<h3 id="2-2-">2.2 选举流程</h3>
+<p>在ZAB协议中，出现以下几种情况会开始进行Leader选举：</p>
+<ul>
+<li>Leader节点宕机；</li>
+<li>Leader节点失去了与过半Follower节点的心跳联系；</li>
+<li>集群初始化时。</li>
+</ul>
+<p>Leader的选举流程如下：</p>
+<ol>
+<li>每个Follower节点都向所有其它节点广播Vote投票请求，即请求自己成为Leader；</li>
+<li>如果Follower接受到的Vote请求中的ZXID比自身的大，则投票同意，并更新自身的Vote，否则拒绝；</li>
+<li>每个Follower都维护着一个投票记录表，当某个Follower节点收到过半的选票时，结束投票并把该Follower选为Leader。</li>
+</ol>
+<h2 id="-synchronization-">三、同步（Synchronization）</h2>
+<p>当选举出Leader后，该Leader具有全局最大的ZXID，所以同步阶段的工作就是根据Leader的事务日志对Follower节点进行数据同步：</p>
+<ol>
+<li><p>Leader节点根据Follower节点发送过来的FOllOWERINFO请求（包含Follower节点的最大ZXID），响应NEWLEADER消息告知自己已经成为它的新Leader；</p>
+</li>
+<li><p>Leader节点根据Follower的最大ZXID（lastZXID），向Follower发送更新指令：</p>
+<ul>
+<li>SNAP ：如果Follower的数据太老，Leader将发送快照SNAP指令给Follower同步数据；</li>
+<li>DIFF ：发送从Follolwer.lastZXID到Leader.lastZXID的DIFF指令给Follower同步数据；</li>
+<li>TRUNC ：当Follower.lastZXID比Leader.lastZXID大时，Leader发送从Leader.lastZXID到Follower.lastZXID的TRUNC指令让Follower丢弃该段数据，即回滚；</li>
+</ul>
+</li>
+<li><p>Follower同步成功后回复ACKNETLEADER；</p>
+</li>
+<li><p>最后，Leader会把该Follower节点添加到自己的可用Follower列表中。</p>
+</li>
+</ol>
+<h2 id="-broadcast-">四、广播（Broadcast）</h2>
+<p>ZAB 协议的消息广播过程使用的是一个原子广播协议，类似二阶段提交，大体流程如下：</p>
+<p>1.对于客户端发送的写请求，全部由 Leader 接收，如果Follower接受到则会转发给Leader。</p>
+<p>2.Leader将请求封装成一个事务 Proposal（每个Proposal都有一个全局单调递增的ID，即ZXID），然后广播给每个 Follwer节点。</p>
+<center><br/> <img src="./img/20200403213246952.png" style="zoom:100%"/><br/></center>
+<blockquote>
+<p>Leader会为每个Follower节点准备一个单独的队列，事务按照ZXID大小顺序排列入队，然后根据FIFO策略进行发送。这样做是为了保证事务的顺序一致性。</p>
+</blockquote>
+<p>3.每个Follower节点收到事务Proposal后，会先写本地日志，成功后返回一个ACK响应；Follower节点如果无法处理，则直接抛弃请求。</p>
+<center><br/> <img src="./img/20200403213254706.png" style="zoom:100%"/><br/></center>
+<p>4.Leader收到过半Follower节点的ACK响应后，就会广播一个Commit消息给所有Follower，通知它们进行事务的提交。与此同时，Leader节点自身也会进行事务的提交。</p>
+<center><br/> <img src="./img/20200403213302349.png" style="zoom:100%"/><br/></center>
+<p>5.各个Follower节点收到Commit消息后，就会完成对事务的提交。</p>
+<h2 id="-">五、总结</h2>
+<p>Leslie Lamport的 Multi-Paxos 只考虑了如何实现共识，也就是如何就一系列值达成共识，未考虑如何实现各值（也就是操作）的顺序性。最终 ZooKeeper 实现了基于Master/Slave模式的ZAB协议，保证了操作的顺序性，而且，ZAB 协议的实现，影响到了后来的共识算法，也就是 Raft 算法，Raft 除了能就一些值达成共识，还能保证各值的顺序性。</p>
+<p>ZAB协议是通过“一切以领导者为准”的强领导者模型和严格按照顺序提交日志，来实现操作的顺序性的，这一点和 Raft 是一样的。但是ZAB 不是共识算法，不基于状态机，而是基于<strong>Master/Slave模式</strong>的原子广播协议，这一点是要特别注意的。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

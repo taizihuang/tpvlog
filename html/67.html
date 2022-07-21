@@ -1,0 +1,72 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（十一）——分布式理论之分布式事务：2PC</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（十一）——分布式理论之分布式事务：2PC</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、何谓分布式事务</h2>
+<h3 id="1-1-">1.1 单体应用</h3>
+<p>首先，来看下传统的单体应用（Monolithic App）。下图是一个单体应用的 3 个 模块，在同一个数据源上更新数据来完成一项业务，整个过程的数据一致性可以由数据库的本地事务来保证，如下图：</p>
+<center><br/><img src="./img/20200207191525079.png" style="zoom: 95%;"><br/></img></center>
+<blockquote>
+<p>关于传统的数据库事务，其背后的核心就是ACID理论，本文不再赘述，读者可以参阅专门的书籍，后续我的MySQL系列也会专门讲解。</p>
+</blockquote>
+<h3 id="1-2-">1.2 分布式应用</h3>
+<p>随着业务需求和架构的变化，单体应用进行了服务化拆分：原来的 3 个 模块被拆分为 3 个独立的服务，每个服务使用独立的数据源（Pattern: Database per service）。整个业务过程将由 3 个服务的调用来完成，如下图：</p>
+<center><br/><img src="./img/20200207191535547.png" style="zoom:95%;"/><br/></center>
+<p>此时，每个服务自身的数据一致性仍有本地事务来保证，但是整个业务层面的全局数据一致性要如何保障呢？比如订单服务和账户服务，都有各自的数据库，必须保证操作的一致性，不能出现下单成功但是没记账的情况。这就是分布式系统所面临的典型分布式事务需求：</p>
+<p><em>分布式系统需要一个解决方案来保障对所有节点操作的数据一致性，这些操作组成一个分布式事务，要么全部执行，要么全部不执行。</em></p>
+<h2 id="-">二、二阶段协议详解</h2>
+<p>二阶段提交（2PC， two-phase commit protocol），顾名思义，就是通过二阶段的协商来完成一个提交操作。 </p>
+<p>2PC 最早是用来实现数据库的分布式事务的，不过现在最常用的协议是 XA 协议。这个协议是 X/Open 国际联盟基于二阶段提交协议提出的，也叫作 X/Open Distributed Transaction Processing（DTP）模型，比如 MySQL 就是通过 MySQL XA 实现了分布式事务。 </p>
+<p>2PC分为两个阶段：<em>投票阶段</em>和<em>提交阶段</em>，我们来详细看下。</p>
+<h3 id="2-1-">2.1 事务过程</h3>
+<p>二阶段提交协议，包含两类节点：</p>
+<ul>
+<li>一个中心化协调者节点（coordinator），一般也叫做<strong>事务协调者</strong></li>
+<li>多个参与者节点（participant、cohort），一般也叫做<strong>事务参与者</strong></li>
+</ul>
+<p>二阶段提交协议的每一次事务提交过程如下：</p>
+<h4 id="-commit-request-phase-voting-phase-">投票阶段（commit-request phase / voting phase）</h4>
+<ol>
+<li>事务协调者请所有事务参与者进行投票：是否可以提交事务，然后等待所有参与者的投票结果；</li>
+<li>参与者如果投票表示可以提交事务，那么就必须预留本地资源（执行本地事务），然后响应YES，后续也不再允许放弃事务；如果不能，就返回NO响应；</li>
+<li>如果协调者接受某个参与者的响应超时，它会认为该参与者投票为NO，即预留资源失败。</li>
+</ol>
+<center><br/><img src="./img/20200207191545132.png" style="zoom:80%;"/><br/></center>
+<h4 id="-commit-phase-">提交阶段（commit phase）</h4>
+<p>在该阶段，事务协调者将基于投票阶段的投票结果进行决策：提交或取消各参与者的本地事务</p>
+<ol>
+<li>仅当所有参与者都返回 YES 响应时，协调者才向所有参与者发出提交请求，此时所有参与者必须保证提交事务成功；</li>
+<li>如果投票阶段中任意一个参与者返回 No 响应，则协调者向所有参与者发出回滚请求，所有参与者进行回滚操作。</li>
+</ol>
+<p><em>两阶段提交协议成功场景示意图：</em></p>
+<center><br/><img src="./img/20200207191615562.png" style="zoom:100%;"/><br/></center>
+<blockquote>
+<p>2PC假设所有节点都采用<strong>预写式日志（Write-Ahead Logging）</strong>来写数据，且日志写入后不会丢失。WAL 的核心思想就是先写日志，再写数据。 </p>
+</blockquote>
+<h3 id="2-2-">2.2 优缺点</h3>
+<p><strong><em>优点：</em></strong></p>
+<ol>
+<li>强一致性，因为一阶段预留了资源，所有只要节点或者网络最终恢复正常，协议就能保证二阶段执行成功；</li>
+<li>业界标准支持，二阶段协议在业界有标准规范——XA 规范，许多数据库和框架都有针对XA规范的分布式事务实现。</li>
+</ol>
+<p><strong><em>缺点：</em></strong></p>
+<ol>
+<li>在提交请求阶段，需要预留资源，在资源预留期间，其他人不能操作（比如，XA 在第一阶段会将相关资源锁定） ，会造成分布式系统吞吐量大幅下降；</li>
+<li>容错能力较差，比如在节点宕机或者超时的情况下，无法确定流程的状态，只能不断重试，同时这也会<strong>导致事务在访问共享资源时发生冲突和死锁的概率增高</strong>，随着数据库节点的增多，这种趋势会越来越严重，从而成为系统在数据库层面上水平伸缩的"枷锁"；</li>
+</ol>
+<p>2PC分布式事务方案，比较适合单体应用跨多库的场景，一般用spring + JTA就可以实现。但是因为严重依赖于数据库层面来搞定复杂的事务，效率很低，所以绝对不适合高并发的场景。</p>
+<blockquote>
+<p>注意：一般来说，如果某个服务内部出现跨多库的直接操作，其实是不合规的。 按照分布式服务治理的规范，一个分布式系统，拆成几十个服务，每个服务只能操作自己对应的一个数据库，如果需要操作别的服务对应的库，不允许直连库，必须通过调用别的服务的接口来实现。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>二阶段提交协议，虽然是目前分布式事务的事实规范，但实际应用并不多。不过2PC是一种非常经典的思想，Paxos、Raft 等强一致性算法，都采用了二阶段提交操作。所以，读者应当理解该协议背后的二阶段提交的思想，当后续需要时，能灵活地根据二阶段提交思想，设计新的事务或一致性协议。 </p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,44 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Kafka（六）——集群控制：Controller</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Kafka（六）——集群控制：Controller</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Kafka集群启动时，会自动选举出一个Broker，承担Controller的责任。所谓Controller，就是Kafka集群的一个总控组件，负责管理整个集群，包括Leader Partition选举、分区负载均衡、管理集群元数据等等。</p>
+<p>那么，本章我们就来看看，Controller的核心工作机制。</p>
+<h2 id="-controller-">一、Controller选举</h2>
+<p>首先，我们来看下，Kafka是如何进行Controller选举的。</p>
+<p>在Kafka集群启动的时候，每一个Broker都会尝试去Zookeeper创建一个<code>/controller</code>临时节点，Zookeeper会保证只有一个Client可以创建成功，创建成功的那个Broker就成为了Controller，集群中的其它Broker会监听这个节点。</p>
+<p>根据Zookeeper的会话保持机制，一旦Controller所在的Broker宕机了，那么临时节点就会消失，由于集群的其它Broker会一直监听这个临时节点，所以一旦发现临时节点消失了，就会再次争抢创建临时节点，从而保证有一个新的Broker会成为Controller角色。</p>
+<h2 id="-partition-leader-">二、Partition Leader选举</h2>
+<p>Kafka在创建Topic时，一般都会指定Partition分区，每个分区都有一个Leader，N个Follower，那么Kafka是如何实现Partition Leader选举的呢？</p>
+<ol>
+<li>首先，在创建Topic时，Kafka就会往Zookeeper中注册Topic的元数据：包括分区数，每个分区有几个副本，每个副本的状态等等，分区副本的状态初始时都是<code>NonExistentReplica</code>；</li>
+<li>Kafka Controller会监听Zookeeper的数据变更，当监听到Topic变动时，会从Zookeeper加载该Topic所有分区的副本到内存里，然后把这些副本的状态变更为<code>NewReplica</code>；</li>
+<li>最后，从中选择第一个副本作为Leader，其他都是Follower，并且把它们都加入到分区的ISR列表中，同时设置整个Partition的状态为<code>OnlinePartition</code>。</li>
+</ol>
+<p><strong>举个例子来理解下：</strong></p>
+<p>比如创建了一个<code>order_topic</code>，一共3个分区，每个分区共2个副本（一个Leader，一个Follower）。Kafka会将<code>order_topic</code>的元数据信息写入Zookeeper中：</p>
+<pre><code class="lang-SHELL">/topics/order_topic
+
+partitions = 3, replica_factor = 2
+
+[partition0_1, partition0_2]
+[partition1_1, partition1_2]
+[partition2_1, partition2_2]
+</code></pre>
+<p>Kafka Controller监听到变化后，会从每个Partition的副本列表中取第一个作为Leader，其它的就是follower，然后全部加入到该Partition对应的ISR列表中。 </p>
+<p>接着，Controller会根据一些算法让Partition的每个副本都均匀分布到不同机器，同时还会设置整个Partition的状态为<code>OnlinePartition</code>。</p>
+<p>最后，Controller还会把这个Partition和副本所有的信息（包括谁是Leader，谁是Follower，ISR列表），都发送给所有Broker让他们知晓。所以，在Kafka集群中，每个Broker都有一份各个Partition的元数据。</p>
+<h2 id="-topic-">三、Topic删除</h2>
+<p>当我们删除一个Topic时，Kafka Controller会发送请求给这个Topic的所有Partition所在的Broker机器，通知它们设置所有Partition副本的状态为<code>OfflineReplica</code>，也就是让这个Topic的所有分区副本下线。</p>
+<p>接着，Controller会将全部副本状态变为<code>ReplicaDeletionStarted</code>，然后发送请求给Broker，把Partition副本的数据删除，也就是删除磁盘上的日志文件，删除成功后副本状态会变为<code>ReplicaDeletionSuccessful</code>。</p>
+<p>最后，副本状态会变为<code>NonExistentReplica</code>，同时设置分区状态为<code>Offline</code>。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

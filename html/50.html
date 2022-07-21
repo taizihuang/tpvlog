@@ -1,0 +1,397 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（三四）—— J.U.C之collections框架：PriorityBlockingQueue</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（三四）—— J.U.C之collections框架：PriorityBlockingQueue</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-priorityblockingqueue-">一、PriorityBlockingQueue简介</h2>
+<p><code>PriorityBlockingQueue</code>，是在JDK1.5时，随着J.U.C包引入的一种阻塞队列，它实现了<strong>BlockingQueue</strong>接口，底层基于<strong>堆</strong>实现：</p>
+<p><img alt="img" src="./img/20191030235824438.png"/></p>
+<p>PriorityBlockingQueue是一种<strong>无界阻塞队列</strong>，在构造的时候可以指定队列的初始容量。具有如下特点：</p>
+<ol>
+<li>PriorityBlockingQueue与之前介绍的阻塞队列最大的不同之处就是：它是一种<strong>优先级队列</strong>，也就是说元素并不是以FIFO的方式出/入队，而是以按照权重大小的顺序出队；</li>
+<li>PriorityBlockingQueue是真正的无界队列（仅受内存大小限制），它不像ArrayBlockingQueue那样构造时必须指定最大容量，也不像LinkedBlockingQueue默认最大容量为<code>Integer.MAX_VALUE</code>；</li>
+<li>由于PriorityBlockingQueue是按照元素的权重进入排序，所以队列中的元素必须是可以比较的，也就是说元素必须实现<code>Comparable</code>接口；</li>
+<li>由于PriorityBlockingQueue无界队列，所以插入元素永远不会阻塞线程；</li>
+<li>PriorityBlockingQueue底层是一种<strong>基于数组实现的堆结构</strong>。</li>
+</ol>
+<p>关于堆，如果读者不了解，可以参考下我的这篇博文预热下——<a href="https://www.jianshu.com/p/7acd000e9a47">优先级队列</a>。</p>
+<blockquote>
+<p><strong>注意</strong>：<em>堆分为“大顶堆”和“小顶堆”，PriorityBlockingQueue会依据元素的比较方式选择构建大顶堆或小顶堆。比如：如果元素是Integer这种引用类型，那么默认就是“小顶堆”，也就是每次出队都会是当前队列最小的元素。</em></p>
+</blockquote>
+<h2 id="-priorityblockingqueue-">二、PriorityBlockingQueue原理</h2>
+<h3 id="2-1-">2.1 构造</h3>
+<p>PriorityBlockingQueue提供了四种构造器：</p>
+<pre><code class="lang-java">/**
+ * 默认构造器.
+ * 默认初始容量11, 以元素自然顺序比较(元素必须实现Comparable接口)
+ */
+public PriorityBlockingQueue() {
+    this(DEFAULT_INITIAL_CAPACITY, null);
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 指定初始容量的构造器.
+ * 以元素自然顺序比较(元素必须实现Comparable接口)
+ */
+public PriorityBlockingQueue(int initialCapacity) {
+    this(initialCapacity, null);
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 指定初始容量和比较器的构造器.
+ */
+public PriorityBlockingQueue(int initialCapacity,
+                             Comparator&lt;? super E&gt; comparator) {
+    if (initialCapacity &lt; 1)
+        throw new IllegalArgumentException();
+    this.lock = new ReentrantLock();
+    this.notEmpty = lock.newCondition();
+    this.comparator = comparator;
+    this.queue = new Object[initialCapacity];
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 从已有集合构造队列.
+ * 如果已经集合是SortedSet或者PriorityBlockingQueue, 则保持原来的元素顺序
+ */
+public PriorityBlockingQueue(Collection&lt;? extends E&gt; c) {
+    this.lock = new ReentrantLock();
+    this.notEmpty = lock.newCondition();
+    boolean heapify = true;     // true if not known to be in heap order
+    boolean screen = true;      // true if must screen for nulls
+
+    if (c instanceof SortedSet&lt;?&gt;) {                        // 如果是有序集合
+        SortedSet&lt;? extends E&gt; ss = (SortedSet&lt;? extends E&gt;) c;
+        this.comparator = (Comparator&lt;? super E&gt;) ss.comparator();
+        heapify = false;
+    } else if (c instanceof PriorityBlockingQueue&lt;?&gt;) {     // 如果是优先级队列
+        PriorityBlockingQueue&lt;? extends E&gt; pq = (PriorityBlockingQueue&lt;? extends E&gt;) c;
+        this.comparator = (Comparator&lt;? super E&gt;) pq.comparator();
+        screen = false;
+        if (pq.getClass() == PriorityBlockingQueue.class)   // exact match
+            heapify = false;
+    }
+
+    Object[] a = c.toArray();
+    int n = a.length;
+    if (a.getClass() != Object[].class)
+        a = Arrays.copyOf(a, n, Object[].class);
+    if (screen &amp;&amp; (n == 1 || this.comparator != null)) {    // 校验是否存在null元素
+        for (int i = 0; i &lt; n; ++i)
+            if (a[i] == null)
+                throw new NullPointerException();
+    }
+    this.queue = a;
+    this.size = n;
+    if (heapify)    // 堆排序
+        heapify();
+}
+</code></pre>
+<p>重点是第三种构造器，可以看到，PriorityBlockingQueue内部也是利用了<strong>ReentrantLock</strong>来保证并发访问时的线程安全。<br/>PriorityBlockingQueue如果不指定容量，默认容量为11，内部数组queue其实是一种二叉树，后续我们会详细介绍。</p>
+<p>需要注意的是，PriorityBlockingQueue只有一个条件等待队列——<code>notEmpty</code>，因为构造时不会限制最大容量且会自动扩容，所以插入元素并不会阻塞，仅当队列为空时，才可能阻塞“出队”线程。</p>
+<pre><code class="lang-java">public class PriorityBlockingQueue&lt;E&gt; extends AbstractQueue&lt;E&gt;
+        implements BlockingQueue&lt;E&gt;, java.io.Serializable {
+
+    /**
+     * 默认容量.
+     */
+    private static final int DEFAULT_INITIAL_CAPACITY = 11;
+
+    /**
+     * 最大容量.
+     */
+    private static final int MAX_ARRAY_SIZE = Integer.MAX_VALUE - 8;
+
+    /**
+     * 内部堆数组, 保存实际数据, 可以看成一颗二叉树:
+     * 对于顶点queue[n], queue[2*n+1]表示左子结点, queue[2*(n+1)]表示右子结点.
+     */
+    private transient Object[] queue;
+
+    /**
+     * 队列中的元素个数.
+     */
+    private transient int size;
+
+    /**
+     * 比较器, 如果为null, 表示以元素自身的自然顺序进行比较（元素必须实现Comparable接口）.
+     */
+    private transient Comparator&lt;? super E&gt; comparator;
+
+    /**
+     * 全局锁.
+     */
+    private final ReentrantLock lock;
+
+    /**
+     * 当队列为空时，出队线程在该条件队列上等待.
+     */
+    private final Condition notEmpty;
+
+    // ...
+}
+</code></pre>
+<hr/>
+<h3 id="2-2-put-e-e-">2.2 插入元素——put(E e)</h3>
+<p><strong>PriorityBlockingQueue</strong>插入元素不会阻塞线程，<code>put(E e)</code>方法内部其实是调用了<code>offer(E e)</code>方法：<br/>首先获取全局锁（对于队列的修改都要获取这把锁），然后判断下队列是否已经满了，如果满了就先进行一次内部数组的扩容（关于扩容，我们后面会专门讲）：</p>
+<pre><code class="lang-java">/**
+ * 向队列中插入指定元素.
+ * 由于队列是无界的，所以不会阻塞线程.
+ */
+public void put(E e) {
+    offer(e);   // never need to block
+}
+
+public boolean offer(E e) {
+    if (e == null)
+        throw new NullPointerException();
+
+    final ReentrantLock lock = this.lock;   // 加锁
+    lock.lock();
+
+    int n, cap;
+    Object[] array;
+    while ((n = size) &gt;= (cap = (array = queue).length))    // 队列已满, 则进行扩容
+        tryGrow(array, cap);
+
+    try {
+        Comparator&lt;? super E&gt; cmp = comparator;
+        if (cmp == null)    // 比较器为空, 则按照元素的自然顺序进行堆调整
+            siftUpComparable(n, e, array);
+        else                // 比较器非空, 则按照比较器进行堆调整
+            siftUpUsingComparator(n, e, array, cmp);
+        size = n + 1;       // 队列元素总数+1
+        notEmpty.signal();  // 唤醒一个可能正在等待的"出队线程"
+    } finally {
+        lock.unlock();
+    }
+    return true;
+}
+</code></pre>
+<p>上面最关键的是<strong>siftUpComparable</strong>和<strong>siftUpUsingComparator</strong>方法，这两个方法内部几乎一样，只不过前者是一个根据元素的自然顺序比较，后者则根据外部比较器比较，我们重点看下siftUpComparable方法：</p>
+<pre><code class="lang-java">/**
+ * 将元素x插入到array[k]的位置.
+ * 然后按照元素的自然顺序进行堆调整——"上浮"，以维持"堆"有序.
+ * 最终的结果是一个"小顶堆".
+ */
+private static &lt;T&gt; void siftUpComparable(int k, T x, Object[] array) {
+    Comparable&lt;? super T&gt; key = (Comparable&lt;? super T&gt;) x;
+    while (k &gt; 0) {
+        int parent = (k - 1) &gt;&gt;&gt; 1;     // 相当于(k-1)除2, 就是求k结点的父结点索引parent
+        Object e = array[parent];
+        if (key.compareTo((T) e) &gt;= 0)  // 如果插入的结点值大于父结点, 则退出
+            break;
+
+        // 否则，交换父结点和当前结点的值
+        array[k] = e;
+        k = parent;
+    }
+    array[k] = key;
+}
+</code></pre>
+<p><strong>siftUpComparable</strong>方法的作用其实就是<strong>堆的“上浮调整”</strong>，可以把堆可以想象成一棵完全二叉树，每次插入元素都链接到二叉树的<strong>最右下方</strong>，然后将插入的元素与其父结点比较，如果父结点大，则交换元素，直到没有父结点比插入的结点大为止。这样就保证了堆顶（二叉树的根结点）一定是最小的元素。（注：以上仅针对“小顶堆”）</p>
+<hr/>
+<h3 id="2-3-">2.3 堆的“上浮”调整</h3>
+<p>我们通过示例来理解下入队的整个过程：<strong><em>假设初始构造的队列大小为6，依次插入9、2、93、10、25、90</em></strong>。</p>
+<p><strong>①初始队列情况</strong></p>
+<p><img alt="img" src="./img/20191030235830608.png"/></p>
+<hr/>
+<p><strong>②插入元素9（索引0处）</strong></p>
+<p><img alt="img" src="./img/20191030235836764.png"/></p>
+<p>将上述数组想象成一棵<strong>完全二叉树</strong>，其实就是下面的结构：<br/><img alt="img" src="./img/20191030235844030.png"/></p>
+<hr/>
+<p><strong>③插入元素2（索引1处）</strong></p>
+<p><img alt="img" src="./img/20191030235851148.png"/></p>
+<p>对应的二叉树：<br/><img alt="img" src="./img/20191030235857772.png"/></p>
+<p>由于结点2的父结点为9，所以要进行“上浮调整”，最终队列结构如下：<br/><img alt="img" src="./img/20191030235906834.png"/></p>
+<p><img alt="img" src="./img/20191030235913084.png"/></p>
+<hr/>
+<p><strong>④插入元素93（索引2处）</strong></p>
+<p><img alt="img" src="./img/20191030235919269.png"/></p>
+<p><img alt="img" src="./img/20191030235925625.png"/></p>
+<hr/>
+<p><strong>⑤插入元素10（索引3处）</strong></p>
+<p><img alt="img" src="./img/20191030235934611.png"/></p>
+<p><img alt="img" src="./img/20191030235940359.png"/></p>
+<hr/>
+<p><strong>⑥插入元素25（索引4处）</strong></p>
+<p><img alt="img" src="./img/20191030235947474.png"/></p>
+<p><img alt="img" src="./img/20191030235954172.png"/></p>
+<hr/>
+<p><strong>⑦插入元素90（索引5处）</strong></p>
+<p><img alt="img" src="./img/20191031000005787.png"/></p>
+<p><img alt="img" src="./img/20191031000012293.png"/></p>
+<p>此时，堆不满足有序条件，因为“90”的父结点“93”大于它，所以需要“上浮调整”：</p>
+<p><img alt="img" src="./img/20191031000018950.png"/></p>
+<p><img alt="img" src="./img/20191031000025510.png"/></p>
+<p>最终，堆的结构如上，可以看到，经过调整后，堆顶元素一定是最小的。</p>
+<hr/>
+<h3 id="2-4-">2.4 扩容</h3>
+<p>在入队过程中，如果队列内部的<code>queue</code>数组已经满了，就需要进行扩容：</p>
+<pre><code class="lang-java">public boolean offer(E e) {
+
+    // ...
+
+    while ((n = size) &gt;= (cap = (array = queue).length))    // 队列已满, 则进行扩容
+        tryGrow(array, cap);
+
+    // ...
+}
+</code></pre>
+<p>我们来看下<strong>tryGrow</strong>方法：</p>
+<pre><code class="lang-java">private void tryGrow(Object[] array, int oldCap) {
+    lock.unlock();  // 扩容和入队/出队可以同时进行, 所以先释放全局锁
+    Object[] newArray = null;
+    if (allocationSpinLock == 0 &amp;&amp;
+            UNSAFE.compareAndSwapInt(this, allocationSpinLockOffset,
+                    0, 1)) {    // allocationSpinLock置1表示正在扩容
+        try {
+            // 计算新的数组大小
+            int newCap = oldCap + ((oldCap &lt; 64) ?
+                    (oldCap + 2) :
+                    (oldCap &gt;&gt; 1));
+            if (newCap - MAX_ARRAY_SIZE &gt; 0) {    // 溢出判断
+                int minCap = oldCap + 1;
+                if (minCap &lt; 0 || minCap &gt; MAX_ARRAY_SIZE)
+                    throw new OutOfMemoryError();
+                newCap = MAX_ARRAY_SIZE;
+            }
+            if (newCap &gt; oldCap &amp;&amp; queue == array)
+                newArray = new Object[newCap];  // 分配新数组
+        } finally {
+            allocationSpinLock = 0;
+        }
+    }
+    if (newArray == null)   // 扩容失败（可能有其它线程正在扩容，导致allocationSpinLock竞争失败）
+        Thread.yield();
+
+    lock.lock();            // 获取全局锁(因为要修改内部数组queue)
+    if (newArray != null &amp;&amp; queue == array) {
+        queue = newArray;   // 指向新的内部数组
+        System.arraycopy(array, 0, newArray, 0, oldCap);
+    }
+}
+</code></pre>
+<p>上述整个过程还是比较清晰的，由于调用<strong>tryGrow</strong>的方法一定会先获取全局锁，所以先释放锁，因为可能有线程正在出队，扩容/出队是可以并发执行的（扩容的前半部分只是新建一个内部数组，不会对出队产生影响）。扩容后的内部数组大小一般为原来的2倍。</p>
+<p>上述需要注意的是<code>allocationSpinLock</code>字段，该字段通过CAS操作，置1表示有线程正在进行扩容。</p>
+<hr/>
+<h3 id="2-5-take-">2.5 删除元素——take()</h3>
+<p>删除元素（出队）的整个过程比较简单，也是先获取全局锁，然后判断队列状态，如果是空，则阻塞线程，否则调用<code>dequeue</code>方法出队：</p>
+<pre><code class="lang-java">/**
+ * 出队一个元素.
+ * 如果队列为空, 则阻塞线程.
+ */
+public E take() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();   // 获取全局锁
+    E result;
+    try {
+        while ((result = dequeue()) == null)    // 队列为空
+            notEmpty.await();                   // 线程在noEmpty条件队列等待
+    } finally {
+        lock.unlock();
+    }
+    return result;
+}
+
+private E dequeue() {
+    int n = size - 1;   // n表示出队后的剩余元素个数
+    if (n &lt; 0)          // 队列为空, 则返回null
+        return null;
+    else {
+        Object[] array = queue;
+        E result = (E) array[0];    // array[0]是堆顶结点, 每次出队都删除堆顶结点
+        E x = (E) array[n];         // array[n]是堆的最后一个结点, 也就是二叉树的最右下结点
+        array[n] = null;
+        Comparator&lt;? super E&gt; cmp = comparator;
+        if (cmp == null)
+            siftDownComparable(0, x, array, n);
+        else
+            siftDownUsingComparator(0, x, array, n, cmp);
+        size = n;
+        return result;
+    }
+}
+</code></pre>
+<p>从<strong>dequeue</strong>方法可以看出，每次出队的元素都是“堆顶结点”，对于“小顶堆”就是队列中的最小值，对于“大顶堆”就是队列中的最大值。</p>
+<p>我们看下<strong>siftDownComparable</strong>方法如何实现堆顶点的删除：</p>
+<pre><code class="lang-JAVA">/**
+ * 堆的"下沉"调整.
+ * 删除array[k]对应的结点,并重新调整堆使其有序.
+ *
+ * @param k     待删除的位置
+ * @param x     待比较的健
+ * @param array 堆数组
+ * @param n     堆的大小
+ */
+private static &lt;T&gt; void siftDownComparable(int k, T x, Object[] array, int n) {
+    if (n &gt; 0) {
+        Comparable&lt;? super T&gt; key = (Comparable&lt;? super T&gt;) x;
+        int half = n &gt;&gt;&gt; 1;           // 相当于n除2, 即找到索引n对应结点的父结点
+        while (k &lt; half) {
+            /**
+             * 下述代码中:
+             * c保存k的左右子结点中的较小结点值 
+             * child保存较小结点对应的索引
+             */
+            int child = (k &lt;&lt; 1) + 1; // k的左子结点
+            Object c = array[child];
+
+            int right = child + 1;    // k的右子结点
+            if (right &lt; n &amp;&amp; ((Comparable&lt;? super T&gt;) c).compareTo((T) array[right]) &gt; 0)
+                c = array[child = right];
+
+            if (key.compareTo((T) c) &lt;= 0)
+                break;
+            array[k] = c;
+            k = child;
+        }
+        array[k] = key;
+    }
+}
+</code></pre>
+<p>上述代码其实是经典的<strong>堆“下沉”</strong>操作，对堆中某个顶点下沉，步骤如下：</p>
+<ol>
+<li>找到该顶点的左右子结点中较小的那个；</li>
+<li>与当前结点交换；</li>
+<li>重复前2步直到当前结点没有左右子结点或比左右子结点都小。</li>
+</ol>
+<hr/>
+<h3 id="2-6-">2.6 堆的“下沉”调整</h3>
+<p>来看个示例，假设堆的初始结构如下，现在出队一个元素（索引0位置的元素2）。</p>
+<p><strong>①初始状态</strong></p>
+<p><img alt="img" src="./img/20191031000032574.png"/></p>
+<p>对应二叉树结构：</p>
+<p><img alt="img" src="./img/20191031000039265.png"/></p>
+<hr/>
+<p><strong>②将顶点与最后一个结点调换</strong></p>
+<p>即将顶点“2”与最后一个结点“93”交换，然后将索引5为止置null。</p>
+<p><img alt="img" src="./img/20191031000045847.png"/></p>
+<blockquote>
+<p><strong>注意：*</strong>为了提升效率（比如siftDownComparable的源码所示）并不一定要真正交换，可以用一个变量保存索引5处的结点值，在整个下沉操作完成后再替换。但是为了理解这一过程，示例图中全是以交换进行的。*</p>
+</blockquote>
+<hr/>
+<p><strong>③下沉索引0处结点</strong></p>
+<p>比较元素“93”和左右子结点中的最小者，发现“93”大于“9”，违反了“小顶堆”的规则，所以交换“93”和“9”，这一过程称为<strong>siftdown（下沉）</strong>：</p>
+<p><img alt="img" src="./img/20191031000052111.png"/></p>
+<hr/>
+<p><strong>④继续下沉索引1处结点</strong></p>
+<p>比较元素“93”和左右子结点中的最小者，发现“93”大于“10”，违反了“小顶堆”的规则，所以交换“93”和“10”：</p>
+<p><img alt="img" src="./img/20191031000058118.png"/></p>
+<hr/>
+<p><strong>⑤比较结束</strong></p>
+<p>由于“93”已经没有左右子结点了，所以下沉结束，可以看到，此时堆恢复了有序状态，最终队列结构如下：</p>
+<p><img alt="img" src="./img/20191031000104478.png"/></p>
+<hr/>
+<h2 id="-">三、总结</h2>
+<p><strong>PriorityBlockingQueue</strong>属于比较特殊的阻塞队列，适用于有元素优先级要求的场景。它的内部和ArrayBlockingQueue一样，使用一个了全局独占锁来控制同时只有一个线程可以进行入队和出队，另外由于该队列是无界队列，所以入队线程并不会阻塞。</p>
+<p>PriorityBlockingQueue始终保证出队的元素是优先级最高的元素，并且可以定制优先级的规则，内部通过使用<strong>堆（数组形式）</strong>来维护元素顺序，它的内部数组是可扩容的，扩容和出/入队可以并发进行。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

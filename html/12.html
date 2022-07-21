@@ -1,0 +1,71 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程基础（九）—— Thread-Per-Message模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程基础（九）—— Thread-Per-Message模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、定义</h2>
+<p>Thread-Per-Message模式是指每个message一个线程，message可以理解成“消息”、“命令”或者“请求”。每一个message都会分配一个线程，由这个线程执行工作，使用Thread-Per-Message Pattern时，“委托消息的一端”与“执行消息的一端”会是不同的线程。</p>
+<h2 id="-">二、模式案例</h2>
+<p>该案例中，由Host分发请求，每一个请求分发一个新的线程进行处理。</p>
+<p><em>Host类定义：</em></p>
+<pre><code class="lang-java">public class Host {
+    private final Helper helper = new Helper();
+    public void request(final int count, final char c) {
+        System.out.println("    request(" + count + ", " + c + ") BEGIN");
+        new Thread() {
+            public void run() {
+                helper.handle(count, c);
+            }
+        }.start();
+        System.out.println("    request(" + count + ", " + c + ") END");
+    }
+}
+</code></pre>
+<p><em>Helper类定义：</em></p>
+<pre><code class="lang-java">public class Helper {
+    public void handle(int count, char c) {
+        System.out.println("        handle(" + count + ", " + c + ") BEGIN");
+        for (int i = 0; i &lt; count; i++) {
+            slowly();
+            System.out.print(c);
+        }
+        System.out.println("");
+        System.out.println("        handle(" + count + ", " + c + ") END");
+    }
+    private void slowly() {
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+        }
+    }
+}
+</code></pre>
+<p><em>执行：</em></p>
+<pre><code class="lang-java">public class Main {
+    public static void main(String[] args) {
+        System.out.println("main BEGIN");
+        Host host = new Host();
+        host.request(10, 'A');
+        host.request(20, 'B');
+        host.request(30, 'C');
+        System.out.println("main END");
+    }
+}
+</code></pre>
+<h2 id="-">三、模式讲解</h2>
+<p>Thread-Per-Message模式的角色如下：</p>
+<ul>
+<li>Client(委托人)参与者<br/>Client参与者会对Host参与者送出请求(Request)。上述案例中，Client参与者就是Main类。</li>
+<li>Host参与者<br/>Host参与者接受来自Client的请求，然后建立新的线程处理它。</li>
+<li>Helper(帮助者)参与者<br/>Helper实际处理请求的。</li>
+</ul>
+<center><br/><img src="./img/20191022010729254.png" style="zoom:67%;"><br/></img></center>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

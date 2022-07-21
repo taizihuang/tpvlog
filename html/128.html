@@ -1,0 +1,103 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式消息中间件（三）——RocketMQ生产部署</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式消息中间件（三）——RocketMQ生产部署</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我们介绍了RocketMQ的基本架构，但是对于RocketMQ的很多底层原理还没有展开讨论，比如Rocket是如何做到高性能的？如何进行持久化？如何防止消息丢失等等。</p>
+<p>本章，我们先来看下如果要在我们自己的生产环境部署RocketMQ，需要做哪些事情？如何进行部署？后续章节再去研究RocketMQ的底层原理。</p>
+<h2 id="-">一、业务量评估</h2>
+<p>首先，我们需要对业务量（日活用户数、日访问数、日新增数据量等运营指标）进行一个预估，可以参考已有的一些类似系统，具体的指标因业务而已。系统上线规划时，一般需要考虑三个时间段：一月、一年、三年。然后根据评估的业务量确定系统的逻辑架构图，要用多少台机器，每台机器什么配置等等。</p>
+<p>我们这里不做详细论述，由于我们是使用RocketMQ，官方说明的单个Broker节点可以抗住10万QPS请求，所以我们初期部署RocketMQ的目标就是支撑10万QPS，那么就先用一台机器部署一个Master-Broker节点，考虑到可用性再加2个Slave节点，整个系统的逻辑架构图如下：</p>
+<center><br/> <img src="./img/20200221001057658.png" style="zoom:80%"><br/></img></center>
+<p><strong>NameServer：</strong>3台机器，每台8核CPU + 16G内存 + 500G磁盘 + 千兆网卡<br/><strong>Broker：</strong>3台机器，每台24核CPU + 48G内存 + 1TB磁盘 + 千兆网卡<br/><strong>生产者：</strong>2台机器，每台4核CPU + 8G内存 + 500GB磁盘 + 千兆网卡<br/><strong>消费者：</strong>2台机器，每台4核CPU + 8G内存 + 500GB磁盘 + 千兆网卡</p>
+<p>NameServer用作路由服务，主要承载以下请求：Broker心跳、生产者/消费者拉取路由信息，所以负载其实很低，不需要特别高的机器配置，8核16G足以，部署三台主要保证可用性。</p>
+<p>Broker是核心组件，需要承载高并发写入和海量数据存储，所以对配置要求较高，一般至少要给16核32G的机器，考虑到官方说单台可以抗10万QPS，而我们的目标就是支撑10万QPS，所以我先不做数据分片，只用3台机器组成一个主从集群。</p>
+<p>生产者和消费者机器都是临时用来做性能压测的，一般就是业务系统，用标准的4核8G机器部署就可以。</p>
+<h2 id="-nameserver-">二、NameServer部署</h2>
+<p>RocketMQ依赖JDK，所以需要先机器上安装JDK，同时在环境变量中设置JAVE_HOME。</p>
+<h3 id="2-1-dledger">2.1 构建Dledger</h3>
+<p>RocketMQ 4.5版本以后，依赖Dledger进行主从切换，所以我们需要先构建Dledger。在三台NameServer的机器上分别执行以下命令，拉取Dledger并进行打包构建：</p>
+<pre><code class="lang-java">git clone https://github.com/openmessaging/openmessaging-storage-dledger.git
+cd openmessaging-storage-dledger
+mvn clean install -DskipTests
+</code></pre>
+<h3 id="2-2-rocketmq">2.2 构建RocketMQ</h3>
+<p>接着，在三台NameServer的机器上分别执行以下命令构建RocketMQ：</p>
+<pre><code class="lang-JAVA">git clone https://github.com/apache/rocketmq.git
+cd rocketmq
+git checkout -b store_with_dledger origin/store_with_dledger
+mvn -Prelease-all -DskipTests clean install -U
+</code></pre>
+<p>然后进入目录<code>distribution/target/apache-rocketmq</code>，编辑RocketMQ的三个启动配置<code>bin/runserver.sh</code>、<code>bin/runbroker.sh</code>、<code>bin/tools.sh</code>，分别在里面找到如下三行：</p>
+<pre><code class="lang-JAVA">[ ! -e "$JAVA_HOME/bin/java" ] &amp;&amp; JAVA_HOME=$HOME/jdk/java
+[ ! -e "$JAVA_HOME/bin/java" ] &amp;&amp; JAVA_HOME=/usr/java
+[ ! -e "$JAVA_HOME/bin/java" ] &amp;&amp; error_exit "Please set the JAVA_HOME variable in your environment, We need java(x64)!"
+</code></pre>
+<p>删除上述的第2、3行，并将第1行的值改为自己机器上的JDK主目录。</p>
+<blockquote>
+<p>Linux中可以用命令<code>/usr/libexec/java_home -V</code>，查看Java主目录。</p>
+</blockquote>
+<h3 id="2-3-nameserver">2.3 启动NameServer</h3>
+<p>执行以下命令启动NameServer，NameServer默认监听9876端口：</p>
+<pre><code class="lang-JAVA">nohup sh mqnamesrv &amp;
+</code></pre>
+<h2 id="-broker-">三、Broker部署</h2>
+<p>Broker的部署方式和NameServer几乎完全相同，先在三台Broker的机器上设置好JAVA_HOME，然后构建Dledger和RocketMQ，修改启动配置，只不过最后用Broker的启动命令来启动：</p>
+<pre><code class="lang-JAVA">nohup sh bin/mqbroker -c conf/dledger/broker-n0.conf &amp;
+</code></pre>
+<p>这里注意下<code>broker-n0.conf</code>这个配置文件，它是我们自己新建的，表示Broker的一些配置信息。每台机器上的Broker配置的序号不一样，比如我们有3台机器，那么第一台的Broker配置文件是<code>broker-n0.conf</code>，第二台的broker配置文件可以是<code>broker-n1.conf</code>，第三台可以是<code>broker-n2.conf</code>。</p>
+<h3 id="3-1-broker-">3.1 Broker配置</h3>
+<p>我们第一台机器的<code>broker-n0.conf</code>为例，看下配置文件是怎么样的：</p>
+<pre><code class="lang-properties">#Broker集群名称，自定义
+brokerClusterName = RaftCluster
+
+#Broker分组名称，比如你有一个Master和两个Slave，那么他们的Broker名称必须是一样的，因为他们三个是一个分组；如果你有另外一组Master和两个Slave，你可以给他们起个别的名字，比如说RaftNode01
+brokerName=RaftNode00
+
+#当前Broker节点监听的端口号
+listenPort=30911
+
+#NameServer地址，如果有多个NameServer构成集群的话，写入多个NameServer的地址（分号分隔）
+namesrvAddr=IP:9876
+
+#下面两个目录是Broker存放数据的地方，自定义
+storePathRootDir=/tmp/rmqstore/node00
+storePathCommitLog=/tmp/rmqstore/node00/commitlog
+
+#是否启用DLeger技术
+enableDLegerCommitLog=true
+
+#dLeger分组名字，和brokerName保持一致即可
+dLegerGroup=RaftNode00
+
+#dLeger所管理的组内Broker节点，比如有三台机器部署了Broker作为一个组（1Master2Slave），那么在这里就写入他们三个的ip地址和监听端口号，注意配置项的组成格式为dLegerSelfId-地址:端口
+dLegerPeers=n0-127.0.0.1:30911;n1-IP:30911;n2-IP:30911
+
+#当前Broker节点在dLeger组内的id，组内唯一，与dLegerPeers中的n0、n1、n2相匹配
+dLegerSelfId=n0
+
+#发送消息的线程数量，一般建议配置成机器的CPU核数，比如我们的机器是24核，那这里就改成24核
+sendMessageThreadPoolNums=24
+</code></pre>
+<h3 id="3-2-broker">3.2 启动Broker</h3>
+<p>将上述<code>broker-n0.conf</code>的内容复制到另外两台机器上，文件名分别重命名为<code>broker-n1.conf</code>和<code>broker-n2.conf</code>中，然后修改<code>dLegerSelfId</code>分别为n1和n2，<code>dLegerPeers</code>中的IP也注意相应修改，最后分别执行启动命令（nX自行替换）：</p>
+<pre><code class="lang-JAVA">nohup sh bin/mqbroker -c conf/dledger/broker-nX.conf &amp;
+</code></pre>
+<h3 id="3-3-">3.3 检查集群状态</h3>
+<p>我们已经启动了NameServer集群和Broker集群，可以通过以下命令（<code>127.0.0.1</code>替换成NameServer的IP）来检查下集群状态：</p>
+<pre><code class="lang-JAVA">sh bin/mqadmin clusterList -n 127.0.0.1:9876
+</code></pre>
+<p>你会看到三行记录，其中会出现BID是0、1、2，也有可能是0、1、3，这说明RocketMQ集群启动成功了，BID为0的是Master，BID&gt;0的都是Slave（这里也可以叫做Leader和Follower）</p>
+<p>接着就可以尝试一下Broker集群是否会进行故障自动转移了，我们可以先通过命令<code>lsof -i:端口</code>找到Master-Broker的进程PID，然后用<code>kill -9</code>干掉它，接着等待个10s，再次执行命令查看集群状态，此时就会发现BID为0的节点变成另外一个Broker了。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我们通过一个示例讲解了RocketMQ如何进行部署，主要分为NameServer部署和Broker部署，复杂点主要在于Broker部署时的配置。</p>
+<p>当我们部署完RocketMQ，是否就可以直接迁到生产环境使用了呢？显然不是的，我们需要调整Broker的OS内核参数、JVM参数进行优化，然后进行性能压测，确认在当前物理架构下，RabbitMQ的极限负载，然后再确定是否以当前物理架构上生产。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

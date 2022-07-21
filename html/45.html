@@ -1,0 +1,309 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（二九）—— J.U.C之collections框架：ConcurrentLinkedQueue</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（二九）—— J.U.C之collections框架：ConcurrentLinkedQueue</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-concurrentlinkedqueue-">一、ConcurrentLinkedQueue简介</h2>
+<p><strong>ConcurrentLinkedQueue</strong>是JDK1.5时随着J.U.C一起引入的一个支持并发环境的队列。从名字就可以看出来，ConcurrentLinkedQueue底层是基于链表实现的。</p>
+<p>Doug Lea在实现ConcurrentLinkedQueue时，并没有利用锁或底层同步原语，而是完全基于<strong>自旋+CAS</strong>的方式实现了该队列。回想一下<a href="https://segmentfault.com/a/1190000015562787">AQS</a>，AQS内部的CLH等待队列也是利用了这种方式。</p>
+<p>由于是完全基于无锁算法实现的，所以当出现多个线程同时进行修改队列的操作（比如同时入队），很可能出现CAS修改失败的情况，那么失败的线程会进入下一次自旋，再尝试入队操作，直到成功。所以，在并发量适中的情况下，ConcurrentLinkedQueue一般具有较好的性能。</p>
+<p><img src="./img/20191030222621470.png" style="zoom:60%;"/></p>
+<h2 id="-concurrentlinkedqueue-">二、ConcurrentLinkedQueue原理</h2>
+<h3 id="2-1-">2.1 队列结构</h3>
+<p>我们来看下<strong>ConcurrentLinkedQueue</strong>的内部结构，：</p>
+<pre><code class="lang-JAVA">public class ConcurrentLinkedQueue&lt;E&gt; extends AbstractQueue&lt;E&gt;
+    implements Queue&lt;E&gt;, java.io.Serializable {
+
+    /**
+     * 队列头指针
+     */
+    private transient volatile Node&lt;E&gt; head;
+
+    /**
+     * 队列尾指针.
+     */
+    private transient volatile Node&lt;E&gt; tail;
+
+    // Unsafe mechanics
+
+    private static final sun.misc.Unsafe UNSAFE;
+    private static final long headOffset;
+    private static final long tailOffset;
+
+    static {
+        try {
+            UNSAFE = sun.misc.Unsafe.getUnsafe();
+            Class&lt;?&gt; k = ConcurrentLinkedQueue.class;
+            headOffset = UNSAFE.objectFieldOffset (k.getDeclaredField("head"));
+            tailOffset = UNSAFE.objectFieldOffset (k.getDeclaredField("tail"));
+        } catch (Exception e) {
+            throw new Error(e);
+        }
+    }
+
+    /**
+     * 队列结点定义
+     */
+    private static class Node&lt;E&gt; {
+        volatile E item;        // 元素值
+        volatile Node&lt;E&gt; next;  // 后驱指针
+
+        Node(E item) {
+            UNSAFE.putObject(this, itemOffset, item);
+        }
+
+        boolean casItem(E cmp, E val) {
+            return UNSAFE.compareAndSwapObject(this, itemOffset, cmp, val);
+        }
+
+        void lazySetNext(Node&lt;E&gt; val) {
+            UNSAFE.putOrderedObject(this, nextOffset, val);
+        }
+
+        boolean casNext(Node&lt;E&gt; cmp, Node&lt;E&gt; val) {
+            return UNSAFE.compareAndSwapObject(this, nextOffset, cmp, val);
+        }
+
+        // Unsafe mechanics
+
+        private static final sun.misc.Unsafe UNSAFE;
+        private static final long itemOffset;
+        private static final long nextOffset;
+
+        static {
+            try {
+                UNSAFE = sun.misc.Unsafe.getUnsafe();
+                Class&lt;?&gt; k = Node.class;
+                itemOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("item"));
+                nextOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("next"));
+            } catch (Exception e) {
+                throw new Error(e);
+            }
+        }
+    }
+
+    //...
+}
+</code></pre>
+<p>可以看到，<strong>ConcurrentLinkedQueue</strong>内部就是一个简单的单链表结构，每入队一个元素就是插入一个Node类型的结点。字段<code>head</code>指向队列头，<code>tail</code>指向队列尾，通过<code>Unsafe</code>来CAS操作字段值以及Node对象的字段值。</p>
+<center><br/><img src="./img/20191030222627959.png"/><br/></center>
+<hr/>
+<h3 id="2-2-">2.2 构造器定义</h3>
+<p>ConcurrentLinkedQueue包含两种构造器：</p>
+<pre><code class="lang-JAVA">/**
+ * 构建一个空队列（head,tail均指向一个占位结点）.
+ */
+public ConcurrentLinkedQueue() {
+    head = tail = new Node&lt;E&gt;(null);
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 根据已有集合,构造队列
+ */
+public ConcurrentLinkedQueue(Collection&lt;? extends E&gt; c) {
+    Node&lt;E&gt; h = null, t = null;
+    for (E e : c) {
+        checkNotNull(e);
+        Node&lt;E&gt; newNode = new Node&lt;E&gt;(e);
+        if (h == null)
+            h = t = newNode;
+        else {
+            t.lazySetNext(newNode);
+            t = newNode;
+        }
+    }
+    if (h == null)
+        h = t = new Node&lt;E&gt;(null);
+    head = h;
+    tail = t;
+}
+</code></pre>
+<p>我们重点看下空构造器，通过空构造器建立的ConcurrentLinkedQueue对象，其<code>head</code>和<code>tail</code>指针并非指向<code>null</code>，而是指向一个item值为null的<code>Node</code>结点——哨兵结点，如下图：</p>
+<center><br/><img src="./img/20191030222634067.png"/><br/></center>
+<hr/>
+<h3 id="2-3-">2.3 入队操作</h3>
+<p>元素的入队是在队尾插入元素，关于队列的操作，如果读者不熟悉，可以参考《Algorithms 4th》或我的这篇博文：<a href="https://www.jianshu.com/p/f9b65dff52ca">https://www.jianshu.com/p/f9b65dff52ca</a></p>
+<p>ConcurrentLinkedQueue的入队代码很简单，却非常精妙：</p>
+<pre><code class="lang-java">/**
+ * 入队一个元素.
+ *
+ * @throws NullPointerException 元素不能为null
+ */
+public boolean add(E e) {
+    return offer(e);
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 在队尾入队元素e, 直到成功
+ */
+public boolean offer(E e) {
+    checkNotNull(e);
+    final Node&lt;E&gt; newNode = new Node&lt;E&gt;(e);
+    for (Node&lt;E&gt; t = tail, p = t; ; ) {             // 自旋, 直到插入结点成功
+        Node&lt;E&gt; q = p.next;
+        if (q == null) {                            // CASE1: 正常情况下, 新结点直接插入到队尾
+            if (p.casNext(null, newNode)) {
+                // CAS竞争插入成功
+                if (p != t)                         // CAS竞争失败的线程会在下一次自旋中进入该逻辑
+                    casTail(t, newNode);            // 重新设置队尾指针tail
+                return true;
+            }
+            // CAS竞争插入失败,则进入下一次自旋
+
+        } else if (p == q)                          // CASE2: 发生了出队操作
+            p = (t != (t = tail)) ? t : head;
+        else
+            // 将p重新指向队尾结点
+            p = (p != t &amp;&amp; t != (t = tail)) ? t : q;
+    }
+}
+</code></pre>
+<hr/>
+<p>我们来分析下上面<code>offer方法</code>的实现。单线程的情况下，元素入队比较好理解，直接线性地在队首插入元素即可。现在我们假设有两个线程<strong>ThreadA</strong>和<strong>ThreadB</strong>同时进行入队操作：</p>
+<p><strong>①ThreadA先单独入队两个元素9、2</strong></p>
+<p>此时队列的结构如下：</p>
+<p><img src="./img/20191030222640346.png"/></p>
+<hr/>
+<p><strong>②ThreadA入队元素“10”，ThreadB入队元素“25”</strong></p>
+<p>此时ThreadA和ThreadB若并发执行，我们看下会发生什么：</p>
+<p><em>1、ThreadA和ThreadB同时进入自旋中的以下代码块：</em></p>
+<pre><code class="lang-java">if (q == null) {                            // CASE1: 正常情况下, 新结点直接插入到队尾
+    if (p.casNext(null, newNode)) {
+        // CAS竞争插入成功
+        if (p != t)                         // CAS竞争失败的线程会在下一次自旋中进入该逻辑
+            casTail(t, newNode);            // 重新设置队尾指针tail
+        return true;
+    }
+    // CAS竞争插入失败,则进入下一次自旋
+
+}
+</code></pre>
+<p><em>2、ThreadA执行cas操作（p.casNext）成功，插入新结点“10”</em></p>
+<p>ThreadA执行完成后，直接返回true，队列结构如下：</p>
+<p><img src="./img/20191030222646662.png"/></p>
+<p><em>3、ThreadB执行cas操作（p.casNext）失败</em></p>
+<p>由于CAS操作同时修改队尾元素，导致ThreadB操作失败，则ThreadB进入下一次自旋；<br/>在下一次自旋中，进入以下代码块：</p>
+<pre><code class="lang-java">else
+    // 将p重新指向队尾结点
+    p = (p != t &amp;&amp; t != (t = tail)) ? t : q;
+</code></pre>
+<p>上述分支的作用就是让p指针重新定位到队尾结点，此时队列结构如下：</p>
+<p><img src="./img/20191030222653490.png"/></p>
+<p>然后ThreadB会继续下一次自旋，并再次进入以下代码块：</p>
+<pre><code class="lang-java">if (q == null) {                            // CASE1: 正常情况下, 新结点直接插入到队尾
+    if (p.casNext(null, newNode)) {
+        // CAS竞争插入成功
+        if (p != t)                         // CAS竞争失败的线程会在下一次自旋中进入该逻辑
+            casTail(t, newNode);            // 重新设置队尾指针tail
+        return true;
+    }
+    // CAS竞争插入失败,则进入下一次自旋
+
+}
+</code></pre>
+<p>此时，CAS操作成功，队列结构如下：</p>
+<p><img src="./img/20191030222659332.png"/></p>
+<p>由于此时<code>p!=t</code> ，所以会调用<code>casTail</code>方法重新设置队尾指针：</p>
+<pre><code class="lang-java">casTail(t, newNode);            // 重新设置队尾指针tail
+</code></pre>
+<p>最终队列如下：</p>
+<p><img src="./img/20191030222705843.png"/></p>
+<p><br><br/>从上面的分析过程可以看到，由于入队元素一定是要链接到队尾的，但并发情况下队尾结点可能随时变化，所以就需要指针定位最新的队尾结点，并在入队时判断队尾结点是否改变了，如果改变了，就需要重新设置定位指针，然后在下一次自旋中继续尝试入队操作。</br></p>
+<p>上面整个执行步骤有一段分支还没有覆盖到：</p>
+<pre><code class="lang-java">else if (p == q)                          // CASE2: 发生了出队操作
+     p = (t != (t = tail)) ? t : head;
+</code></pre>
+<p>这个分支只有在元素入队的同时，针对该元素也发生了“出队”操作才会执行，我们后面会分析元素的“出队”，理解了“出队”操作再回头来看这个分支就容易理解很多了。</p>
+<hr/>
+<h3 id="2-4-">2.4 出队操作</h3>
+<p>队列中元素的“出队”是从队首移除元素，我们来看下ConcurrentLinkedQueue是如何实现出队的：</p>
+<pre><code class="lang-java">/**
+ * 在队首出队元素, 直到成功
+ */
+public E poll() {
+    restartFromHead:
+    for (; ; ) {
+        for (Node&lt;E&gt; h = head, p = h, q; ; ) {
+            E item = p.item;
+
+            if (item != null &amp;&amp; p.casItem(item, null)) {    // CASE2: 队首是非哨兵结点(item!=null)
+                if (p != h) // hop two nodes at a time
+                    updateHead(h, ((q = p.next) != null) ? q : p);
+                return item;
+            } else if ((q = p.next) == null) {      // CASE1: 队首是一个哨兵结点(item==null)
+                updateHead(h, p);
+                return null;
+            } else if (p == q)
+                continue restartFromHead;
+            else
+                p = q;
+        }
+    }
+}
+</code></pre>
+<hr/>
+<p>还是通过示例来看，假设初始的队列结构如下：</p>
+<p><img src="./img/20191030222712679.png"/></p>
+<br>
+<p><strong>①ThreadA先单独进行出队操作</strong></p>
+<p>由于head所指的是item==null的结点，所以ThreadA会执行以下分支：</p>
+<pre><code class="lang-JAVA">else
+   p = q;
+</code></pre>
+<p><img src="./img/20191030222718755.png"/></p>
+<p>然后进入下一次自旋，在自旋中执行以下分支，如果CAS操作成功，则移除首个有效元素，并重新设置头指针：</p>
+<pre><code class="lang-JAVA">if (item != null &amp;&amp; p.casItem(item, null)) {    // CASE2: 队首是非哨兵结点(item!=null)
+    if (p != h) // hop two nodes at a time
+        updateHead(h, ((q = p.next) != null) ? q : p);
+    return item;
+}
+</code></pre>
+<p>此时队列的结构如下：</p>
+<p><img src="./img/20191030222726609.png"/></p>
+<p><strong><em>如果ThreadA的CAS操作失败呢？</em></strong></p>
+<p>CAS操作失败则会进入以下分支，并重新开始自旋：</p>
+<pre><code class="lang-java">else if (p == q)
+    continue restartFromHead;
+</code></pre>
+<p>最终前面两个null结点会被GC回收，队列结构如下：</p>
+<p><img src="./img/20191030222733353.png"/></p>
+<hr/>
+<p><strong>②ThreadA继续进行出队操作</strong></p>
+<p>ThreadA继续执行“出队”操作，还是执行以下分支：</p>
+<pre><code class="lang-JAVA">if (item != null &amp;&amp; p.casItem(item, null)) {    // CASE2: 队首是非哨兵结点(item!=null)
+    if (p != h) // hop two nodes at a time
+        updateHead(h, ((q = p.next) != null) ? q : p);
+    return item;
+}
+</code></pre>
+<p>但是此时<code>p==h</code>，所以仅将头结点置<code>null</code>，这其实是一种<strong>“懒删除”</strong>的策略。</p>
+<p>出队元素“2”：</p>
+<p><img src="./img/20191030222739767.png"/></p>
+<p>出队元素“10”：</p>
+<p><img src="./img/20191030222746276.png"/></p>
+<p>最终队列结果如下：</p>
+<p><img src="./img/20191030222753362.png"/></p>
+<hr/>
+<p><strong>③ThreadA进行出队，其它线程进行入队</strong></p>
+<p>这是最特殊的一种情况，当队列中只剩下一个元素时，如果同时发生出队和入队操作，会导致队列出现下面这种结构：（假设ThreadA进行出队元素“25”，ThreadB进行入队元素“11”）</p>
+<p><img src="./img/20191030222759549.png"/></p>
+<p>此时tail.next=tail自身，所以ThreadB在执行入队时，会进入到offer方法的以下分支：</p>
+<pre><code class="lang-java"> else if (p == q)                          // CASE2: 发生了出队操作
+    p = (t != (t = tail)) ? t : head;
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p><strong>ConcurrentLinkedQueue</strong>使用了<strong>自旋+CAS</strong>的非阻塞算法来保证线程并发访问时的数据一致性。由于队列本身是一种链表结构，所以虽然算法看起来很简单，但其实需要考虑各种并发的情况，实现复杂度较高，并且ConcurrentLinkedQueue不具备实时的数据一致性，实际运用中，队列一般在生产者-消费者的场景下使用得较多，所以ConcurrentLinkedQueue的使用场景并不如阻塞队列那么多。</p>
+<p>另外，关于ConcurrentLinkedQueue还有以下需要注意的几点：</p>
+<ol>
+<li>ConcurrentLinkedQueue的迭代器是弱一致性的，这在并发容器中是比较普遍的现象，主要是指在一个线程在遍历队列结点而另一个线程尝试对某个队列结点进行修改的话不会抛出<code>ConcurrentModificationException</code>，这也就造成在遍历某个尚未被修改的结点时，在next方法返回时可以看到该结点的修改，但在遍历后再对该结点修改时就看不到这种变化。</li>
+<li><code>size</code>方法需要遍历链表，所以在并发情况下，其结果不一定是准确的，只能供参考。</li>
+</ol>
+</br></div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

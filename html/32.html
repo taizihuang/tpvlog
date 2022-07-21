@@ -1,0 +1,188 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（十六）—— J.U.C之atomic框架：FieldUpdater</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（十六）—— J.U.C之atomic框架：FieldUpdater</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-fieldupdater">一、什么是FieldUpdater</h2>
+<p>在<code>java.util.concurrent.atomic</code>包中，由三个比较特殊的原子类：<code>AtomicIntegerFieldUpdater</code>、<code>AtomicLongFieldUpdater</code>、<code>AtomicReferenceFieldUpdater</code>。<br/>通过名称可以看到，这几类的功能大致相同，只是针对的类型有所不同。</p>
+<p>所谓<strong>AtomicXXXFieldUpdater</strong>，就是可以<strong>以一种线程安全的方式操作非线程安全对象的某些字段</strong>。光这么说有点难理解，我们通过一个例子来看下。</p>
+<blockquote>
+<p>假设有一个公司账户Account，100个人同时往里面存钱1块钱，那么正常情况下，最终账户的总金额应该是100。</p>
+</blockquote>
+<p>先来看下线程不安全的方式：</p>
+<p><strong><em>账户类：</em></strong></p>
+<pre><code>class Account {
+    private volatile int money;
+
+    Account(int initial) {
+        this.money = initial;
+    }
+
+    public void increMoney() {
+        money++;
+    }
+
+    public int getMoney() {
+        return money;
+    }
+
+    @Override
+    public String toString() {
+        return "Account{" +
+            "money=" + money +
+            '}';
+    }
+}
+</code></pre><p><strong><em>调用类：</em></strong></p>
+<pre><code class="lang-java">public class FieldUpdaterTest {
+    public static void main(String[] args) throws InterruptedException {
+        Account account = new Account(0);  // 初始金额0
+
+        List&lt;Thread&gt; list = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 100; i++) {
+            Thread t = new Thread(new Task(account));
+            list.add(t);
+            t.start();
+        }
+
+        for (Thread t : list) {            // 等待所有线程执行完成
+            t.join();
+        }
+
+        System.out.println(account.toString());
+    }
+
+
+    private static class Task implements Runnable {
+        private Account account;
+
+        Task(Account account) {
+            this.account = account;
+        }
+
+        @Override
+        public void run() {
+            account.increMoney();         // 增加账户金额
+        }
+    }
+}
+</code></pre>
+<p>上述未对<strong>Account</strong>做并发控制，<strong>最终账户金额很可能小于100</strong>。<br/>按照之前学习的atomic框架，可以将<strong>Account</strong>类的<strong>int</strong>类型字段改为<strong>AtomicInteger</strong>，或者在<strong>Task</strong>任务类中，将所有涉及到共享变量的地方都加锁访问。</p>
+<p><strong>那么，还有没有其它解决方式？</strong></p>
+<p>本章开头我们讲到，<strong>AtomicXXXFieldUpdater</strong>可以<strong>以一种线程安全的方式操作非线程安全对象的某些字段</strong>。<br/>这里，<strong>Account</strong>就是非线程安全对象，<strong>money</strong>就是需要操作的字段。</p>
+<p>我们来对上述代码进行改造：</p>
+<p><strong><em>账户类Account改造：</em></strong></p>
+<pre><code class="lang-java">class Account {
+    private volatile int money;
+    private static final AtomicIntegerFieldUpdater&lt;Account&gt; updater = AtomicIntegerFieldUpdater.newUpdater(Account.class, "money");  // 引入AtomicIntegerFieldUpdater
+
+    Account(int initial) {
+        this.money = initial;
+    }
+
+    public void increMoney() {
+        updater.incrementAndGet(this);    // 通过AtomicIntegerFieldUpdater操作字段
+    }
+
+    public int getMoney() {
+        return money;
+    }
+
+    @Override
+    public String toString() {
+        return "Account{" +
+            "money=" + money +
+            '}';
+    }
+}
+</code></pre>
+<p><strong><em>调用方，并未做任何改变：</em></strong></p>
+<pre><code class="lang-java">public class FieldUpdaterTest {
+    public static void main(String[] args) throws InterruptedException {
+        Account account = new Account(0);
+
+        List&lt;Thread&gt; list = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 100; i++) {
+            Thread t = new Thread(new Task(account));
+            list.add(t);
+            t.start();
+        }
+
+        for (Thread t : list) {
+            t.join();
+        }
+
+        System.out.println(account.toString());
+    }
+
+    private static class Task implements Runnable {
+        private Account account;
+
+        Task(Account account) {
+            this.account = account;
+        }
+
+        @Override
+        public void run() {
+            account.increMoney();
+        }
+    }
+}
+</code></pre>
+<p>上述代码，无论执行多少次，最终结果都是“100”，因为这回是线程安全的。</p>
+<p>对比下改造，可以发现，<strong>AtomicIntegerFiledUpdater</strong>的引入，使得我们可以在<strong><em>不修改用户代码（调用方）的情况下，就能实现并发安全性</em></strong>。</p>
+<p>唯一的改变之处就是Account内部的改造：<br/><img alt="img" src="./img/20191027153712779.png" style="zoom:80%;"/></p>
+<p>这也是<strong>AtomicXXXFieldUpdater</strong>引入的一个重要原因，单纯从功能上来讲，能用<strong>AtomicXXXFieldUpdater</strong>实现的并发控制，同步器和其它原子类都能实现，但是使用<strong>AtomicXXXFieldUpdater</strong>，符合面向对象设计的一个基本原则——开闭原则，尤其是对一些遗留代码的改造上。</p>
+<p>另外，使用<strong>AtomicXXXFieldUpdater</strong>，不需要进行任何同步处理，单纯的使用CAS+自旋操作就可以实现同步的效果。这也是整个atomic包的设计理念之一。</p>
+<h2 id="-atomicreferencefieldupdater-">二、AtomicReferenceFieldUpdater原理</h2>
+<p><code>AtomicIntegerFieldUpdater</code>、<code>AtomicLongFieldUpdater</code>、<code>AtomicReferenceFieldUpdater</code>这三个类大同小异，<strong>AtomicIntegerFieldUpdater</strong>只能处理<strong>int</strong>原始类型的字段，<strong>AtomicLongFieldUpdater</strong>只能处理long原始类型的字段，<strong>AtomicReferenceFieldUpdater</strong>可以处理所有引用类型的字段。</p>
+<p>本节以<strong>AtomicReferenceFieldUpdater</strong>为例，介绍下FiledUpdater的基本原理。</p>
+<h3 id="2-1-atomicreferencefieldupdater-">2.1 AtomicReferenceFieldUpdater对象的创建</h3>
+<p>AtomicReferenceFieldUpdater本身是一个抽象类，没有公开的构造器，只能通过静态方法<strong>newUpdater</strong>创建一个AtomicReferenceFieldUpdater子类对象：<br/><img alt="img" src="./img/20191027153719253.png" style="zoom:80%;"/></p>
+<p><code>newUpdater</code>的三个入参含义如下：</p>
+<table>
+<thead>
+<tr>
+<th>入参名称</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tclass</td>
+<td>目标对象的类型</td>
+</tr>
+<tr>
+<td>vclass</td>
+<td>目标字段的类型</td>
+</tr>
+<tr>
+<td>fieldName</td>
+<td>目标字段名</td>
+</tr>
+</tbody>
+</table>
+<p><strong>AtomicReferenceFieldUpdaterImpl</strong>是AtomicReferenceFieldUpdater的一个内部类，并继承了AtomicReferenceFieldUpdater。AtomicReferenceFieldUpdater的API，基本都是委托AtomicReferenceFieldUpdaterImpl 来实现的。</p>
+<p>来看下<strong>AtomicReferenceFieldUpdaterImpl</strong> 对象的构造，其实就是一系列的权限检查：<br/><img alt="img" src="./img/20191027153725321.png" style="zoom:80%;"/></p>
+<p>通过源码，可以看到<strong>AtomicReferenceFieldUpdater</strong>的使用必须满足以下条件：</p>
+<ol>
+<li>AtomicReferenceFieldUpdater只能修改对于它可见的字段，也就是说对于目标类的某个字段field，如果修饰符是private，但是AtomicReferenceFieldUpdater所在的使用类不能看到field，那就会报错；</li>
+<li>目标类的操作字段，必须用volatile修饰；</li>
+<li>目标类的操作字段，不能是static的；</li>
+<li>AtomicReferenceFieldUpdater只适用于引用类型的字段；</li>
+</ol>
+<h3 id="2-2-atomicreferencefieldupdater-">2.2 AtomicReferenceFieldUpdater的方法原理</h3>
+<p>AtomicReferenceFieldUpdater中所有的方法都是基于<strong>Unsafe</strong>类操作，看下最常用的方法<strong>compareAndSet</strong>：<br/><img alt="img" src="./img/20191027153731629.png" style="zoom:80%;"/></p>
+<p>通过偏移量<strong>offset</strong>获取字段的地址，然后利用Unsafe进行CAS更新。</p>
+<p>其它方法也大同小异，读者可以参考Oracle官方文档和JDK源码。</p>
+<h3 id="2-3-atomicreferencefieldupdater-">2.3 AtomicReferenceFieldUpdater接口声明</h3>
+<p><img alt="img" src="./img/20191027153738888.png" style="zoom:80%;"/></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

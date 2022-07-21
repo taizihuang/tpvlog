@@ -1,0 +1,90 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（四）——Producer：Partitioner分区器</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（四）——Producer：Partitioner分区器</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>KafkaProducer在通过<code>send</code>方法发送消息时，获取到了Topic的元数据，就知道了Topic的所有分区。接着，Producer需要选择一个分区发送消息，分区选择的过程是基于<strong>Partitioner</strong>分区器完成的：</p>
+<pre><code class="lang-JAVA">int partition = partition(record, serializedKey, serializedValue, cluster);
+</code></pre>
+<p>如果消息 ProducerRecord 中指定了 partition 字段， 那么就不需要分区器的作用 ，因为partition代表的就是所要发往的分区号；如果消息 ProducerRecord 中没有指定partition字段，那么就需要依赖分区器 ，根据 key这个字段来计算partition的值。</p>
+<p>总之，分区器的作用就是为消息分配分区，Kafka提供的默认分区器是<code>org.apache.kafka.clients.producer.internals.DefaultPartitioner</code>， 本章，我们就来看看它的内部原理。</p>
+<h2 id="-">一、分区流程</h2>
+<h3 id="1-1-partitioner-">1.1 Partitioner接口</h3>
+<p>分区器的接口比较简单，核心就是<code>partition</code>方法，根据消息自定义计算分区号：</p>
+<pre><code class="lang-JAVA">public interface Partitioner extends Configurable, Closeable {
+    /**
+     * 根据消息计算分区
+     */
+    public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster);
+
+    public void close();
+}
+</code></pre>
+<h3 id="1-2-defaultpartitioner">1.2 DefaultPartitioner</h3>
+<p>KafkaProducer提供了默认的分区器实现——DefaultPartitioner，实现的思路也是非常简单的：</p>
+<pre><code class="lang-JAVA">public class DefaultPartitioner implements Partitioner {
+
+    private final ConcurrentMap&lt;String, AtomicInteger&gt; topicCounterMap = new ConcurrentHashMap&lt;&gt;();
+
+    public void configure(Map&lt;String, ?&gt; configs) {}
+
+    public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster) {
+        // 1.获取当前Topic的所有分区
+        List&lt;PartitionInfo&gt; partitions = cluster.partitionsForTopic(topic);
+        int numPartitions = partitions.size();
+
+        // 2.1如果没有指定消息Key
+        if (keyBytes == null) {
+            // 获取一个递增序号值
+            int nextValue = nextValue(topic);
+            // 获取当前Topic的所有可用分区
+            List&lt;PartitionInfo&gt; availablePartitions = cluster.availablePartitionsForTopic(topic);
+            if (availablePartitions.size() &gt; 0) {
+                // 对可用分区取余
+                int part = Utils.toPositive(nextValue) % availablePartitions.size();
+                return availablePartitions.get(part).partition();
+            } else {
+                // 没有可用分区，则直接对总分区数取余
+                return Utils.toPositive(nextValue) % numPartitions;
+            }
+        } 
+        // 2.2如果指定了消息Key
+        else {
+            // 采用murmur2算法计算Key的Hash值，然后对分区数取余
+            return Utils.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
+        }
+    }
+
+    private int nextValue(String topic) {、
+        // topicCounterMap保存了Topic的递增序号
+        AtomicInteger counter = topicCounterMap.get(topic);
+        if (null == counter) {
+            counter = new AtomicInteger(new Random().nextInt());
+            AtomicInteger currentCounter = topicCounterMap.putIfAbsent(topic, counter);
+            if (currentCounter != null) {
+                counter = currentCounter;
+            }
+        }
+        return counter.getAndIncrement();
+    }
+
+    public void close() {}
+}
+</code></pre>
+<p>上述分区算法的流程如下：</p>
+<ol>
+<li>如果消息没有指定Key，则获取所有可用分区数，然后进行取余，得到一个分区号，这个分区号对应的分区就是要发送消息的分区；</li>
+<li>如果消息指定了Key，则采用 <em>murmur2</em> 算法，计算Key的Hash值，然后与分区数取数，得到分区号。</li>
+</ol>
+<h2 id="-">二、总结</h2>
+<p>本章，我对KafkaProducer的分区器的内部原理进行了讲解。如果我们指定了消息的Key，那么同一个Key的不同消息，会生成相同的hash值，路由到的分区也一定是相同的。</p>
+<p>但是需要特别注意，如果对主题的分区进行了增减，那么就难以保证 key 与分区之间的映射关系了。  </p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

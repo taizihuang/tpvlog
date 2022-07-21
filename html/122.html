@@ -1,0 +1,126 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（四）——分布式框架之高性能：消息丢失</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（四）——分布式框架之高性能：消息丢失</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在使用消息队列中的过程中，很可能会出现消息丢失的情况。本章我们就来分析哪些场景下可能出现消息丢失，然后继续以RabbitMQ和Kafka为例，介绍这两种消息队列是如何保证消息不丢失的。</p>
+<h2 id="-">一、丢失场景</h2>
+<p>一般来说，消息丢失无非就是发生在三个阶段：<strong>生产者投递消息</strong>、<strong>消息队列存储消息</strong>、<strong>消费者消费消息</strong>。</p>
+<p><strong>生产者投递消息：</strong><br/>生产者在写消息的过程中，由于网络等原因，导致消息队列没接收到消息，从而出现消息丢失的现象。</p>
+<p><strong>消息队列存储消息：</strong><br/>消息队列接受到消息后，一般先暂存到内存中，然后再持久化，如果在持久化前消息队列自身挂掉了，就可能导致消息丢失。</p>
+<p><strong>消费者消费消息：</strong><br/>消费者消费到了消息，但是还没来得及处理完成，然后就自己挂掉了，而消息队列则认为消费者已经处理完了。</p>
+<center><br/> <img src="./img/20200211223354995.png" style="zoom:60%"><br/></img></center>
+<h2 id="-rabbitmq">二、RabbitMQ</h2>
+<p>我们先来看下RabbitMQ是如何应对上述三种消息丢失的场景的。</p>
+<h3 id="2-1-">2.1 生产者投递消息丢失</h3>
+<p>RabbitMQ有两种方式可以保证生产者对消息的100%成功投递：<em>事务机制</em>、<em>Confirm机制</em>。</p>
+<h4 id="-">事务机制</h4>
+<ol>
+<li>生产者发送数据之前开启Rabbitmq事务<code>channel.txSelect</code>，然后发送消息；</li>
+<li>如果消息没有被接收到，生产者会收到异常报错，此时可以回滚事务<code>channel.txRollback</code>，然后重新发送；</li>
+<li>如果消息被接受，则可以提交事务<code>channel.txCommit</code>。</li>
+</ol>
+<pre><code class="lang-JAVA">channel.txSelect();    //开启事务
+try{
+    // 发送消息
+}catch(Exception ex){
+    channel.txRollback();    //回滚事务
+    // 重新发送消息
+}
+channel.txCommit();    //提交事务
+</code></pre>
+<p><strong>缺点：</strong><br/>RabbitMQ的事务机制是同步的，会导致吞吐量大幅下降。</p>
+<h4 id="confirm-">Confirm机制</h4>
+<p>生产者可以开启confitm模式：</p>
+<ol>
+<li><p>每次写消息时会给消息分配一个唯一id；</p>
+</li>
+<li><p>如果RabbitMQ收到了该消息，会回调生产者的<code>ack</code>接口，表示接受成功；</p>
+</li>
+<li><p>如果RabbitMQ接受消息失败，会回调生产者的<code>nack</code>接口，表示接受或处理失败，生产者在nack方法内进行重试发送；</p>
+</li>
+</ol>
+<pre><code class="lang-JAVA">//开启confirm模式
+
+channel.confirm();
+
+// 发送消息，然后就不管了
+send();
+
+/**
+ * 消息成功被接受后回调
+ */
+public void ack(String messageId){
+
+}
+
+/**
+ * 消息接受失败时回调
+ */
+public void nack(String messageId){
+    send();
+}
+</code></pre>
+<p>如果因为网络原因，这两个方法都没有被回调，生产者可以自己维护消息id的状态，对一些超时的消息，根据状态进行重发。</p>
+<blockquote>
+<p>事务机制和confirm机制最大的不同在于：事务机制是同步的，会导致生产者线程阻塞。而Confirm机制是异步的，采用回调来确认消息是否发送成功，所以生产环境一般都用Confirm机制保证生产者对消息的100%可靠投递。</p>
+</blockquote>
+<h3 id="2-2-mq-">2.2 MQ故障丢失</h3>
+<p>因MQ故障而导致消息丢失的解决方案就是<strong>持久化</strong>。在RabbitMQ中开启持久化的方式如下：</p>
+<ol>
+<li><p>创建queue时，将其设置为持久化，这样RabbitMQ会持久化queue的元数据；</p>
+</li>
+<li><p>生产者发送消息时，消息的<code>deliveryMode</code>设置为2，此时RabbitMQ就会将消息持久化到磁盘上去。</p>
+</li>
+</ol>
+<p>经过这样的设置，当RabbitMQ接受到消息然后持久化完成后，即使MQ挂了，重启后也可以从磁盘恢复queue和消息。但是还要注意一种情况：RabbitMQ接收到了消息，但是还没来得及持久化到磁盘，自己就挂了。此时，会导致MQ内存里的一点点数据丢失，但是这个概率是很小的。</p>
+<p>我们可以配合生产者的confirm机制来解决上述问题。由于开启持久化后，只有消息被持久化到磁盘，才会回调生产者的ack接口，所以生产者在收不到ack的情况下，可以进行重发，这样哪怕持久化到磁盘前MQ自身挂了，也可以保证恢复后收到重发的消息。</p>
+<h3 id="2-3-">2.3 消息投递后丢失</h3>
+<p>这种情况是因为消费者自身问题或网络问题造成的。RabbitMQ有一个消费者的autoAck机制，当消费者消费成功后，会自动通知RabbitMQ已经消费成功，此时如果消费者自身出现异常，就会导致消息丢失。</p>
+<p>解决方案如下：</p>
+<ol>
+<li>关闭RabbitMQ的消费者autoAck机制；</li>
+<li>消费者消费完消息，自身逻辑处理成功后，再进行手动ack确认。（这种情况下，消费者必须要保证自身接口的幂等性）</li>
+</ol>
+<h2 id="-kafka">三、Kafka</h2>
+<h3 id="3-1-">3.1 生产者投递消息丢失</h3>
+<p>Kafka可以通过一些配置来保证生产者对消息的100%可靠投递。</p>
+<p>我们之前在<a href="https://www.tpvlog.com/article/120">《分布式框架之高性能：消息队列的可用性》</a>一章中提到过，Kafka只有Leader节点会接受消息的读/写。Leader接受到生产发送来的消息后，只要当其它所有follower都同步成功，才会响应给生产者，否则生产者会不断重试，直到收到成功响应。</p>
+<blockquote>
+<p>可以通过配置<code>ack=all</code>，来确保所有follower都进行消息同步。</p>
+</blockquote>
+<h3 id="3-2-mq-">3.2 MQ故障丢失</h3>
+<p>这种情况通常出现在Leader选举时：</p>
+<ol>
+<li>某个partiton的Leader正在和其它Follower同步消息；</li>
+<li>这个partiton所在的Broker突然挂了，部分Follower还没同步完成；</li>
+<li>新选举的Leader刚好是之前没同步完成的，此时它就缺少了一些数据。</li>
+</ol>
+<center><br/> <img src="./img/20200211223405939.png" style="zoom:55%"/><br/></center><br/><center><br/> <img src="./img/20200211223414255.png" style="zoom:55%"/><br/></center>
+<p>Kafka可以通过配置来解决这个问题，具体配置如下：</p>
+<ol>
+<li>topic设置<code>replication.factor</code>参数：值必须大于1，该参数用于配置每个topic的partition的副本数，即每份数据一共存在<code>replication.factor+1</code>份拷贝；</li>
+<li>kafka服务端设置<code>min.insync.replicas</code>参数：值必须大于1，这个是要求一个leader至少感知到有一个follower还跟自己保持联系，这样才能确保leader挂了还有一个follower候补；</li>
+<li>producer端设置<code>acks=all</code>：这个是要求每条数据，必须是写入所有replica之后，才能认为是写成功了；</li>
+<li>producer端设置<code>retries=MAX</code>：这个是要求生成者确保消息发送成功，一旦失败，就无限重试。</li>
+</ol>
+<h3 id="3-3-">3.3 消息投递后丢失</h3>
+<p>我们之前在<a href="https://www.tpvlog.com/article/120">《分布式框架之高性能：消息队列的可用性》</a>一章中提到过，消费者消费完消息后，会将消息的offset告知Kafka，表示这条消息已经被成功消费。</p>
+<p>默认情况下，消费者会自动提交offset，如果此时消费者挂了，那么Kafka依然会认为消费者已经成功消费了该消息，从而出现消息丢失。</p>
+<p>所以，Kafka对“消息投递后丢失”这一场景的问题处理方式和RabbitMQ类似，一般<strong>消费者需要关闭自动提交offset</strong>，等处理完消息后自己手动提交offset，就可以保证消息不会丢。但依然一样可能会出现重复消费问题，比如消费者刚处理完，还没提交offset结果自己挂了或因为网络原因Kafka没收到通知。所以消费者端仍然需要保证接口的幂等性。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我们介绍了在使用消息队列过程中出现消息丢失的几种场景，并以RabbitMQ和Kafka为例介绍了解决方案。总体来说，要保证消息不丢失，就是以下几种思路：</p>
+<ol>
+<li>要保证消息投递的100%成功，基本思路就是消息队列的ack机制，以及生产者的最大努力投递；</li>
+<li>要保证MQ故障消息不丢失，基本思路就是MQ自身做好持久化，或数据同步机制；</li>
+<li>要保证消费者的100%消费成功，基本思路就是消费者的手动确认，以及消费者自身接口的幂等性保证。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

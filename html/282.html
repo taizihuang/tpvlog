@@ -1,0 +1,64 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Kafka（四）——ISR机制</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Kafka（四）——ISR机制</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我在<a href="https://www.tpvlog.com/article/279">《整体架构》</a>这一章中，已经比较清楚的介绍了Kafka的ISR机制。每个分区中的Leader 会负责维护和跟踪 ISR 集合中所有 follower的滞后状态（Leader会维护每个Follower的LEO，Follower来拉取消息时会带上自己的LEO），当follower副本落后太多或失效时，leader 会把它从 ISR 集合中剔除，转移到OSR。默认情况下， 当 Leader 发生故障时，只有在 ISR 集合中的副本才有资格被选举为新的 leader。</p>
+<p>但是，在一些极端情况下，ISR机制可能会引发一些问题，本章我就对这些问题进行一一分析。</p>
+<h2 id="-">一、存在的问题</h2>
+<p>在老版本的Kafka中，ISR机制可能引发<strong>数据丢失</strong>和<strong>数据不一致</strong>问题。</p>
+<h3 id="1-1-">1.1 数据丢失</h3>
+<p>我们先来看第一种情况——数据丢失。什么情况下会出现数据丢失呢？</p>
+<p>举个例子，假设某分区一共有2个副本，一个Leader，一个Follower。生产者（Producer）的<code>min.insync.replicas</code>参数设置为1，也就是说，生产者发送消息给Leader，Leader写Log成功后，生产者就会认为发送成功了：</p>
+<ol>
+<li>生产者先发送了1条消息给Leader，此时Leader的信息：<code>LEO = 1, HW = 0</code>；</li>
+<li>Follower发送Fetch请求同步数据，上送<code>LEO = 0</code>；</li>
+<li>Leader会维护所有Follower的LEO信息，取最小值作为HW，此时<code>HW = 0</code>并响应；</li>
+<li>Follower同步到消息，更新自身信息：<code>LEO = 1, HW = 0</code>；</li>
+<li>Follower再次发送Fetch请求，上送<code>LEO = 1</code>；</li>
+<li>Leader维护所有Follower的LEO信息，取最小值作为HW，此时<code>HW = 1</code>并响应；</li>
+<li>正常情况下，Follower会接收到响应，更新自身信息：<code>LEO = 1, HW = 1</code>；</li>
+</ol>
+<p>上述第7步，如果Follower还没接收到响应就挂掉了，此时它的<code>LEO = 1, HW = 0</code>，那么Follower重启后，会依据HW来调整LEO，LEO会自动被调整为0，也就是说已经同步的消息会被从日志文件里删除。</p>
+<p>接着，如果此时Leader也挂了，然后Follower当选为新Leader，由于它的<code>HW = 0</code>，那么原来的Leader同步到数据后，会截断自己的日志，发生数据丢失。</p>
+<h3 id="1-2-">1.2 数据不一致</h3>
+<p>我们再来看第二种情况——数据不一致，假设某分区一共有2个副本，一个Leader，一个Follower。生产者（Producer）的<code>min.insync.replicas</code>参数设置为1，也就是说，生产者发送消息给Leader，Leader写Log成功后，生产者就会认为发送成功了：</p>
+<ol>
+<li>生产者发送了2条消息给Leader，此时Leader的信息：<code>LEO = 2, HW = 0</code>；</li>
+<li>Follower发送Fetch请求同步数据，先同步第一条，上送<code>LEO = 0</code>；</li>
+<li>Leader会维护所有Follower的LEO信息，取最小值作为HW，此时<code>HW = 0</code>并响应；</li>
+<li>Follower同步到消息，更新自身信息：<code>LEO = 1, HW = 0</code>；</li>
+<li>Follower再次发送Fetch请求，同步第二条消息，上送<code>LEO = 1</code>；</li>
+<li>Leader维护所有Follower的LEO信息，取最小值作为HW，此时<code>HW = 1</code>并响应；</li>
+<li>正常情况下，Follower会接受到响应，更新自身信息：<code>LEO = 1, HW = 1</code>；</li>
+</ol>
+<p>上述第7步完成后，假设Leader宕机了，Follower成为新的Leader，此时它的<code>HW = 1</code>，就一条数据，然后生产者又发了一条数据给新leader，此时<code>HW = 2</code>，但是第二条数据是新的数据。接着老leader重启变为follower，这个时候发现两者的HW都是2。这个时候他俩数据是不一致的，本来合理的应该是新的follower要删掉自己原来的第二条数据，跟新leader同步的，让他们俩的数据一致，但是因为HW一样，所以就不会截断数据了。</p>
+<h2 id="-">二、解决方案</h2>
+<p>上述数据丢失的场景是一种非常极端的场景，一般只会在<code>0.11.x</code>版本之前出现。<code>0.11.x</code>版本时，Kafka引入了<strong><em>Leader Epoch</em></strong>机制。所谓Leader Epoch，大致可以理解为每个Leader的版本号，以及自己是从哪个offset开始写数据的，类似<code>[epoch = 0, offset = 0]</code>。</p>
+<h2 id="-isr-">三、ISR工作原理</h2>
+<p>Kafka到底是如何维护ISR列表的？什么样的Follower才有资格放到ISR列表里呢？</p>
+<h3 id="3-1-replica-lag-max-messages">3.1 replica.lag.max.messages</h3>
+<p>在<code>0.9.x</code>之前的版本里，Kafka Broker有一个核心的参数：<code>replica.lag.max.messages</code>，默认值4000，表示如果Follower落后Leader的消息数量超过了这个参数值，就认为Follower是 <em>out-of-sync</em>，就会从ISR列表里移除。</p>
+<p>我们通过一个例子来理解下，假设一个分区有3个副本：一个Leader，两个Follower，配置是：<code>replica.lag.max.messages = 3</code>，<code>min.insync.replicas = 2</code>，<code>ack = -1</code>。</p>
+<p>也就是说，生产者发送一条消息后，当ISR中至少存在2个副本（包含Leader）且这些副本都写成功后，生产者才会收到写入成功的响应。那么每个Follower会不断地发送Fetch请求拉取消息（上送自己的LEO），此时Kafka会判断Leader和Follower的LEO相差多少，如果差的数量超过了<code>replica.lag.max.messages</code>参数值，就会把Follower踢出ISR列表。</p>
+<p><strong>存在的问题</strong><br/><code>replica.lag.max.messages</code>这一机制，在瞬间高并发访问的情况下会出现问题：比如Leader瞬间接收到几万条消息，然后所有Follower还没来得及同步过去，此时所有follower都会被踢出ISR列表，然后同步完成之后，又会再被加入ISR列表。</p>
+<p>也就是说，这种依靠同步消息数量来判断Follower是否落后的机制，可能会导致在系统高峰时期，Follower被频繁踢出ISR列表，然后再回到ISR列表，这种操作是完全无意义的。</p>
+<h3 id="3-2-replica-lag-time-max-ms">3.2 replica.lag.time.max.ms</h3>
+<p>Kafka从<code>0.9.x</code>版本开始，引入了<code>replica.lag.max.ms</code>参数，默认值10秒，表示如果某个Follower的LEO一直落后Leader超过了10秒，那么才判定这个Follower是 <em>out-of-sync</em>，就会从ISR列表里移除。</p>
+<p>这样的话，即使出现瞬间的流量洪峰，一下子导致几个Follower都落后了不少数据，但是只要在限定的时间内尽快追上来，别一直落后，就不会认为是<em>out-of-sync</em>。</p>
+<hr/>
+<p>上面就是ISR的核心工作机制了，一般导致Follower同步数据较慢的原因主要有以下三种：</p>
+<ol>
+<li>Follower所在机器的性能变差，比如网络负载过高，I/O负载过高，CPU负载过高等等；</li>
+<li>Follower所在机器的Kafka Broker进程出现卡顿，最常见的就是发生了Full GC；</li>
+<li>动态增加了Partition的副本，此时新加入的Follower会拼命从Leader上同步数据，但是这个是需要时间的，所以如果参数配置不当，会导致生产者hang等待同步完成。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

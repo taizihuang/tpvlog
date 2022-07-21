@@ -1,0 +1,182 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（十七）——分布式理论之可扩展：全局流水号</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（十七）——分布式理论之可扩展：全局流水号</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>在数据分片中，不管是普通hash、一致性hash还是range based，都要基于某个key进行hash运算，然后根据计算值进行分片。</p>
+<p>Key一般采用基于记录的特征值，这个特征值在不同的框架中有不同的叫法，比如MongoDB中的<a href="https://docs.mongodb.com/manual/core/sharding-shard-key/">sharding key</a> ，Oracle中的<a href="https://docs.oracle.com/cd/B28359_01/server.111/b32024/partition.htm">Partition Key</a>。一般来讲，<strong>特征值的选取应当具有区分度</strong>。比如，在分布式调度系统中，通常会为每个子任务生成一个全局唯一的流水号，由任务控制者通过对流水号进行hash运算，将其分配给Job Executor（负责子任务的执行）。</p>
+<p>对于流水号的生成，读者肯定不会陌生，比如数据库的自增主键、uuid等都是生成流水号的方式。但是数据库自增主键只能保证单个DB实例内的单表唯一，uuid则利用了mac地址，缺少规律、可读性及安全性。我们希望的流水号应该满足以下特性：</p>
+<ul>
+<li>分布式系统内全局唯一</li>
+<li>趋势递增</li>
+</ul>
+<h2 id="-id-">二、数据库ID表</h2>
+<p>基于数据库ID表，生成全局流水号，是一种比较常见的方式，以Mysql为例，可以建立一张ID表，表一共两列：id为自增主键，type则表示流水的类型，可以自定义取值，但要保证唯一：</p>
+<pre><code class="lang-mysql">CREATE TABLE `ID_TABLE` (
+     `id` BIGINT(64) UNSIGNED NOT NULL AUTO_INCREMENT,
+     `type` VARCHAR(16) NOT NULL DEFAULT '',
+     PRIMARY KEY (`id`),
+     UNIQUE KEY `idx_type` (`type`)
+) ENGINE=MYISAM
+</code></pre>
+<p>每次客户端需要生成唯一流水号时，可以通过以下语句获取：</p>
+<pre><code class="lang-mysql">REPLACE INTO ID_TABLE('type') VALUES('ORDER_KEY');
+SELECT LAST_INSERT_ID();
+</code></pre>
+<blockquote>
+<p>这里解释下REPLACE INTO：假如表中有一条记录与用PRIMARY KEY或UNIQUE KEY索引的新记录具有相同的值，则先删除旧记录，再插入新记录。</p>
+</blockquote>
+<p>这种方式对于同一个type值，比如“ORDER_KEY”，生成的流水号都是唯一的。在分布式系统中，可以通过数据库中间件请求到不同的分库，每个分库设置不同的初始值和自增步长，以避免出现重复流水号，如下图：</p>
+<center><br/> <img src="./img/20200207201746499.png" style="zoom:70%"><br/></img></center>
+<p>上述，DB1生成的ID是1,4,7,10,13....，DB2生成的ID是2,5,8,11,14.....</p>
+<p><strong>缺点：</strong><br/>显然，基于数据库表生成流水号的方式效率太低，很难满足高并发的业务场景，而且与数据库紧耦合。所以，通常只适合并发量低，但是数据量大的场景。</p>
+<h2 id="-snow-flake-">三、Snow Flake算法</h2>
+<h3 id="3-1-">3.1 原理</h3>
+<p>Snow Flake是Twitter开源的分布式ID生成算法，其结果是一个long型的ID，Snow Flake的核心思想是：</p>
+<blockquote>
+<p>将一个long类型整数按位划分，41bit作为毫秒数，10bit作为机器的ID（5个bit是数据中心，5个bit的机器ID），12bit作为毫秒内的流水号，最后还有一个符号位，永远是0。</p>
+</blockquote>
+<center><br/> <img src="./img/20200207201755871.jpg" style="zoom:100%"/><br/></center>
+<p>算法实现基本就是二进制操作，单机每秒内理论上最多可以生成1024*(2^12)，即409.6万个ID(1024x4096=4194304)</p>
+<ul>
+<li><p><strong>1bit：</strong>未使用，因为二进制里第一个bit为如果是1，那么都是负数，但是我们生成的id都是正数，所以第一个bit统一都是0；</p>
+</li>
+<li><p><strong>41bit：</strong>时间截，存储的是时间截的差值（当前时间截 - 开始时间截) ，开始时间截一般是我们的id生成器开始使用的时间，由我们程序来指定的。41位的时间截，可以使用69年，年T = (1L &lt;&lt; 41) / (1000x60x60x24x365) = 69；</p>
+</li>
+<li><p><strong>10bit：</strong>记录工作机器ID，代表的是这个服务最多可以部署在2^10（1024）台机器上，包括5位datacenterId和5位workerId。注意，10-bit可以完全表示1024台机器，如果对IDC划分有需求，可以将10-bit分5-bit给IDC，分5-bit给工作机器，这样就可以表示32个IDC，每个IDC下可以有32台机器，可以根据自身需求定义；</p>
+</li>
+<li><p><strong>12bit：</strong>序列号，记录同一个毫秒内产生的不同id，12位的计数顺序号支持每个节点每毫秒(同一机器，同一时间截)产生4096个ID序号。</p>
+</li>
+</ul>
+<blockquote>
+<p> 理论上Snow Flake方案的QPS约为<strong><em>409.6w/s</em></strong>，这种分配方式可以保证在任何一个IDC的任何一台机器在任意毫秒内生成的ID都是不同的。</p>
+</blockquote>
+<h3 id="3-2-">3.2 优缺点</h3>
+<p><strong>优点：</strong></p>
+<ul>
+<li>整体上按照时间自增排序，并且整个分布式系统内不会产生ID碰撞(由数据中心ID和机器ID作区分)，效率较高；</li>
+<li>不依赖数据库等第三方系统，以服务的方式部署，稳定性更高；</li>
+</ul>
+<p><strong>缺点：</strong></p>
+<ul>
+<li>由于41位的时间戳代表的是时间差值，所以SnowFlake强依赖于机器时钟，如果机器上时钟回拨，会导致发号重复或者服务会处于不可用状态。</li>
+</ul>
+<blockquote>
+<p>关于时钟回拨，美团开源了一个<a href="https://github.com/Meituan-Dianping/Leaf">Leaf框架</a>，其中的Leaf-segment方案可以比较好的解决时钟回拨问题，但是该方案又引入了外部依赖——Zookeeper，感兴趣的读者可以自行参考。</p>
+</blockquote>
+<h3 id="3-3-">3.3 代码示例</h3>
+<pre><code class="lang-JAVA">public class SnowFlake {
+
+    private long workerId;
+    private long datacenterId;
+    private long sequence;
+
+    public IdWorker(long workerId, long datacenterId, long sequence) {
+        // sanity check for workerId
+        // 这儿不就检查了一下，要求就是你传递进来的机房id和机器id不能超过32，不能小于0
+        if (workerId &gt; maxWorkerId || workerId &lt; 0) {
+            throw new IllegalArgumentException(String.format("worker Id can't be greater than %d or less than 0", maxWorkerId));
+        }
+        if (datacenterId &gt; maxDatacenterId || datacenterId &lt; 0) {
+            throw new IllegalArgumentException(String.format("datacenter Id can't be greater than %d or less than 0", maxDatacenterId));
+        }
+        System.out.printf("worker starting. timestamp left shift %d, datacenter id bits %d, worker id bits %d, sequence bits %d, workerid %d",
+                timestampLeftShift, datacenterIdBits, workerIdBits, sequenceBits, workerId);
+
+        this.workerId = workerId;
+        this.datacenterId = datacenterId;
+        this.sequence = sequence;
+    }
+
+    private long twepoch = 1288834974657L;
+
+    private long workerIdBits = 5L;
+    private long datacenterIdBits = 5L;
+    private long maxWorkerId = -1L ^ (-1L &lt;&lt; workerIdBits); // 这个是二进制运算，就是5 bit最多只能有31个数字，也就是说机器id最多只能是32以内
+    private long maxDatacenterId = -1L ^ (-1L &lt;&lt; datacenterIdBits); // 这个是一个意思，就是5 bit最多只能有31个数字，机房id最多只能是32以内
+    private long sequenceBits = 12L;
+
+    private long workerIdShift = sequenceBits;
+    private long datacenterIdShift = sequenceBits + workerIdBits;
+    private long timestampLeftShift = sequenceBits + workerIdBits + datacenterIdBits;
+    private long sequenceMask = -1L ^ (-1L &lt;&lt; sequenceBits);
+
+    private long lastTimestamp = -1L;
+
+    public long getWorkerId() {
+        return workerId;
+    }
+
+    public long getDatacenterId() {
+        return datacenterId;
+    }
+
+    public long getTimestamp() {
+        return System.currentTimeMillis();
+    }
+
+    public synchronized long nextId() {
+        // 这儿就是获取当前时间戳，单位是毫秒
+        long timestamp = timeGen();
+
+        if (timestamp &lt; lastTimestamp) {
+            System.err.printf("clock is moving backwards.  Rejecting requests until %d.", lastTimestamp);
+            throw new RuntimeException(String.format("Clock moved backwards.  Refusing to generate id for %d milliseconds",
+                    lastTimestamp - timestamp));
+        }
+
+
+        // 在同一个毫秒内，又发送了一个请求生成一个id，0 -&gt; 1
+        if (lastTimestamp == timestamp) {
+            sequence = (sequence + 1) &amp; sequenceMask; // 这个意思是说一个毫秒内最多只能有4096个数字，无论你传递多少进来，这个位运算保证始终就是在4096这个范围内，避免你自己传递个sequence超过了4096这个范围
+            if (sequence == 0) {
+                timestamp = tilNextMillis(lastTimestamp);
+            }
+        } else {
+            sequence = 0;
+        }
+
+        // 这儿记录一下最近一次生成id的时间戳，单位是毫秒
+        lastTimestamp = timestamp;
+
+        // 这儿就是将时间戳左移，放到41 bit那儿；将机房id左移放到5 bit那儿；将机器id左移放到5 bit那儿；将序号放最后10 bit；
+        // 最后拼接起来成一个64 bit的二进制数字，转换成10进制就是个long型
+        return ((timestamp - twepoch) &lt;&lt; timestampLeftShift) |
+                (datacenterId &lt;&lt; datacenterIdShift) |
+                (workerId &lt;&lt; workerIdShift) |
+                sequence;
+    }
+
+
+    private long tilNextMillis(long lastTimestamp) {
+        long timestamp = timeGen();
+        while (timestamp &lt;= lastTimestamp) {
+            timestamp = timeGen();
+        }
+        return timestamp;
+    }
+
+    private long timeGen() {
+        return System.currentTimeMillis();
+    }
+
+    //---------------测试---------------
+    public static void main(String[] args) {
+        IdWorker worker = new IdWorker(1, 1, 1);
+        for (int i = 0; i &lt; 30; i++) {
+            System.out.println(worker.nextId());
+        }
+    }
+
+}
+</code></pre>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,64 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Kafka（三）——消息存储：零拷贝</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Kafka（三）——消息存储：零拷贝</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Kafka具有 <strong><em>高吞吐低延迟</em></strong> 的特性。那么Kafka是如何实现的呢？这就涉及到消息的持久化机制了。Kafka会将消息追加到分区日志文件中，并且仅仅是追加数据到文件末尾，也就是采用了<strong>顺序写</strong>的机制。</p>
+<p>但是，光顺序写其实还是不够的，Kafka同时利用了操作系统的Page Cache，也就是说消息不是写到磁盘上，而是写到缓存中，正是依靠了<strong>顺序写+Page Cache+零拷贝</strong>的机制，Kafka才能有超高的写入性能，单物理机可以做到每秒10W级别的消息写入。</p>
+<center><br/> <img src="./img/20210412215953984.png" style="zoom:70%"><br/></img></center>
+<blockquote>
+<p>从写Page Cache这个特性也可以看出，虽然Kafka Broker自身是一个JVM进程，但其实不会占用过多JVM内存，而是需要OS分配更多的page cache，以此来缓存更多的消息并异步刷盘。</p>
+</blockquote>
+<h2 id="-">一、零拷贝</h2>
+<p>我们来回顾一下使用Kafka的整个流程：</p>
+<ol>
+<li>Producer发送一个消息给Kafka Broker；</li>
+<li>Kafka接受到消息后，将其持久化到磁盘（可能只是写入Page Cache）；</li>
+<li>Consumer拉取消息，Kafka读取磁盘上的消息，然后通过网络发送给Consumer。</li>
+</ol>
+<p>整个流程涉及多次磁盘读写，如果Kafka真的这么干，就不会有 <strong><em>高吞吐低延迟</em></strong> 的特性了。事实上，Kafka大量使用了<strong>零拷贝</strong>技术，使得消息存储和消费的性能极高。</p>
+<p>在了解什么是零拷贝之前，我们先来看下传统的I/O方式。</p>
+<h3 id="1-1-i-0-">1.1 普通I/0过程</h3>
+<p>假设我们有下面的几行代码，JVM程序先从磁盘上读文件，然后通过Socket发送给其它JVM程序：</p>
+<pre><code class="lang-JAVA">// 1.从磁盘读取文件
+File file = new File("xxx.txt");
+RandomAccessFile raf = new RandomAccessFile(file, "rw");         
+byte[] arr = new byte[(int) file.length()];        
+raf.read(arr);   
+
+// 2.通过网络发送数据
+Socket socket = new ServerSocket(8080).accept();        
+socket.getOutputStream().write(arr);
+</code></pre>
+<p>上述<code>[读磁盘数据 -&gt; 网络发送]</code>整个流程一共发生了四次数据拷贝，如下图：</p>
+<center><br/> <img src="./img/20210412220007656.png" style="zoom:60%"/><br/></center>
+<ol>
+<li>从用户态切换到内核态，将磁盘上的数据通过<strong>DMA拷贝</strong>到内核缓冲区；</li>
+<li>从内核态切换到用户态，将内核缓冲区的数据拷贝到用户缓冲区（CPU拷贝）；</li>
+<li>从用户态切换到内核态，将用户缓冲区的数据拷贝到Socket缓冲区；</li>
+<li>最后，还有一个异步化的过程，将Socket缓冲区数据通过DMA拷贝到网络引擎，发送出去；</li>
+<li>全部完成后，从内核态切换到用户态。</li>
+</ol>
+<p>所以说，从本地磁盘读取数据，发生了2次数据拷贝，然后通过网络发送出去，又发生了2次数据拷贝。期间用户态和内核态之间要发生4次切换。所以说，普通的IO操作性能是较低的。</p>
+<h3 id="1-2-">1.2 零拷贝过程</h3>
+<p>我们再来看下Kafka是如何实现消息的存储和消费的，假设此时消息已经通过异步刷盘，从os cache刷到了磁盘上：</p>
+<center><br/> <img src="./img/20210412220019844.png" style="zoom:60%"/><br/></center>
+<p>我来说明下上图的流程：</p>
+<ol>
+<li>首先，Kafka Broker从用户态切换到内核态，将磁盘上的数据通过<strong>DMA拷贝</strong>到内核缓冲区；</li>
+<li>从内核缓冲区拷贝数据的一些offset和length文件描述符到Socket缓冲区；</li>
+<li>接着，直接把数据从内核缓冲区拷贝到网络引擎（网卡）里。同时，还从Socket缓冲区里拷贝一些offset和length到网络引擎里去，但是这个offset和length的量很少，几乎可以忽略。</li>
+</ol>
+<p>综上所述，通过sendfile方式进行零拷贝时，数据传送只发生在内核态，而且整个过程只进行了2次数据拷贝。</p>
+<blockquote>
+<p>Linux 2.1 版本提供了 sendFile 函数，也就是零拷贝技术，对应于 Java 语言，<code>FileChannal.transferTo()</code>方法的底层实现就是 sendfile方法。 </p>
+</blockquote>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

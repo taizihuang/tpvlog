@@ -1,0 +1,243 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解分布式存储（十六）——可扩展架构：Rebalance</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解分布式存储（十六）——可扩展架构：Rebalance</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将对分布式文件系统的<strong>可扩展</strong>架构进行讲解。我们知道，对于一个分布式系统来说，可扩展意味着能够自由伸缩。那么，对应到我们的分布式文件系统的场景，就是：</p>
+<ol>
+<li>当DataNode集群的存储容量快满了以后，通过新增DataNode节点，可以实现水平动态扩容；</li>
+<li>当DataNode集群中的某个节点下线后，该节点上的文件会自动重分配到其它节点上。</li>
+</ol>
+<p>上述两个过程，本质就是分布式存储系统的<strong>Rebalance机制</strong>。关于第二点，我已经在高可用架构中的<strong>文件副本重分配</strong>中讲解过了，本章，我们重点关注如何实现DataNode节点的水平扩容。</p>
+<blockquote>
+<p>本节涉及得代码存放在：<a href="https://gitee.com/ressmix/source-code/tree/master/5.dfs/4.scalable。">https://gitee.com/ressmix/source-code/tree/master/5.dfs/4.scalable。</a></p>
+</blockquote>
+<h2 id="-rebalance-">一、Rebalance机制</h2>
+<p>我们的分布式文件系统是双副本机制，所以每次扩容的机器数，要求是<strong>2的倍数</strong>。</p>
+<p>由于NameNode会在内存中维护整个DataNode集群的元数据信息，并根据DataNode的心跳、增量上报、全量上报请求更新元数据。所以，NameNode可以计算出整个集群的平均容量，然后根据每个DataNode节点的容量，选择出合适的源节点和目标节点，并对源节点上的每个文件创建副本复制任务，最后通过心跳下发给目标节点。</p>
+<p>整个流程其实复用了高可用架构中的<strong>文件副本重分配</strong>机制。</p>
+<h3 id="1-1-">1.1 整体流程</h3>
+<p>举个例子来理解，假设我们现在有4台DataNode机器，每台机器已使用的容量如下：</p>
+<ul>
+<li>机器01：90GB</li>
+<li>机器02：90GB</li>
+<li>机器03：90GB</li>
+<li>机器04：90GB</li>
+</ul>
+<p>现在，我们需要扩容2台机器：</p>
+<ul>
+<li>机器05：0GB</li>
+<li>机器06：0GB</li>
+</ul>
+<p>那么，机器05和06启动后，会自动向NameNode注册自己的信息。整个扩容流程可以用下面这张图来表示：</p>
+<center><br/> <img src="./img/20210804225913255.png" style="zoom:130%"><br/></img></center>
+<p>正常情况下，<code>Rebalance</code>通过手动触发，我们可以让NameNode提供一个RPC服务接口——<code>rebalance</code>，当NameNode接收到Rebalance RPC请求后，就执行Rebalance流程：</p>
+<ol>
+<li>首先，NameNode根据内存中的DataNode集群信息，计算平均容量；</li>
+<li>接着，NameNode根据每个DataNode节点的已用容量，选择出目标节点和源节点，并创建<strong>文件复制任务</strong>到队列中，文件需要从源节点复制到目标节点上。同时，针对源节点，还要创建延迟调度的<strong>文件删除任务</strong>；</li>
+<li>当目标DataNode发送心跳时，获取到文件复制任务，于是与源节点建立连接，完成文件复制。</li>
+<li>最后，一段时间后触发文件删除任务，源节点将自己服务器上的指定文件删除掉。</li>
+</ol>
+<h3 id="1-2-rebalance-rpc-">1.2 Rebalance RPC接口</h3>
+<p>首先，我们需要新增一个<code>Rebalance</code>接口：</p>
+<pre><code class="lang-protobuf">syntax = "proto3";
+
+option java_multiple_files = true;
+option java_outer_classname = "NameNodeServiceProto";
+
+service NameNodeService {
+    //...
+    rpc rebalance(RebalanceRequest) returns (RebalanceResponse){}
+}
+
+message RebalanceRequest{
+    int32 status  = 1;
+}
+message RebalanceResponse{
+    int32 status  = 1;
+}
+//...
+</code></pre>
+<p>NameNode接受到Rebalance RPC请求后，调用<code>DataNodeManager.rebalance()</code>方法触发Rebalance机制：</p>
+<pre><code class="lang-JAVA">// NameNodeServiceImpl.java
+
+/**
+ * DataNode集群Rebalance
+ */
+@Override
+public void rebalance(RebalanceRequest request, StreamObserver&lt;RebalanceResponse&gt; responseObserver) {
+    RebalanceResponse response = null;
+    try {
+        datanodeManager.rebalance();
+        response = RebalanceResponse.newBuilder().setStatus(STATUS_SUCCESS).build();
+    } catch (Exception e) {
+        e.printStackTrace();
+        response = RebalanceResponse.newBuilder().setStatus(STATUS_FAILURE).build();
+    }
+    responseObserver.onNext(response);
+    responseObserver.onCompleted();
+}
+</code></pre>
+<h2 id="-rebalance-">二、Rebalance算法</h2>
+<p>Rebalance的主体流程在<code>DataNodeManager.rebalance()</code>方法中实现。整个算法的思路是比较简单的，核心思想就是：<strong>根据集群容量，计算出源节点和目标节点，对于源节点中的每个文件创建一个文件复制任务下发给目标节点，创建一个延迟文件删除任务给源节点</strong>：</p>
+<pre><code class="lang-JAVA">// DataNodeManager.java
+
+/**
+ * DataNode集群rebalance
+ */
+public void rebalance() {
+    synchronized (this) {
+        // 1.计算DataNode集群容量平均值
+        long totalStoredDataSize = 0;
+        for (DataNodeInfo datanode : datanodes.values()) {
+            totalStoredDataSize += datanode.getStoredDataSize();
+        }
+        long averageStoredDataSize = totalStoredDataSize / datanodes.size();
+
+        // 2.将集群节点分为两类：source迁出节点（大于平均值）和dest迁入节点（小于平均值）
+        List&lt;DataNodeInfo&gt; sourceDatanodes = new ArrayList&lt;&gt;();
+        List&lt;DataNodeInfo&gt; destDatanodes = new ArrayList&lt;&gt;();
+
+        for (DataNodeInfo datanode : datanodes.values()) {
+            // 已存储容量大于平均值的作为source迁出节点
+            if (datanode.getStoredDataSize() &gt; averageStoredDataSize) {
+                sourceDatanodes.add(datanode);
+            }
+            // 已存储容量小于平均值的作为dest迁入节点
+            if (datanode.getStoredDataSize() &lt; averageStoredDataSize) {
+                destDatanodes.add(datanode);
+            }
+        }
+
+        // 3.为dest节点生成复制任务，为source节点生成删除任务
+        List&lt;RemoveReplicaTask&gt; removeReplicaTasks = new ArrayList&lt;&gt;();
+        for (DataNodeInfo sourceDatanode : sourceDatanodes) {
+            long toRemoveDataSize = sourceDatanode.getStoredDataSize() - averageStoredDataSize;
+            for (DataNodeInfo destDatanode : destDatanodes) {
+                // 找到一个能够容纳的dest节点
+                if (destDatanode.getStoredDataSize() + toRemoveDataSize &lt;= averageStoredDataSize) {
+                    createRebalanceTasks(sourceDatanode, destDatanode,
+                            removeReplicaTasks, toRemoveDataSize);
+                    break;
+                } else {
+                    long maxRemoveDataSize = averageStoredDataSize - destDatanode.getStoredDataSize();
+                    long removedDataSize = createRebalanceTasks(sourceDatanode, destDatanode,
+                            removeReplicaTasks, maxRemoveDataSize);
+                    toRemoveDataSize -= removedDataSize;
+                }
+            }
+        }
+
+        // 交给一个延迟线程去24小时之后执行删除副本的任务
+        new DelayRemoveReplicaThread(removeReplicaTasks).start();
+    }
+}
+</code></pre>
+<h3 id="2-1-">2.1 文件复制任务</h3>
+<p>我们来看下具体的<code>createRebalanceTasks</code>代码，它在内部创建了文件复制任务<code>ReplicateTask</code>和文件删除任务    </p>
+<pre><code class="lang-JAVA">// DataNodeManager.java
+
+/**
+ * 创建rebalance任务
+ */
+private long createRebalanceTasks(DataNodeInfo sourceDatanode, DataNodeInfo destDatanode,
+                                  List&lt;RemoveReplicaTask&gt; removeReplicaTasks, long maxRemoveDataSize) {
+    // 1.列出源节点的所有文件
+    List&lt;String&gt; files = fileMappedByDataNode.get(sourceDatanode);
+
+    // 2.遍历文件，为每个文件生成一个复制任务
+    long removedDataSize = 0;
+    for (String file : files) {
+        String filename = file.split("_")[0];
+        long fileLength = Long.valueOf(file.split("_")[1]);
+        if (removedDataSize + fileLength &gt;= maxRemoveDataSize) {
+            break;
+        }
+
+        // 生成文件复制任务
+        ReplicateTask replicateTask = new ReplicateTask(
+                filename, fileLength, sourceDatanode, destDatanode);
+        destDatanode.addReplicateTask(replicateTask);
+        destDatanode.addStoredDataSize(fileLength);
+
+        // 生成文件删除任务
+        sourceDatanode.addStoredDataSize(-fileLength);
+        this.removeReplicaFromDataNode(sourceDatanode.getId(), file);
+        RemoveReplicaTask removeReplicaTask = new RemoveReplicaTask(
+                filename, sourceDatanode);
+        removeReplicaTasks.add(removeReplicaTask);
+
+        removedDataSize += fileLength;
+    }
+
+    return removedDataSize;
+}
+
+/**
+ * 从数据节点删除掉一个文件副本元数据
+ */
+private void removeReplicaFromDataNode(String id, String file) {
+    try {
+        rrw.writeLock().lock();
+        fileMappedByDataNode.get(id).remove(file);
+        Iterator&lt;DataNodeInfo&gt; replicasIterator = datanodeMappedByFile
+            .get(file.split("_")[0]).iterator();
+        while (replicasIterator.hasNext()) {
+            DataNodeInfo replica = replicasIterator.next();
+            if (replica.getId().equals(id)) {
+                replicasIterator.remove();
+            }
+        }
+    } finally {
+        rrw.writeLock().unlock();
+    }
+}
+</code></pre>
+<h3 id="2-2-">2.2 文件删除任务</h3>
+<p>文件删除任务由一个线程定时执行，默认延时24小时后执行，防止出现并发复制和删除问题：</p>
+<pre><code class="lang-JAVA">// DataNodeManager.java
+
+/**
+ * 延迟删除副本的线程
+ */
+class DelayRemoveReplicaThread extends Thread {
+    private List&lt;RemoveReplicaTask&gt; removeReplicaTasks;
+
+    public DelayRemoveReplicaThread(List&lt;RemoveReplicaTask&gt; removeReplicaTasks) {
+        this.removeReplicaTasks = removeReplicaTasks;
+    }
+
+    @Override
+    public void run() {
+        long start = System.currentTimeMillis();
+        while (true) {
+            try {
+                long now = System.currentTimeMillis();
+                // 延迟24小时
+                if (now - start &gt; 24 * 60 * 60 * 1000) {
+                    start = System.currentTimeMillis();
+                    for (RemoveReplicaTask removeReplicaTask : removeReplicaTasks) {
+                        removeReplicaTask.getTargetDataNode().addRemoveReplicaTask(removeReplicaTask);
+                    }
+                    break;
+                }
+
+                Thread.sleep(60 * 1000);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我对分布式文件系统的rebalance机制进行了讲解。Rebalance的核心是根据NameNode中保存的集群元数据信息确认好源datanode和目标datanode，然后创建文件复制任务和文件删除任务，最后复用高可用架构中的心跳下发模式完成rebalance流程。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式存储分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/65">分布式存储</a></div>
+</div></body>
+        </html>
+        

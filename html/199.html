@@ -1,0 +1,84 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（二八）——分布式框架之高可用：Hystrix降级</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（二八）——分布式框架之高可用：Hystrix降级</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>上一章，我讲解Hystrix命令执行流程时，一直提到Hystrix的fallback降级机制，我们先来回顾一下，在哪些情况下会触发降级：</p>
+<ul>
+<li>断路器处于打开状态，直接走降级流程；</li>
+<li>线程池/队列/semaphore满了，请求被reject；</li>
+<li>执行了请求，但是Command的run()或construct()方法抛出异常；</li>
+</ul>
+<p>上述三种情况，都属于异常情况，Hystrix会发送异常事件到断路器中去进行统计，如果断路器发现异常事件的占比达到了一定的比例，会直接开启断路，如下图：</p>
+<center><br/> <img src="./img/20200330223806946.png" style="zoom:65%"><br/></img></center>
+<p>接下来，我们通过一个示例来看看如何使用Hystrix的降级机制。</p>
+<h2 id="-">一、降级示例</h2>
+<p>Fallback降级的逻辑一般写在Command内，一般有两种最经典的降级方法：<strong>纯内存数据</strong>和<strong>默认值</strong>。</p>
+<p>举个例子，假如我们现在新增一个品牌服务：当通过商品服务获取到商品信息后，会再根据商品信息中的品牌brandId，调用品牌服务获取品牌信息。如果品牌服务挂掉了，那么我们可以尝试从本地内存中获取一份以前保留的品牌数据，如果内存中没有，可以返回一些默认值，比如Nike++、Nike、Ecco之类的。</p>
+<p>降级的逻辑通过<code>HystrixCommand.getFallback</code>或<code>HystrixObservableCommand.resumeWithFallback</code>方法实现：</p>
+<pre><code class="lang-JAVA">public class GetBrandCommand extends HystrixCommand&lt;String&gt; {
+
+    // 品牌id
+    private final Long brandId;
+
+    public CommandHelloFailure(Long brandId) {
+        super(HystrixCommandGroupKey.Factory.asKey("BrandInfoService"));
+        this.brandId = brandId;
+    }
+
+    /**
+      * 这里总是报错，这样每次请求都会走降级逻辑
+      */
+    @Override
+    protected String run() {
+        // 正式场景，这里调用品牌服务的接口
+        throw new RuntimeException("this command always fails");
+    }
+
+    /**
+      * 降级逻辑，从本地缓存中查找一个品牌名称
+      */
+    @Override
+    protected String getFallback() {
+        return BrandCache.getBrandName(brandId);
+    }
+
+}
+</code></pre>
+<p>再来改写下整合服务：</p>
+<pre><code class="lang-JAVA">@Controller
+public class CacheController {
+
+    @RequestMapping("/change/product")
+    @ResponseBody
+    public String changeProduct(Long productId) {
+
+        // 获取商品信息
+        HystrixCommand&lt;ProductInfo&gt; command = new GetProductInfoCommand(productId);
+        ProductInfo product = command.execute();
+
+        // 获取品牌信息
+        GetBrandCommand bcmd = new GetBrandCommand(product.getBrandId());
+        String brandName = bcmd.execute();
+        product.setBrandName(brandName);
+
+        System.out.println(product);  
+        return "success";
+    }
+
+}
+</code></pre>
+<h2 id="-">二、总结</h2>
+<p>Fallback降级机制，本身也使用了资源隔离，我们可以通过<code>fallback.isolation.semaphore.maxConcurrentRequests</code>这个参数设置<code>HystrixCommand.getFallback()</code>的最大允许并发请求数，默认值是10，如果超出了这个最大值，那么直接被reject。</p>
+<pre><code class="lang-JAVA">HystrixCommandProperties.Setter()
+   .withFallbackIsolationSemaphoreMaxConcurrentRequests(int value)
+</code></pre>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

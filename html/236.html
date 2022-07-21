@@ -1,0 +1,250 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式实战（七）——Redis集群模式实战</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式实战（七）——Redis集群模式实战</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Redis从3.0版本开始支持原生的集群模式，即 Redis Cluster。Redis Cluster，主要是针对海量数据下的高并发、高可用场景，海量数据就是说单机Redis无法完全容纳数据，需要进行数据分片。</p>
+<p>本章，我就来讲解如何搭建一个3主3从的Redis Cluster。关于Redis Cluster的基本原理，读者可以参考进阶篇中的<a href="https://www.tpvlog.com/article/185">《分布式框架之高性能：Redis集群模式》</a>。</p>
+<h2 id="-">一、集群部署</h2>
+<p>Redis Cluster至少要求有3个Master节点，同时为了保证高可用，每个Master都建议至少有一个Slave，同时Master不能跟自己的Slave部署在同一台机器上。所以，我会在ressmix-dsf01、ressmix-dsf02、ressmix-dsf03这三台机器上分别部署一个Master一个Slave。首先，我将ressmix-dsf01、ressmix-dsf02、ressmix-dsf03上的哨兵和Redis进程都停止掉。</p>
+<h3 id="1-1-">1.1 集群配置</h3>
+<p>我们先分配下端口，6个Redis节点，端口依次为7001、7002、7003、7004、7005、7006。ressmix-dsf01上分配7001、7002，ressmix-dsf02上分配7003、7004，ressmix-dsf03上分配7005、7006。</p>
+<p>我以ressmix-dsf01为例，说明下需要建立的目录：</p>
+<pre><code class="lang-SHELL">#存放redis的配置文件
+mkdir -p /etc/redis
+#cluster模式下，Redis将集群状态保存在那里，包括集群机器信息等
+mkdir -p /etc/redis-cluster
+#存放redis的日志
+mkdir -p /var/log/redis
+#运行时工作目录，注意端口
+mkdir -p /var/redis/7001
+mkdir -p /var/redis/7002
+</code></pre>
+<p>然后，将redis安装包目录下redis.conf配置文件拷贝到各台机器的<code>/etc/redis/</code>目录下，分别重名为7001.conf、7002.conf……7006.conf。我以7001.conf为例，说下Redis Cluster模式要修改的配置：</p>
+<pre><code class="lang-SHELL">#运行端口
+port 7001
+#启用集群模式 
+cluster-enabled yes
+#集群状态信息文件位置
+cluster-config-file /etc/redis-cluster/nodes7001.conf
+#节点超时时间(秒)，超过该时间则认为节点宕机，master宕机会触发主备切换，slave宕机就不会提供服务
+cluster-node-timeout 15000
+daemonize    yes                            
+pidfile        /var/run/redis_7001.pid                         
+dir         /var/redis/7001        
+logfile     /var/log/redis/7001.log
+#宿主机IP
+bind 192.168.0.107
+appendonly yes
+</code></pre>
+<p>接着，准备生产环境的启动脚本，将Redis安装包util目录下的<code>redis_init_script</code>脚本拷贝到<code>/etc/init.d</code>目录，分别命名为: redis_7001, redis_7002, redis_7003, redis_7004, redis_7005, redis_7006，每个启动脚本内，都修改<code>REDISPORT</code>为对应的端口号：</p>
+<pre><code class="lang-SHELL">#!/bin/sh
+#
+# Simple Redis init.d script conceived to work on Linux systems
+# as it does use of the /proc filesystem.
+
+# chkconfig:   2345 90 10
+# description:  Redis is a persistent key-value database
+</code></pre>
+<p>最后，执行<code>/etc/init.d/redis_XXXX start</code>分别启动6个节点，我们可以到<code>/var/log/redis/</code>目录中看下启动日志，确认下是否启动成功：</p>
+<pre><code class="lang-SHELL">[root@ressmix-dsf01 redis]# cat 7001.log 
+1087:C 28 Apr 2020 23:03:04.763 # oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+1087:C 28 Apr 2020 23:03:04.763 # Redis version=5.0.8, bits=32, commit=00000000, modified=0, pid=1087, just started
+1087:C 28 Apr 2020 23:03:04.763 # Configuration loaded
+1088:M 28 Apr 2020 23:03:04.765 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+1088:M 28 Apr 2020 23:03:04.765 # Warning: 32 bit instance detected but no memory limit set. Setting 3 GB maxmemory limit with 'noeviction' policy now.
+1088:M 28 Apr 2020 23:03:04.765 * No cluster configuration found, I'm 6ac3762d35e60af9d8d12f3ac148c8ede11b94af
+                _._                                                  
+           _.-``__ ''-._                                             
+      _.-``    `.  `_.  ''-._           Redis 5.0.8 (00000000/0) 32 bit
+  .-`` .-```.  ```\/    _.,_ ''-._                                   
+ (    '      ,       .-`  | `,    )     Running in cluster mode
+ |`-._`-...-` __...-.``-._|'` _.-'|     Port: 7001
+ |    `-._   `._    /     _.-'    |     PID: 1088
+  `-._    `-._  `-./  _.-'    _.-'                                   
+ |`-._`-._    `-.__.-'    _.-'_.-'|                                  
+ |    `-._`-._        _.-'_.-'    |           http://redis.io        
+  `-._    `-._`-.__.-'_.-'    _.-'                                   
+ |`-._`-._    `-.__.-'    _.-'_.-'|                                  
+ |    `-._`-._        _.-'_.-'    |                                  
+  `-._    `-._`-.__.-'_.-'    _.-'                                   
+      `-._    `-.__.-'    _.-'                                       
+          `-._        _.-'                                           
+              `-.__.-'                                               
+
+1088:M 28 Apr 2020 23:03:04.776 # WARNING: The TCP backlog setting of 511 cannot be enforced because /proc/sys/net/core/somaxconn is set to the lower value of 128.
+1088:M 28 Apr 2020 23:03:04.776 # Server initialized
+1088:M 28 Apr 2020 23:03:04.776 # WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+1088:M 28 Apr 2020 23:03:04.776 * Ready to accept connections
+</code></pre>
+<h3 id="1-2-">1.2 集群创建</h3>
+<p>配置完并启动上述的6个节点后，它们还不在一个集群里面，不能互相发现。我们需要通过命令完成集群的创建：</p>
+<pre><code class="lang-SHELL">redis-cli --cluster create 192.168.0.107:7001 192.168.0.107:7002 192.168.0.109:7003 192.168.0.109:7004 192.168.0.110:7005 192.168.0.110:7006  --cluster-replicas 1
+</code></pre>
+<p>其中，<code>--cluster-replicas 1</code>表示每个Master有一个Slave，Redis会保证尽量不将同一个Master和Slave分配在一台机器上。执行完命令后，输出如下：</p>
+<pre><code class="lang-SHELL">&gt;&gt;&gt; Performing hash slots allocation on 6 nodes...
+Master[0] -&gt; Slots 0 - 5460
+Master[1] -&gt; Slots 5461 - 10922
+Master[2] -&gt; Slots 10923 - 16383
+Adding replica 192.168.0.109:7004 to 192.168.0.107:7001
+Adding replica 192.168.0.110:7006 to 192.168.0.109:7003
+Adding replica 192.168.0.107:7002 to 192.168.0.110:7005
+M: 6ac3762d35e60af9d8d12f3ac148c8ede11b94af 192.168.0.107:7001
+   slots:[0-5460] (5461 slots) master
+S: 359dec6ff52d85c983f49c97997b98d91758f049 192.168.0.107:7002
+   replicates 94b96a1d009232fc013f9d15535000087c82248a
+M: 50d9fb7c86d15847233fc691f6e54e6173fd5d85 192.168.0.109:7003
+   slots:[5461-10922] (5462 slots) master
+S: 477af6a0d870cd61930d654667992eb4abeac920 192.168.0.109:7004
+   replicates 6ac3762d35e60af9d8d12f3ac148c8ede11b94af
+M: 94b96a1d009232fc013f9d15535000087c82248a 192.168.0.110:7005
+   slots:[10923-16383] (5461 slots) master
+S: e8091d7c48647d55a34fa83949600d025d68b879 192.168.0.110:7006
+   replicates 50d9fb7c86d15847233fc691f6e54e6173fd5d85
+Can I set the above configuration? (type 'yes' to accept): yes
+&gt;&gt;&gt; Nodes configuration updated
+&gt;&gt;&gt; Assign a different config epoch to each node
+&gt;&gt;&gt; Sending CLUSTER MEET messages to join the cluster
+Waiting for the cluster to join
+...
+&gt;&gt;&gt; Performing Cluster Check (using node 192.168.0.107:7001)
+M: 6ac3762d35e60af9d8d12f3ac148c8ede11b94af 192.168.0.107:7001
+   slots:[0-5460] (5461 slots) master
+   13816612910207598593 additional replica(s)
+M: 50d9fb7c86d15847233fc691f6e54e6173fd5d85 192.168.0.109:7003
+   slots:[5461-10922] (5462 slots) master
+   653934029518667777 additional replica(s)
+S: e8091d7c48647d55a34fa83949600d025d68b879 192.168.0.110:7006
+   slots: (0 slots) slave
+   replicates 50d9fb7c86d15847233fc691f6e54e6173fd5d85
+M: 94b96a1d009232fc013f9d15535000087c82248a 192.168.0.110:7005
+   slots:[10923-16383] (5461 slots) master
+   653934854152388609 additional replica(s)
+S: 477af6a0d870cd61930d654667992eb4abeac920 192.168.0.109:7004
+   slots: (0 slots) slave
+   replicates 6ac3762d35e60af9d8d12f3ac148c8ede11b94af
+S: 359dec6ff52d85c983f49c97997b98d91758f049 192.168.0.107:7002
+   slots: (0 slots) slave
+   replicates 94b96a1d009232fc013f9d15535000087c82248a
+[OK] All nodes agree about slots configuration.
+&gt;&gt;&gt; Check for open slots...
+&gt;&gt;&gt; Check slots coverage...
+[OK] All 16384 slots covered.
+</code></pre>
+<p>至此，3主3从的Redis Cluster集群搭建完毕。</p>
+<h2 id="-">二、集群操作</h2>
+<h3 id="2-1-">2.1 数据读写</h3>
+<p>我们可以尝试在ressmix-dsf01这台机器上，给Redis的Master节点写入一条数据：</p>
+<pre><code class="lang-SHELL">[root@ressmix-dsf01 src]# redis-cli -h 192.168.0.107 -p 7001
+
+192.168.0.107:7001&gt; set k1 v1
+(error) MOVED 12706 192.168.0.110:7005
+192.168.0.107:7001&gt; set k2 v2
+OK
+192.168.0.107:7001&gt; KEYS *
+1) "k2"
+</code></pre>
+<p>可以看到，对于k1这个键，返回了一个MOVED指令，说明k1对应的槽（slot）不在192.168.0.107:7001这个Master节点上，而是在192.168.0.110:7005上。</p>
+<blockquote>
+<p>我们如果希望Redis自动进行重定向，可以加上一个<code>-c</code>参数：redis-cli -h 192.168.0.107 -p 7001 -c 。</p>
+</blockquote>
+<h3 id="2-2-">2.2 高可用</h3>
+<p>我们可以kill掉一个Master节点，然后通过命令<code>redis-cli --cluster check 192.168.0.107:7001</code>看下集群状态，看看是否会发生故障自动转移和恢复。</p>
+<p>kill掉192.168.0.107:7001之前：</p>
+<pre><code class="lang-SHELL">[root@ressmix-dsf01 src]# redis-cli --cluster check 192.168.0.107:7001
+192.168.0.107:7001 (6ac3762d...) -&gt; 1 keys | 5461 slots | 1 slaves.
+192.168.0.109:7003 (50d9fb7c...) -&gt; 0 keys | 5462 slots | 1 slaves.
+192.168.0.110:7005 (94b96a1d...) -&gt; 0 keys | 5461 slots | 1 slaves.
+[OK] 1 keys in 3 masters.
+0.00 keys per slot on average.
+&gt;&gt;&gt; Performing Cluster Check (using node 192.168.0.107:7001)
+M: 6ac3762d35e60af9d8d12f3ac148c8ede11b94af 192.168.0.107:7001
+   slots:[0-5460] (5461 slots) master
+   13832323230561468417 additional replica(s)
+M: 50d9fb7c86d15847233fc691f6e54e6173fd5d85 192.168.0.109:7003
+   slots:[5461-10922] (5462 slots) master
+   625984512660078593 additional replica(s)
+S: e8091d7c48647d55a34fa83949600d025d68b879 192.168.0.110:7006
+   slots: (0 slots) slave
+   replicates 50d9fb7c86d15847233fc691f6e54e6173fd5d85
+M: 94b96a1d009232fc013f9d15535000087c82248a 192.168.0.110:7005
+   slots:[10923-16383] (5461 slots) master
+   625985406013276161 additional replica(s)
+S: 477af6a0d870cd61930d654667992eb4abeac920 192.168.0.109:7004
+   slots: (0 slots) slave
+   replicates 6ac3762d35e60af9d8d12f3ac148c8ede11b94af
+S: 359dec6ff52d85c983f49c97997b98d91758f049 192.168.0.107:7002
+   slots: (0 slots) slave
+   replicates 94b96a1d009232fc013f9d15535000087c82248a
+[OK] All nodes agree about slots configuration.
+&gt;&gt;&gt; Check for open slots...
+&gt;&gt;&gt; Check slots coverage...
+[OK] All 16384 slots covered.
+</code></pre>
+<p>然后kill掉192.168.0.107:7001，再check一下集群状态：</p>
+<pre><code class="lang-SHELL">[root@ressmix-dsf01 run]# redis-cli --cluster check 192.168.0.107:7002
+Could not connect to Redis at 192.168.0.107:7001: Connection refused
+192.168.0.109:7004 (477af6a0...) -&gt; 1 keys | 5461 slots | 0 slaves.
+192.168.0.109:7003 (50d9fb7c...) -&gt; 0 keys | 5462 slots | 1 slaves.
+192.168.0.110:7005 (94b96a1d...) -&gt; 0 keys | 5461 slots | 1 slaves.
+[OK] 1 keys in 3 masters.
+0.00 keys per slot on average.
+&gt;&gt;&gt; Performing Cluster Check (using node 192.168.0.107:7002)
+S: 359dec6ff52d85c983f49c97997b98d91758f049 192.168.0.107:7002
+   slots: (0 slots) slave
+   replicates 94b96a1d009232fc013f9d15535000087c82248a
+S: e8091d7c48647d55a34fa83949600d025d68b879 192.168.0.110:7006
+   slots: (0 slots) slave
+   replicates 50d9fb7c86d15847233fc691f6e54e6173fd5d85
+M: 477af6a0d870cd61930d654667992eb4abeac920 192.168.0.109:7004
+   slots:[0-5460] (5461 slots) master
+M: 50d9fb7c86d15847233fc691f6e54e6173fd5d85 192.168.0.109:7003
+   slots:[5461-10922] (5462 slots) master
+   643121260372426753 additional replica(s)
+M: 94b96a1d009232fc013f9d15535000087c82248a 192.168.0.110:7005
+   slots:[10923-16383] (5461 slots) master
+   643122188085362689 additional replica(s)
+[OK] All nodes agree about slots configuration.
+&gt;&gt;&gt; Check for open slots...
+&gt;&gt;&gt; Check slots coverage...
+[OK] All 16384 slots covered.
+</code></pre>
+<p>可以看到192.168.0.109:7004从Slave转变为了Master，说明故障自动转移和恢复是成功的。然后，我们再重新启动192.168.0.107:7001，再check一下集群状态，发现192.168.0.107:7001已经变成了Slave：</p>
+<pre><code class="lang-SHELL">[root@ressmix-dsf01 init.d]# redis-cli --cluster check 192.168.0.107:7002
+192.168.0.109:7004 (477af6a0...) -&gt; 1 keys | 5461 slots | 1 slaves.
+192.168.0.109:7003 (50d9fb7c...) -&gt; 0 keys | 5462 slots | 1 slaves.
+192.168.0.110:7005 (94b96a1d...) -&gt; 0 keys | 5461 slots | 1 slaves.
+[OK] 1 keys in 3 masters.
+0.00 keys per slot on average.
+&gt;&gt;&gt; Performing Cluster Check (using node 192.168.0.107:7002)
+S: 359dec6ff52d85c983f49c97997b98d91758f049 192.168.0.107:7002
+   slots: (0 slots) slave
+   replicates 94b96a1d009232fc013f9d15535000087c82248a
+S: 6ac3762d35e60af9d8d12f3ac148c8ede11b94af 192.168.0.107:7001
+   slots: (0 slots) slave
+   replicates 477af6a0d870cd61930d654667992eb4abeac920
+S: e8091d7c48647d55a34fa83949600d025d68b879 192.168.0.110:7006
+   slots: (0 slots) slave
+   replicates 50d9fb7c86d15847233fc691f6e54e6173fd5d85
+M: 477af6a0d870cd61930d654667992eb4abeac920 192.168.0.109:7004
+   slots:[0-5460] (5461 slots) master
+   603169234066866177 additional replica(s)
+M: 50d9fb7c86d15847233fc691f6e54e6173fd5d85 192.168.0.109:7003
+   slots:[5461-10922] (5462 slots) master
+   603169612023988225 additional replica(s)
+M: 94b96a1d009232fc013f9d15535000087c82248a 192.168.0.110:7005
+   slots:[10923-16383] (5461 slots) master
+   603170539736924161 additional replica(s)
+[OK] All nodes agree about slots configuration.
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了redis cluster的部署方式，读者可以自己在本地尝试搭建一个redis cluster集群，以便加深理解。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

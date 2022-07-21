@@ -1,0 +1,62 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（22）——jamp和MAT实战</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（22）——jamp和MAT实战</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>我们通过jstat进行分析，发现Full GC非常频繁，基本上每隔两分钟就会执行一次，而且每次Full GC的时间长达10秒。</p>
+<h3 id="1-1-">1.1 案例背景</h3>
+<p>系统的JVM内存模型如下，当时给Java堆内存分配了20G，其中年轻代10G，老年代10G：</p>
+<p><img src="./img/20200204203156360.png" style="zoom: 45%;"/></p>
+<p>事实上，虽然分配了那么大的内存空间给年轻代和老年代，但是通过jstat分析发现，Eden区大概1分钟就会被占满，然后触发一次Young GC，而且Young GC过后有几个G的对象都会存活并进入老年代：</p>
+<p><img src="./img/20200204203204881.png" style="zoom: 50%;"/></p>
+<p>这说明系统代码运行时会产生大量对象，经常在1分钟过后就塞满Eden，然后会触发Young GC，但是由于程序处理极慢，导致大量存活对象Survivor区无法容纳，从而进入老年代。</p>
+<p>由于老年代的内存有10GB，所以在没有采用G1的情况下，一次Full GC的回收速度很慢，长达10s，这就直接导致了工作线程无法正常运行，对于用户来说就是系统卡死。</p>
+<h2 id="-jvm-">二、JVM优化</h2>
+<h3 id="2-1-">2.1 优化思路</h3>
+<p>通过上述分析，我们可以判断一定是程序代码的某处在不断生成各种对象，导致系统加载过多数据到内存中。所以，要对这个案例进行优化，就必须分析到底是程序哪里在源源不断地创建对象。</p>
+<p>我们可以先通过jmap生成一个JVM内存快照文件，然后通过MAT进行分析。下面我们通过一段示例代码来排查：</p>
+<pre><code class="lang-java">public class Demo1{
+    public static void main(String[] args){
+        List&lt;Data&gt; datas = new ArrayList&lt;&gt;();
+        for(int i=0; i&lt;10000; i++){
+            datas.add(new Data());
+        }
+        Thread.sleep(1 * 60 * 60 * 1000);
+    }
+}
+</code></pre>
+<h3 id="2-2-jvm-">2.2 生成JVM内存快照</h3>
+<p>首先执行上述这段程序，通过<code>jps</code>获取JVM进程ID——1177：</p>
+<p><img src="./img/20200204203213003.png" style="zoom: 45%;"/></p>
+<p>然后执行jmap命令导出JVM内存快照：<br/><code>jmap -dump:live,format=b,file=dump.hprof 1177</code></p>
+<h3 id="2-3-mat-">2.3 MAT分析</h3>
+<p>线上dump出来的内存快照一般都有几个G，比如我们上述的程序就有8个多G的内存快照，所以运行MAT时，务必将<code>MemoryAnalyzer.ini</code>中的启动堆大小设置为8G以上：</p>
+<p><img src="./img/20200204203222694.png" style="zoom: 70%;"/></p>
+<p>启动MAT后，选择“Leak Suspects”，也就是内存泄漏分析，接着我们会看到下面的图：</p>
+<p><img src="./img/20200204203238717.png" style="zoom: 50%;"/></p>
+<p><img src="./img/20200204203250790.png" style="zoom: 55%;"/></p>
+<p>“Problem Suspect1”告诉我们：main线程通过局部变量引用占据内存24.97%的对象，而且占据内存的是一个<code>java.lang.Object[]</code>数组。</p>
+<p>我们可以通过“Detail”链接进去查看这个数组到底是什么，通过这个详细说明，我们可以看到mian线程中引用的是一个<code>java.util.ArrayList</code>，里面的每个元素都是<code>Demo1$Data</code>对象：</p>
+<p><img src="./img/20200204203259584.png" style="zoom: 50%;"/></p>
+<p>然后，知道了这些不断创建的对象是什么后，我们还希望知道程序是在哪段代码创建了这些对象。如下图所示，先点击页面中的“See stacktrace”链接，就会进入一个线程执行代码堆栈的调用链：</p>
+<p><img src="./img/20200204203316994.png" style="zoom: 60%;"/></p>
+<p><img src="./img/20200204203327416.png" style="zoom: 50%;"/></p>
+<p>可以看到，问题定位到了Demo1类的main方法内的第12行，最终发现是这个线程执行了<code>String.split()</code>方法导致产生了大量的对象。</p>
+<h3 id="2-4-">2.4 问题解决</h3>
+<p><em>为什么<code>String.split()</code>方法会造成内存泄漏呢？</em></p>
+<p>在JDK1.6以前，<code>String.split()</code>方法对于“Hello World Ressmix”这种字符串，底层是基于一个数组来存放的，比如[H,e,l,l,o, ,W,o,r,l,d, ,R,e,s,s,m,i,x]，当基于空格切割时，比如“Hello”，不会存到一个新的数组中，而是采用偏移量来表明是对应原数组中的那一段。</p>
+<p>但是JDK1.7以后，每个切割出来的子字符串都对应一个全新的数组。</p>
+<p>所以，上述案例中程序的问题就是加载了大量数据出来，可能一次几十万条，然后通过split对这些字符串进行切割，导致字符串数组对象暴增几十倍，这就是为什么系统会频繁产生大量对象的原因。</p>
+<p>解决方案就是对<code>String.split()</code>处的代码进行优化，避免同时加载大量数据并进行切割。</p>
+<h2 id="-">三、总结</h2>
+<p>本章通过一个内存泄漏的案例，讲解了分析此类问题的思路和解决方法。jmap和MAT经常组合在一起使用，用于线上问题此类的排查。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

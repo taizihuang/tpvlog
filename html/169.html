@@ -1,0 +1,78 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（二三）——聚合分析：遍历算法</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（二三）——聚合分析：遍历算法</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来讲下Elasticsearch在进行聚合分析时，所用到的两种遍历算法：<strong>深度优先遍历</strong>和<strong>广度优先遍历</strong>。深度优先遍历和广度优先遍历其实是图的两种基本遍历算法。</p>
+<h2 id="-">一、深度优先</h2>
+<p>假设我们现在有一些关于电影的数据集，每条doc里面会有一个数组类型的字段，存储着表演该电影的所有演员名字：</p>
+<pre><code class="lang-JAVA">{
+  "actors" : [
+    "Fred Jones",
+    "Mary Jane",
+    "Elizabeth Worthing"
+  ]
+}
+</code></pre>
+<p>如果我们想要先按演员分组，找到出演影片最多的10个演员；然后，对于每个子组再找出与当前演员合作最多的5个演员，那么可以像下面这样构造请求：</p>
+<pre><code class="lang-JAVA">{
+  "aggs" : {
+    "actors" : {
+      "terms" : {
+         "field" : "actors",
+         "size" :  10
+      },
+      "aggs" : {
+        "costars" : {
+          "terms" : {
+            "field" : "actors",
+            "size" :  5
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>但是， 这个看上去简单的查询可以轻而易举地消耗大量内存，我们可以通过在内存中构建一个树来查看这个 <code>terms</code> 聚合。 <code>actors</code> 聚合会构建树的第一层，每个演员都有一个桶。然后，内套在第一层的每个节点之下， <code>costar</code> 聚合会构建第二层，每个联合出演一个桶，这意味着每部影片会生成 nxn 个桶！</p>
+<center><br/> <img src="./img/20200317194223459.png" style="zoom:50%"><br/></img></center>
+<p>上述聚合分析，只是希望得到前10位演员和与他们联合出演者，但是为了得到最终的结果，我们创建了一个有nxn桶的树，然后对其排序，取 top10。如果我们有 2 亿doc，想要得到前 100 位演员以及与他们合作最多的 20 位演员，可以推测，聚合出来的分组数非常大。上述这种遍历方式就是深度优先。</p>
+<h2 id="-">二、广度优先</h2>
+<p>Elasticsearch 允许我们改变聚合的 <em>集合模式</em> ，就是为了应对这种状况。 我们之前展示的策略叫做 <em>深度优先</em> ，它是默认设置， 先构建完整的树，然后修剪无用节点。 <em>深度优先</em> 的方式对于大多数聚合都能正常工作，但对于上述情形就不太适用。 </p>
+<p>为了应对这些特殊的应用场景，我们应该使用另一种集合策略叫做 <em>广度优先</em> 。这种策略的工作方式有些不同，它先执行第一层聚合， 然后先做修剪，再执行下一层聚合。</p>
+<p>在我们的示例中， <code>actors</code> 聚合会首先执行，在这个时候，我们的树只有一层，但我们已经知道了前 10 位的演员，这就没有必要保留其他的演员信息，因为它们无论如何都不会出现在前十位中。</p>
+<center><br/> <img src="./img/20200317194235110.png" style="zoom:65%"/><br/></center>
+<center><br/> <img src="./img/20200317194247285.png" style="zoom:65%"/><br/></center>
+<p>要使用广度优先，只需简单的通过参数 <code>collect_mode</code> 开启：</p>
+<pre><code class="lang-JAVA">{
+  "aggs" : {
+    "actors" : {
+      "terms" : {
+         "field" : "actors",
+         "size" : 10,
+         "collect_mode" : "breadth_first" 
+      },
+      "aggs" : {
+        "costars" : {
+          "terms" : {
+            "field" : "actors",
+            "size" :  5
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>广度优先<strong>仅仅适用于每个组的聚合数量远小于当前总组数的情况</strong>，因为广度优先会在内存中缓存裁剪后的每个组的所有数据，如果裁剪后的每个组下的数据量非常大，广度优先就不是一个好的选择，这也是为什么深度优先作为默认策略的原因。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我们介绍了Elasticsearch的聚合分析遍历策略，主要有深度优先遍历和广度优先遍历，默认采用深度优先遍历。如果读者对这两种算法感兴趣，可以进一步阅读我的<a href="https://www.jianshu.com/p/cfec49bfce5d">传统算法系列</a>。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

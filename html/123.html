@@ -1,0 +1,49 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（五）——分布式框架之高性能：消息有序性</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（五）——分布式框架之高性能：消息有序性</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、何谓有序性</h2>
+<p>消息有序性，就是说进入消息队列的消息都是有顺序的，消息应该按照FIFO的顺序被消费。这对消费者端的处理逻辑是有要求的，比如消息按照消息A、消息B、消息C的顺序先后进入队列，那么消费者程序的处理逻辑也应该是先执行消息A、再执行消息B、最后执行消息C。</p>
+<p>我们在<a href="https://www.tpvlog.com/article/78">《分布式理论之高性能：读写分离》</a>中介绍过MySQL的复制原理：整个复制过程实际上就是 Slave节点 从Master节点获取binlog日志，然后再顺序执行日志中所记录的各种操作。如果Slave中的SQL线程在消费数据时不保证顺序，那原来的[增加、修改、删除]可能就变成了[删除、修改、增加]，就会全部乱套。</p>
+<p>本章，我们依旧以RabbitMQ和Kafka为例，看下他俩是如何保证消息的有序性的。</p>
+<h2 id="-rabbitmq">二、RabbitMQ</h2>
+<p>在RabbitMQ中，当多个消费者对同一个queue进行消费时，是不能保证消息的有序执行的。比如消息按照消息A、消息B、消息C的顺序先后进入一个队列，但是当有多个消费者同时消费时，不能保证消费也按照A、B、C的顺序被依次执行。</p>
+<p>所以RabbitMQ的解决方案就是为每一个消费者指定一个专门的队列，如下图：</p>
+<center><br/> <img src="./img/20200212001806712.png" style="zoom:50%"><br/></img></center>
+<p>上图中，只要消息按照A、B、C的顺序入队，那每个消费者获取并执行消息的顺序也一定是A、B、C。</p>
+<blockquote>
+<p>注意，由于可能存在网络延迟的因素，生产者需要确保按顺序投递成功。</p>
+</blockquote>
+<h2 id="-kafka">三、Kafka</h2>
+<p>首先，<strong>Kafka默认会保证同一个partition内的消息都是有序的</strong>，所以我们只要能够让生产者在发送消息时将需要保证顺序的几条消息都发送到同一个分区，那么消费者消费时，消息就是有序的。</p>
+<p>生产者在发送消息时，会通过以下方式之一确定消息所属的partition：</p>
+<ul>
+<li>显式指定partition</li>
+<li>不指定partition，指定key：根据key的hash值与分区数进行运算，确定发送到哪个partition分区</li>
+<li>不指定partition，不指定key：轮询各分区发送</li>
+</ul>
+<p>所以，我们只要采用<strong>指定分区</strong>或<strong>指定key</strong>的方式就可保证消息的有序性，如下图：</p>
+<center><br/> <img src="./img/20200212001815229.png" style="zoom:50%"/><br/></center>
+<blockquote>
+<p>这种情况下，如果消费者内部是单线程去依次执行每个消息，那没有问题；如果是多线程执行，就需要考虑consumer内的消费有序性，一般可以利用内存队列来解决。</p>
+</blockquote>
+<p>消费者内部多线程情况下保证消息有序的方案如下：</p>
+<center><br/> <img src="./img/20200212001824656.png" style="zoom:50%"/><br/></center>
+<p>我们一般需要先进行压测，看下如果消费在单一线程下处理消息的吞吐量，如果一秒钟只能处理几十个消息，那实在是太低了，得考虑多线程方案。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我们介绍如何保证消息队列的消息有序性，根本思路就是两点：</p>
+<ol>
+<li>保证队列内的消息FIFO；</li>
+<li>保证一个消费者对应单独的一个队列；</li>
+</ol>
+<p>在实际业务中，需要消息有序性的场景其实并不多。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

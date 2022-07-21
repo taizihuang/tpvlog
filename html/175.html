@@ -1,0 +1,80 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch进阶（六）——性能调优：慢查询日志</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch进阶（六）——性能调优：慢查询日志</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们来看下Elasticsearch的性能调优，我们在使用Elasticsearch的过程中，可能会出现一次搜索或聚合消耗十几秒的情况。Elasticsearch的核心操作，无非就是两种：写入（增删改）、查询（搜索）。</p>
+<p>那么，当出现性能问题时，我们首先要做的就是识别到底是哪种操作造成的，这就是<strong>慢查询分析</strong>。在Elasticsearch中，无论你是执行增删改，还是执行搜索，都是到某个shard上面去执行的，shard会记录<strong><em>慢查询日志</em></strong>。</p>
+<h2 id="-">一、慢查询日志</h2>
+<h3 id="1-1-">1.1 阈值设置</h3>
+<p>在<code>elasticsearch.yml</code>中，可以通过设置以下参数来配置慢查询的阈值：</p>
+<pre><code class="lang-JAVA">index.search.slowlog.threshold.query.warn: 10s
+index.search.slowlog.threshold.query.info: 5s
+index.search.slowlog.threshold.query.debug: 2s
+index.search.slowlog.threshold.query.trace: 500ms
+
+index.search.slowlog.threshold.fetch.warn: 1s
+index.search.slowlog.threshold.fetch.info: 800ms
+index.search.slowlog.threshold.fetch.debug: 500ms
+index.search.slowlog.threshold.fetch.trace: 200ms
+</code></pre>
+<blockquote>
+<p>比如说，设置一个搜索的阈值5s，那么一旦某个搜索请求超过了5s，就会记录一条慢查询日志到日志文件中。</p>
+</blockquote>
+<p>我们也可以通过如下的配置，来设置索引写入慢日志的阈值：</p>
+<pre><code class="lang-JAVA">index.indexing.slowlog.threshold.index.warn: 10s
+index.indexing.slowlog.threshold.index.info: 5s
+index.indexing.slowlog.threshold.index.debug: 2s
+index.indexing.slowlog.threshold.index.trace: 500ms
+index.indexing.slowlog.level: info
+index.indexing.slowlog.source: 1000
+</code></pre>
+<h3 id="1-2-">1.2 日志配置</h3>
+<p>慢查询日志具体的格式，都是在<code>log4j2.properties</code>中配置的，比如下面的配置：</p>
+<pre><code class="lang-JAVA">appender.index_search_slowlog_rolling.type = RollingFile
+appender.index_search_slowlog_rolling.name = index_search_slowlog_rolling
+appender.index_search_slowlog_rolling.fileName = ${sys:es.logs}_index_search_slowlog.log
+appender.index_search_slowlog_rolling.layout.type = PatternLayout
+appender.index_search_slowlog_rolling.layout.pattern = [%d{ISO8601}][%-5p][%-25c] %.10000m%n
+appender.index_search_slowlog_rolling.filePattern = ${sys:es.logs}_index_search_slowlog-%d{yyyy-MM-dd}.log
+appender.index_search_slowlog_rolling.policies.type = Policies
+appender.index_search_slowlog_rolling.policies.time.type = TimeBasedTriggeringPolicy
+appender.index_search_slowlog_rolling.policies.time.interval = 1
+appender.index_search_slowlog_rolling.policies.time.modulate = true
+
+logger.index_search_slowlog_rolling.name = index.search.slowlog
+logger.index_search_slowlog_rolling.level = trace
+logger.index_search_slowlog_rolling.appenderRef.index_search_slowlog_rolling.ref = index_search_slowlog_rolling
+logger.index_search_slowlog_rolling.additivity = false
+</code></pre>
+<p>也可以设置索引慢写入日志的格式：</p>
+<pre><code class="lang-JAVA">appender.index_indexing_slowlog_rolling.type = RollingFile
+appender.index_indexing_slowlog_rolling.name = index_indexing_slowlog_rolling
+appender.index_indexing_slowlog_rolling.fileName = ${sys:es.logs}_index_indexing_slowlog.log
+appender.index_indexing_slowlog_rolling.layout.type = PatternLayout
+appender.index_indexing_slowlog_rolling.layout.pattern = [%d{ISO8601}][%-5p][%-25c] %marker%.10000m%n
+appender.index_indexing_slowlog_rolling.filePattern = ${sys:es.logs}_index_indexing_slowlog-%d{yyyy-MM-dd}.log
+appender.index_indexing_slowlog_rolling.policies.type = Policies
+appender.index_indexing_slowlog_rolling.policies.time.type = TimeBasedTriggeringPolicy
+appender.index_indexing_slowlog_rolling.policies.time.interval = 1
+appender.index_indexing_slowlog_rolling.policies.time.modulate = true
+
+logger.index_indexing_slowlog.name = index.indexing.slowlog.index
+logger.index_indexing_slowlog.level = trace
+logger.index_indexing_slowlog.appenderRef.index_indexing_slowlog_rolling.ref = index_indexing_slowlog_rolling
+logger.index_indexing_slowlog.additivity = false
+</code></pre>
+<blockquote>
+<p>ES集群运维管理员一般每天检查一次日志，如果发现某个查询特别慢，就要通知写这个查询的开发人员，让他们去优化一下性能。</p>
+</blockquote>
+<h2 id="-">二、总结</h2>
+<p>本章，我介绍了Elasticsearch中的慢查询日志，这个功能一般都会在生产中开启。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

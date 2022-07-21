@@ -1,0 +1,29 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（26）——SystemGC</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（26）——SystemGC</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、案例背景</h2>
+<p>本章将介绍一个因为程序员同学不懂JVM的GC机制而导致的系统卡死的案例。</p>
+<p>首先，这个系统上线之后，平时都还算正常，结果有一次大促活动的时候，系统直接卡死不动了。这个时候，我们首先想到的是可不可能是因为频繁Full GC导致Stop the World，正常工作线程无法执行。</p>
+<h3 id="1-1-">1.1 存在问题</h3>
+<p>我们通过jstat进行分析，发现JVM中各个区域的内存使用都正常，新生代对象增长也不快，老年代也才使用了10%左右的空间，永久代也就使用了20%。</p>
+<p>但是，jstat日志显示，JVM竟然每秒执行一次Full GC，每次都耗时几百毫秒。</p>
+<p>既然Java堆内存都正常，为啥会频繁Full GC？这是我们立马想到，是不是有开发人员在代码中写了<code>System.gc()</code>这种代码，结果通过代码走查，发现确实如此。</p>
+<h2 id="-system-gc-">二、System.gc方法</h2>
+<h3 id="2-1-">2.1 优化前</h3>
+<p>开发同学写<code>System.gc()</code>这行代码的思路是这样的：某段代码会一下子加载了好多数据，处理完成后这批数据就不用了，占用太多内存，所以就干脆显示调用GC方法把它们回收掉吧。</p>
+<p>结果在平时没什么问题，因为流量很低。但是大促期间，访问量很高，<code>System.gc()</code>方法被频繁调用，因此频繁触发Full GC，从而导致了上述问题。</p>
+<h3 id="2-2-">2.2 优化后</h3>
+<p>针对这个问题，解决方案就是<strong>禁止在代码中显式调用<code>System.gc()</code>方法</strong>，GC完全交由JVM自己去处理，可以通过配置JVM参数<code>-XX:+DisableExplicitGC</code>来强制屏蔽。</p>
+<h2 id="-">三、总结</h2>
+<p>针对本章案例中的问题，我们平时自己写代码时，不要自己去调用<code>System.gc()</code>方法随便触发GC，一方面可以通过在JVM参数中加入<code>-XX:+DisableExplicitGC</code>显示禁止代码中的GC操作，另一方面也要加强对开发人员的JVM相关知识的培训。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

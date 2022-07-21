@@ -1,0 +1,65 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（十）——分布式框架之高性能：Redis线程模型</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（十）——分布式框架之高性能：Redis线程模型</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在各类分布式框架中，还有一类是和高性能息息相关的，那就是分布式缓存。目前生产环境常用的开源分布式缓存框架就是Redis和Memcached，它们之间的主要区别，我这里简单比较下：</p>
+<ul>
+<li>Redis拥有更多的数据结构，支持更丰富的数据操作。</li>
+<li>Memcached没有原生的集群模式，而Redis原生支持cluster模式。</li>
+</ul>
+<p>目前Redis在工业环境中用得比较多，所以本系列只介绍Redis。如果读者对Memcached感兴趣，可以参考其<a href="https://memcached.org/">官方文档</a>。</p>
+<h2 id="-redis-">一、Redis线程模型</h2>
+<p>Redis是典型的单线程架构，所有的读写操作都是在服务端的一条主线程中完成的。Redis客户端与服务端的模型如下图，每次客户端调用都经历了<strong><em>发送命令</em></strong>、<strong><em>执行命令</em></strong>、<strong><em>返回结果</em></strong>三个过程：</p>
+<center><br/> <img src="./img/20200322144650987.png" style="zoom:65%"><br/></img></center>
+<p><em>既然是单线程，为什么Redis能实现这么高的读写性能呢？</em></p>
+<p>因为Redis基于<a href=""><strong>Reactor</strong> 模式</a>开发了自己的网络事件处理器——<strong>文件事件处理器（file<br/>event handler）</strong>。</p>
+<p>文件事件处理器，是单线程模式运行的，但是使用了I/O多路复用技术，同时监听多个套接字，并为套接字关联不同的事件处理器，当套接字上产生文件事件时，就会调用相应的事件处理器进行处理，这样就可以实现高性能的网络通信模型，又可以跟内部其他单线程的模块进行对接，保证了Redis内部线程模型的简单性。</p>
+<p>文件事件处理器一共包含四个部分，它们分别是<strong>套接字（Socket）</strong>、<strong>I/O多路复用程序</strong>、<strong>文件事件分派器</strong>以及<strong>事件处理器</strong>，如下图：</p>
+<center><br/> <img src="./img/20200322144703373.png" style="zoom:70%"/><br/></center>
+<p>可以看到，I/O多路复用程序负责监听多个socket，并向文件事件派发器传递那些产生了事件的socket。</p>
+<p>尽管多个文件事件可能会并发地出现，但I/O多路复用程序总是会将所有产生的socket都放到同一个队列里边，然后文件事件处理器会以有序、同步的方式处理该队列中的每个socket：根据每个socket当前产生的事件，来选择对应的事件处理器来处理。</p>
+<h3 id="1-1-socket-">1.1 套接字（socket）</h3>
+<p>Redis服务端通过Socket与客户端连接。每当一个套接字准备好执行连接应答（accept）、读取（read）、写入（write）、关闭（close）等操作时，就会产生一个文件事件。 因为一个服务器通常会连接多个套接字， 所以多个文件事件有可能会并发地出现。</p>
+<p>比如，当socket变得可读时，socket就会产生一个<code>AE_READABLE</code>事件；当socket变得可写的时候，socket会产生一个<code>AE_WRITABLE</code>事件。</p>
+<h3 id="1-2-i-o-">1.2 I/O 多路复用程序</h3>
+<p>I/O 多路复用程序主要负责监听多个套接字，并向文件事件分派器传送那些产生了事件的套接字。</p>
+<p>I/O多路复用程序会将所有产生事件的套接字都入队到一个队列里， 然后通过这个队列，以有序（sequentially）、同步（synchronously）、每次一个套接字的方式向文件事件分派器传送套接字。 当上一个套接字产生的事件被处理完毕之后， I/O多路复用程序才会继续向文件事件分派器传送下一个套接字。</p>
+<center><br/> <img src="./img/20200322144714072.png" style="zoom:75%"/><br/></center>
+<p>Redis 使用的IO多路复用技术主要有：<code>select</code>、<code>epoll</code>、<code>evport</code>和<code>kqueue</code>等。每个IO多路复用函数库在 Redis 源码中都对应一个单独的文件，比如ae_select.c，ae_epoll.c， ae_kqueue.c等。Redis 会根据不同的操作系统，按照不同的优先级选择多路复用技术。事件响应框架一般都采用该架构，比如 netty 和 libevent：</p>
+<center><br/> <img src="./img/20200322144723429.jpg" style="zoom:75%"/><br/></center>
+<h3 id="1-3-">1.3 文件事件分派器</h3>
+<p>文件事件分派器，负责监听多个套接字，接收 IO 多路复用程序传来的套接字，并根据套接字产生的事件类型， 调用相应的事件处理器，比如：<br/>如果是客户端要连接redis，那么会为socket关联连接应答处理器；<br/>如果是客户端要写数据到redis，那么会为socket关联命令请求处理器；<br/>如果是客户端要从redis读数据，那么会为socket关联命令回复处理器。</p>
+<h3 id="1-4-">1.4 事件处理器</h3>
+<p>服务器会为执行不同任务的套接字关联不同的事件处理器，这些处理器是一个个函数， 它们定义了某个事件发生时， 服务器应该执行的动作。</p>
+<h2 id="-">二、示例</h2>
+<p>我们以一次Redis客户端的请求，来看下上述的整个流程：</p>
+<center><br/> <img src="./img/20200322144741062.jpg" style="zoom:70%"/><br/></center>
+<ol>
+<li><p>Redis服务启动初始化的时候，Redis会将【连接应答处理器】跟<code>AE_READABLE</code>事件关联起来；</p>
+</li>
+<li><p>如果一个Redis客户端发起连接请求，此时会产生一个<code>AE_READABLE</code>事件，然后由【连接应答处理器】来处理跟客户端建立连接，创建客户端对应的socket，同时将这个socket的<code>AE_READABLE</code>事件跟【命令请求处理器】关联起来；</p>
+</li>
+<li><p>当客户端向Redis发起命令请求时，首先就会在socket产生一个<code>AE_READABLE</code>事件，然后由对应的【命令请求处理器】来处理。这个【命令请求处理器】就会从socket中读取请求相关数据，然后进行执行和处理；</p>
+</li>
+<li><p>当Redis准备好了给客户端的响应数据后，就会将socket的<code>AE_WRITABLE</code>事件跟【命令回复处理器】关联起来，当客户端准备好读取响应数据时，就会在socket上产生一个<code>AE_WRITABLE</code>事件，对应的【命令回复处理器】会将准备好的响应数据写入socket，供客户端来读取；</p>
+</li>
+<li><p>【命令回复处理器】写完之后，就会删除这个socket的<code>AE_WRITABLE</code>事件和【命令回复处理器】的关联关系。</p>
+</li>
+</ol>
+<h2 id="-">三、总结</h2>
+<p>Redis属于单线程模型，但是效率非常高，每秒能够读写上万条数据，其主要原因如下：</p>
+<ol>
+<li>纯内存操作；</li>
+<li>核心是基于非阻塞的IO多路复用机制；</li>
+<li>单线程反而避免了多线程的频繁上下文切换问题。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

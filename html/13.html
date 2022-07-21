@@ -1,0 +1,159 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程基础（十）—— Work Thread模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程基础（十）—— Work Thread模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、定义</h2>
+<p>Work Thread模式和Thread-Per-Message模式类似，Thread-Per-Message每次都创建一个新的线程处理请求，而Work Thread模式预先会创建一个线程池（Thread  Pool），每次从线程池中取出线程处理请求。</p>
+<h2 id="-">二、模式案例</h2>
+<center><br/><img src="./img/20191022011050338.png" style="zoom:67%;"><br/></img></center>
+<p><em>Request请求类：</em></p>
+<pre><code class="lang-java">public class Request {
+    private final String name;
+    private final int number;
+    private static final Random random = new Random();
+    public Request(String name, int number) {
+        this.name = name;
+        this.number = number;
+    }
+    public void execute() {
+        System.out.println(Thread.currentThread().getName() + " executes " + this);
+        try {
+            Thread.sleep(random.nextInt(1000));
+        } catch (InterruptedException e) {
+        }
+    }
+    public String toString() {
+        return "[ Request from " + name + " No." + number + " ]";
+    }
+}
+</code></pre>
+<p><em>Client线程类：</em><br/>Client线程类用来送出请求：</p>
+<ul>
+<li>创建Request实例</li>
+<li>将这个实例传送给Channel类的putRequest方法</li>
+</ul>
+<pre><code class="lang-java">public class ClientThread extends Thread {
+    private final Channel channel;
+    private static final Random random = new Random();
+    public ClientThread(String name, Channel channel) {
+        super(name);
+        this.channel = channel;
+    }
+    public void run() {
+        try {
+            for (int i = 0; true; i++) {
+                Request request = new Request(getName(), i);
+                channel.putRequest(request);
+                Thread.sleep(random.nextInt(1000));
+            }
+        } catch (InterruptedException e) {
+        }
+    }
+}
+</code></pre>
+<p><em>Worker线程类：</em><br/>WorkerThread类表示工人线程，工人线程可以执行以下动作：</p>
+<ul>
+<li>从Channel实例取出Request实例</li>
+<li>调用Request实例的execute方法</li>
+</ul>
+<pre><code class="lang-java">public class WorkerThread extends Thread {
+    private final Channel channel;
+    public WorkerThread(String name, Channel channel) {
+        super(name);
+        this.channel = channel;
+    }
+    public void run() {
+        while (true) {
+            Request request = channel.takeRequest();
+            request.execute();
+        }
+    }
+}
+</code></pre>
+<p><em>Channel类：</em></p>
+<pre><code class="lang-java">/**
+ *Channel类可用来接受、传送工作请求，并保存工人线程。
+ */
+public class Channel {
+    private static final int MAX_REQUEST = 100; // 最大请求数
+    private final Request[] requestQueue;         // 请求队列
+    private int tail;
+    private int head;
+    private int count;
+    private final WorkerThread[] threadPool;
+
+    public Channel(int threads) {
+        this.requestQueue = new Request[MAX_REQUEST];
+        this.head = 0;
+        this.tail = 0;
+        this.count = 0;
+
+        threadPool = new WorkerThread[threads];
+        for (int i = 0; i &lt; threadPool.length; i++) {
+            threadPool[i] = new WorkerThread("Worker-" + i, this);
+        }
+    }
+    public void startWorkers() {
+        for (int i = 0; i &lt; threadPool.length; i++) {
+            threadPool[i].start();
+        }
+    }
+    public synchronized void putRequest(Request request) {
+        while (count &gt;= requestQueue.length) {
+            try {
+                wait();
+            } catch (InterruptedException e) {
+            }
+        }
+        requestQueue[tail] = request;
+        tail = (tail + 1) % requestQueue.length;
+        count++;
+        notifyAll();
+    }
+    public synchronized Request takeRequest() {
+        while (count &lt;= 0) {
+            try {
+                wait();
+            } catch (InterruptedException e) {
+            }
+        }
+        Request request = requestQueue[head];
+        head = (head + 1) % requestQueue.length;
+        count--;
+        notifyAll();
+        return request;
+    }
+}
+</code></pre>
+<p><em>执行：</em></p>
+<pre><code class="lang-java">public class Main {
+    public static void main(String[] args) {
+        Channel channel = new Channel(5);
+        channel.startWorkers();
+        new ClientThread("Alice", channel).start();
+        new ClientThread("Bobby", channel).start();
+        new ClientThread("Chris", channel).start();
+    }
+}
+</code></pre>
+<h2 id="-">三、模式讲解</h2>
+<p>Work Thread模式的角色如下：</p>
+<ul>
+<li>Client（委托人）参与者<br/>Client参与者会创建请求(Request)，然后传送给Channel参与者。</li>
+<li>Channel（通道）参与者<br/>Channel参与者保存Request请求队列，同时会预创建Worker线程。</li>
+<li>Worker（工人）参与者<br/>Worker参与者会从Channel获取Request。</li>
+<li>Request（请求）参与者<br/>Worker参与者会从Channel获取Request。</li>
+</ul>
+<center><br/><img src="./img/20191022011057774.png" style="zoom: 80%;"/><br/></center>
+<center><br/><img src="./img/20191022011106546.png" style="zoom:80%;"/><br/></center>
+<p><em>注：启动线程是一项繁重的工作，Worker Thread模式预先创建一批线程，可以重复使用线程，达到资源再利用、提升性能的目的。</em></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

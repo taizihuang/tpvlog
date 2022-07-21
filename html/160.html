@@ -1,0 +1,142 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十四）——相关度分数算法</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十四）——相关度分数算法</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在使用Elasticsearch检索的过程中，结果都会包含一个相关度分数（relevance score），本章我们就来看看Elasticsearch到底是如何计算这个分数的。</p>
+<p>Elasticsearch进行相关度分数计算时，核心步骤就包含三点：</p>
+<ol>
+<li>利用boolean model进行document过滤；</li>
+<li>利用TF/IDF算法计算单个term的分数；</li>
+<li>利用vector space model整合最终的相关度分数。</li>
+</ol>
+<h2 id="-bool-model">一、bool model</h2>
+<p>所谓bool model，就是Elasticsearch中的各种doc过滤语法，比如bool命令中的<code>must</code>/<code>should</code>/<code>must not</code>等等。核心目的就是过滤出包含检索关键字的document，提升后续分数计算的性能。</p>
+<p>这一过程仅仅是过滤，不进行分数计算。</p>
+<h2 id="-tf-idf-">二、TF/IDF算法</h2>
+<p>TF/IDF（term frequency/inverse document frequency）算法，是Elasticsearch计算相关度分数的基础，<strong>用于计算单个term在document中的分数</strong>。</p>
+<p><strong><em>单个term是什么意思？</em></strong></p>
+<p>比如，我们的检索关键字是”hello world“，index中包含如下的document：</p>
+<pre><code class="lang-JAVA"># doc1
+hello you, and world is very good
+</code></pre>
+<p>那么TF/IDF算法会对"hello"这个term计算出一个doc1分数，对”world“再计算出一个doc1分数。至于”hello world“这整个关键字在doc1中的综合分数，TF/IDF是不管的。</p>
+<p>TF/IDF算法的核心思想就三点：</p>
+<ul>
+<li><p><strong>term frequency：</strong>表示检索的term，在单个document中的各个词条中出现的频次，出现的次数越多，该document相关度越高；</p>
+</li>
+<li><p><strong>inverse document frequency：</strong>表示检索的term，在该索引的所有document中出现的频次，出现的次数越少，包含该term的document相关度越高；</p>
+</li>
+<li><strong>Field-length norm：</strong>表示document的field内容长度越短，相关度越高。</li>
+</ul>
+<h3 id="2-1-term-frequency">2.1 term frequency</h3>
+<p>还是通过示例来理解，假设我们有一个搜索请求，关键字是“hello world”，索引中包含下面两条document：</p>
+<pre><code class="lang-JAVA"># doc1
+hello you, and world is very good
+# doc2
+hello, how are you
+</code></pre>
+<p>“hello world”进行分词后，拆成两个term——“hello”和“world”，显然doc1既包含“hello”又包含“world”，doc2只包含“hello”，所以doc1更相关。</p>
+<h3 id="2-2-inverse-document-frequency">2.2 inverse document frequency</h3>
+<p>再来看下inverse document frequency，检索请求还是“hello world”，假设索引中一共包含1000条document，我们只列出其中两条：</p>
+<pre><code class="lang-JAVA"># doc1
+hello, today is very good
+# doc2
+hi world, how are you
+</code></pre>
+<p>如果根据term frequency规则，doc1和doc2的相关度应该是相同的，但是如果‘hello“在该索引的1000条document中，有800条document都包含它，而‘world“只有200条document包含，那么doc2的相关度就比doc1更高。</p>
+<blockquote>
+<p>这里好好思考下，为什么term在整个document列表中出现的次数越多，包含它的doc相关度反而越低。因为出现的次数越少，说明包含那个term的doc的区分度越高。</p>
+</blockquote>
+<h3 id="2-3-field-length-norm">2.3 Field-length norm</h3>
+<p>举个例子，检索请求还是“hello world”，假设索引中一共包含2条document：</p>
+<pre><code class="lang-JAVA"># doc1
+{ "title": "hello article", "content": "babaaba 1万个单词" }
+# doc2
+{ "title": "my article", "content": "blablabala 1万个单词，hi world" }
+</code></pre>
+<p>doc1中，”hello“出现在title字段，doc2中，”world“出现在content字段，显然title字段的内容长度远小于content字段的内容长度，所以doc1的相关度比doc2更高。</p>
+<h3 id="2-4-">2.4 示例</h3>
+<p>我们可以通过<code>explain</code>命令，查看Elasticsearch对某个query的评分到底是如何计算的：</p>
+<pre><code class="lang-JAVA">GET /test_index/_search?explain
+{
+  "query": {
+    "match": {
+      "test_field": "test hello"
+    }
+  }
+}
+</code></pre>
+<p>也可以通过如下命令查看某个document是如何被一个query匹配上，比如下面是查看id为6的document是如何被匹配上的：</p>
+<pre><code class="lang-JAVA">GET /test_index/6/_explain
+{
+  "query": {
+    "match": {
+      "test_field": "test hello"
+    }
+  }
+}
+</code></pre>
+<h2 id="-">三、向量空间模型算法</h2>
+<p>TF/IDF算法只能计算单个term在document中的分数。那么，<strong>如何计算整个搜索关键词在各个doc中的综合分数呢</strong>？这就要靠vector space model了。</p>
+<p>vector space model的核心思想其实就是计算两个向量，然后相乘得到最终分：</p>
+<ol>
+<li>每个term在所有document的分数——query vector；</li>
+<li>每个term在各个document的分数——doc vector；</li>
+<li>计算doc vector对于query vector的弧度（其实就是线性代数中的向量运算）。</li>
+</ol>
+<h3 id="3-1-query-vector">3.1 query vector</h3>
+<p>vector space model算法，会首先根据TF/IDF算法的结果，计算出一个<strong>query vector</strong>，这个query vector就是每一个term对所有document的综合评分。</p>
+<p>举个例子，假设index中包含3条document，搜索关键字是”hello world“：</p>
+<pre><code class="lang-JAVA"># doc1
+hello, today is very good
+# doc2
+hi world, how are you
+# doc3
+hello world
+</code></pre>
+<p>那么，对于hello这个term，vector space model算法会算出它对所有doc的评分，比如等于2；world这个term，基于所有doc的评分是5，那么<code>query vector = [2, 5]</code>。</p>
+<blockquote>
+<p>query vector的计算过程不用去深究，底层涉及线性代数之类的高等数学知识，我们只要知道vector space model会计算出这样一个vector，vector包含了每个term对所有document的评分就行了。</p>
+</blockquote>
+<h3 id="3-2-doc-vector">3.2 doc vector</h3>
+<p>doc vector，就是每个term在各个document中的分数组成的一个向量。</p>
+<p>比如，”hello“在doc1中的分数是2，doc2中是0，doc3中是2；"world"在doc1中的分数是0，doc2中是5，doc3中是5，那么最终计算出的doc vector是下面这样的：</p>
+<pre><code class="lang-JAVA">[2 , 0]
+[0 , 5]
+[2 , 5]
+</code></pre>
+<h3 id="3-3-">3.3 弧度计算</h3>
+<p>所谓弧度计算，就是根据doc vector和query vector进行向量运算，最终得到每个doc对多个term的总分数。涉及大量数学知识，此处就不再展开了。</p>
+<h2 id="-lucene-">四、Lucene的相关度分数函数</h2>
+<p>最后，我们来看下Lucene计算相关度分数的算法，Lucene中有一个叫做<code>practical scoring</code>的函数，综合了上面我们讲的TF/IDF算法和vector space model：</p>
+<pre><code class="lang-JAVA">score(q,d)  =  
+            queryNorm(q)  
+          · coord(q,d)    
+          · ∑ (           
+                tf(t in d)   
+              · idf(t)2      
+              · t.getBoost() 
+              · norm(t,d)    
+            ) (t in q)
+</code></pre>
+<p>这个公式的最终结果，就是一个query（入参q），对一个doc（入参d）的最终总评分，也就是搜索关键字对某个document的相关度分数：</p>
+<ul>
+<li><strong>queryNorm(q)：</strong>用来让一个doc的分数处于一个合理的区间内，不要太离谱；</li>
+<li><strong>coord(q,d)：</strong> 对更加匹配的doc，进行一些分数上的成倍奖励；</li>
+<li><strong>tf(t in d)：</strong>计算每个term对doc的分数，就是TF/IDF算法中的term frequency步骤；</li>
+<li><strong>idf(t)2：</strong>计算每个term对doc的分数，就是TF/IDF算法中的inverse document frequency步骤；</li>
+<li><strong>t.getBoost()：</strong>计入字段权重；</li>
+<li><strong>norm(t,d)：</strong>计算每个term对doc的分数，就是TF/IDF算法中的Field-length norm步骤。</li>
+</ul>
+<h2 id="-">五、总结</h2>
+<p>本章，我讲解了Elasticsearch进行相关度分数计算的核心原理，相关度分数算法基于TF/IDF和vector space model实现。Elasticsearch的底层其实调用了Lucene的<code>practical scoring</code>函数来完成分数的计算。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,104 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（九）—— J.U.C之locks框架：AQS共享功能剖析(4)</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（九）—— J.U.C之locks框架：AQS共享功能剖析(4)</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、本章概述</h2>
+<p>AQS系列的前三个章节，我们通过ReentrantLock的示例，分析了AQS的独占功能。<br/>本章将以<code>CountDownLatch</code>为例，分析AQS的共享功能。CountDownLatch，是J.U.C中的一个同步器类，可作为倒数计数器使用，关于CountDownLatch的使用和说明，读者可以参考：<br/><a href="https://segmentfault.com/a/1190000015886497">Java多线程进阶（十八）—— J.U.C之synchronizer框架：CountDownLatch</a>。</p>
+<blockquote>
+<p>CountDownLatch示例<br/> 假设现在有3个线程，ThreadA、ThreadB、mainThread，CountDownLatch初始计数为1：<br/> <code>CountDownLatch switcher = new CountDownLatch(1);</code></p>
+</blockquote>
+<p>线程的调用时序如下：</p>
+<pre><code class="lang-java">// ThreadA调用await()方法等待
+
+// ThreadB调用await()方法等待
+
+// 主线程main调用countDown()放行
+</code></pre>
+<h2 id="-aqs-">二、AQS共享功能的原理</h2>
+<h3 id="1-countdownlatch">1. 创建CountDownLatch</h3>
+<p>CountDownLatch的创建没什么特殊，调用唯一的构造器，传入一个初始计数值，内部实例化一个AQS子类：</p>
+<p><code>CountDownLatch switcher = new CountDownLatch(1);</code></p>
+<p><img alt="img" src="./img/20191027130550901.png" style="zoom:80%;"/></p>
+<p>可以看到，初始计数值count其实就是同步状态值，在CountDownLatch中，同步状态State表示CountDownLatch的计数器的初始大小。</p>
+<h3 id="2-threada-await-">2. ThreadA调用await()方法等待</h3>
+<p>CountDownLatch的<strong>await</strong>方法是响应中断的，该方法其实是调用了AQS的<strong>acquireSharedInterruptibly</strong>方法：</p>
+<p><img alt="img" src="./img/20191027130558556.png" style="zoom:80%;"/></p>
+<p>注意<strong>tryAcquireShared</strong>方法，该方法尝试获取锁，由AQS子类实现，其返回值的含义如下：</p>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>资源的定义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>小于0</td>
+<td>表示获取失败</td>
+</tr>
+<tr>
+<td>0</td>
+<td>表示获取成功</td>
+</tr>
+<tr>
+<td>大于0</td>
+<td>表示获取成功，且后继争用线程可能成功</td>
+</tr>
+</tbody>
+</table>
+<p>CountDownLatch中的<strong>tryAcquireShared</strong>实现相当简单，当State值为0时，永远返回成功：</p>
+<p><img alt="img" src="./img/20191027130605039.png" style="zoom:80%;"/></p>
+<blockquote>
+<p>我们之前说了在CountDownLatch中，同步状态State表示CountDownLatch的计数器的初始值，当<code>State==0</code>时，表示无锁状态，且一旦State变为0，就永远处于无锁状态了，此时所有线程在await上等待的线程都可以继续执行。<br/>而在ReentrantLock中，<code>State==0</code>时，虽然也表示无锁状态，但是只有一个线程可以重置State的值。这就是<strong>共享锁</strong>的含义。</p>
+</blockquote>
+<p>好了，继续向下执行，ThreadA尝试获取锁失败后，会调用<strong>doAcquireSharedInterruptibly</strong>：</p>
+<p><img alt="img" src="./img/20191027130612788.png" style="zoom:80%;"/></p>
+<p>首先通过<strong>addWaiter</strong>方法，将ThreadA包装成共享结点，插入等待队列，插入完成后队列结构如下：</p>
+<center><br/><img alt="img" src="./img/20191027130619080.png" style="zoom:80%;"/><br/></center>
+<p>然后会进入自旋操作，先尝试获取一次锁，显然此时是获取失败的（主线程main还未调用countDown，同步状态State还是1）。<br/>然后判断是否要进入阻塞（<strong>shouldParkAfterFailedAcquire</strong>）：</p>
+<center><br/><img alt="img" src="./img/20191027130627897.png" style="zoom:80%;"/><br/></center>
+<p>好了，至此，ThreadA进入阻塞态，最终队列结构如下：</p>
+<center><br/><img alt="img" src="./img/20191027130634637.png" style="zoom:80%;"/><br/></center>
+<h3 id="3-threadb-await-">3. ThreadB调用await()方法等待</h3>
+<p>流程和步骤2完全相同，调用后ThreadB也被加入到等待队列中：</p>
+<center><br/><img alt="img" src="./img/20191027130641935.png" style="zoom:80%;"/><br/></center>
+<h3 id="4-main-countdown-">4. 主线程main调用countDown()放行</h3>
+<p>ThreadA和ThreadB调用了<code>await()</code>方法后都在等待了，现在主线程main开始调用<code>countDown()</code>方法，该方法调用后，ThreadA和ThreadB都会被唤醒，并继续往下执行，达到类似门栓的作用。</p>
+<p>来看下<strong>countDown</strong>方法的内部：</p>
+<center><br/><img alt="img" src="./img/20191027130648967.png" style="zoom:80%;"/><br/></center>
+<p>该方法内部调用了AQS的<strong>releaseShared</strong>方法，先尝试一次释放锁，<strong>tryReleaseShared</strong>方法是一个钩子方法，由<strong>CountDownLatch</strong>实现，当同步State状态值首次变为0时，会返回true：</p>
+<p><img alt="img" src="./img/20191027130655800.png" style="zoom: 80%;"/><br/><img alt="img" src="./img/20191027130702571.png" style="zoom:150%;"/></p>
+<p>先调用<strong>compareAndSetWaitStatus</strong>将头结点的等待状态置为0，表示将唤醒后续结点（ThreadA），成功后的等待队列结构如下：</p>
+<center><br/><img alt="img" src="./img/20191027130709674.png" style="zoom:80%;"/><br/></center>
+<p>然后调用<strong>unparkSuccessor</strong>唤醒后继结点（ThreadA被唤醒后会从原阻塞处继续往下执行，这个在步骤5再讲）：</p>
+<p><img alt="img" src="./img/20191027130716710.png" style="zoom:80%;"/></p>
+<p>此时，等待队列结构如下：</p>
+<center><br/><img alt="img" src="./img/20191027130723851.png" style="zoom:80%;"/><br/></center>
+<h3 id="5-threada-">5. ThreadA从原阻塞处继续向下执行</h3>
+<p>ThreadA被唤醒后，会从原来的阻塞处继续向下执行：<br/>由于是一个自旋操作，ThreadA会再次尝试获取锁，由于此时State同步状态值为0（无锁状态），所以获取成功。然后调用<strong>setHeadAndPropagate</strong>方法：<br/><img alt="img" src="./img/20191027130730846.png" style="zoom:80%;"/></p>
+<p><strong>setHeadAndPropagate</strong>方法把ThreadA结点变为头结点，并根据传播状态判断是否要唤醒并释放后继结点：<br><br/><img alt="img" src="./img/20191027130737610.png" style="zoom: 67%;"/></br></p>
+<p>①将ThreadA变成头结点</p>
+<center><br/><img alt="img" src="./img/20191027130743420.png" style="zoom:80%;"/><br/></center>
+<p>②调用<strong>doReleaseShared</strong>方法，释放并唤醒ThreadB结点<br/><img alt="img" src="./img/20191027130750085.png" style="zoom:80%;"/></p>
+<center><br/><img alt="img" src="./img/20191027130756391.png" style="zoom:80%;"/><br/></center>
+<h3 id="6-threadb-">6. ThreadB从原阻塞处继续向下执行</h3>
+<p>ThreadB被唤醒后，从原阻塞处继续向下执行，这个过程和<a href="Java多线程进阶（9）——%20%20J.U.C之locks框架：AQS共享功能剖析-4.html#articleHeader6">步骤5（ThreadA唤醒后继续执行）</a>完全一样。</p>
+<p><strong>setHeadAndPropagate</strong>方法把ThreadB结点变为头结点，并根据传播状态判断是否要唤醒并释放后继结点：<br><br/><img alt="img" src="./img/20191027130802239.png" style="zoom:50%;"/></br></p>
+<p>①将ThreadB变成头结点</p>
+<center><br/><img alt="img" src="./img/20191027130808943.png" style="zoom: 80%;"/><br/></center>
+<p>②调用<strong>doReleaseShared</strong>方法，释放并唤醒后继结点（此时没有后继结点了，则直接break）：<br/><img alt="img" src="./img/20191027130815130.png" style="zoom:150%;"/></p>
+<p>最终队列状态如下：<br/></p>
+<center><br/><img alt="img" src="./img/20191027130821587.png" style="zoom:80%;"/><br/></center>
+<h2 id="-">三、总结</h2>
+<p>AQS的共享功能，通过钩子方法<strong>tryAcquireShared</strong>暴露，与独占功能最主要的区别就是：</p>
+<p>共享功能的结点，一旦被唤醒，会向队列后部传播（Propagate）状态，以实现共享结点的连续唤醒。这也是共享的含义，当锁被释放时，所有持有该锁的共享线程都会被唤醒，并从等待队列移除。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

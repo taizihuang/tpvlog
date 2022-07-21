@@ -1,0 +1,156 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程基础（一）—— 线程与锁</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程基础（一）—— 线程与锁</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、线程的基本概念</h2>
+<h3 id="1-1-">1.1 单线程</h3>
+<p>简单的说，单线程就是进程中只有一个线程。单线程在程序执行时，所走的程序路径按照连续顺序排下来，前面的必须处理好，后面的才会执行。<br/><em>Java示例：</em></p>
+<pre><code class="lang-java">public class SingleThread {
+    public static void main(String[] args) {
+        for (int i = 0; i &lt; 10000; i++) {
+            System.out.print(i + " ");
+        }
+    }
+}
+</code></pre>
+<p><em>上述Java代码中，只有一个主线程执行<code>main</code>方法。</em></p>
+<h3 id="1-2-">1.2 多线程</h3>
+<p>由一个以上线程组成的程序称为多线程程序。常见的多线程程序如：GUI应用程序、I/O操作、网络容器等。<br/>Java中，一定是从主线程开始执行（main方法），然后在主线程的某个位置启动新的线程。</p>
+<h2 id="-">二、线程的基本操作</h2>
+<h3 id="2-1-">2.1 创建</h3>
+<p>Java中创建多线程类两种方法：</p>
+<p><strong>1、继承java.lang.Thread</strong></p>
+<p><em>Java示例：</em></p>
+<pre><code class="lang-java">public class MyThread extends Thread {
+    public void run() {
+        for (int i = 0; i &lt; 10000; i++) {
+            System.out.print(i + " ");
+        }
+    }
+}
+public class MultiThread {
+    public static void main(String[] args) {
+        MyThread t = new MyThread();
+        t.start();    //启动子线程
+        //主线程继续同时向下执行
+        for (int i = 0; i &lt; 10000; i++) {
+            System.out.print(i + " ");
+        }
+    }
+}
+</code></pre>
+<p><em>上述代码中，<code>MyThread</code>类继承了类<code>java.lang.Thread</code>，并覆写了<code>run</code>方法。主线程从<code>main</code>方法开始执行，当主线程执行至<code>t.start()</code>时，启动新线程（注意此处是调用<code>start</code>方法，不是<code>run</code>方法），新线程会并发执行自身的<code>run</code>方法。</em></p>
+<p><strong>2、实现java.lang.Runnable接口</strong></p>
+<p><em>Java示例：</em></p>
+<pre><code class="lang-java">public class MyThread implements Runnable {
+    public void run() {
+        for (int i = 0; i &lt; 10000; i++) {
+            System.out.print(i + " ");
+        }
+    }
+}
+public class MultiThread {
+    public static void main(String[] args) {
+        Thread t = new Thread(new MyThread());
+        t.start();    //启动子线程
+        //主线程继续同时向下执行
+        for (int i = 0; i &lt; 10000; i++) {
+            System.out.print(i + " ");
+        }
+    }
+}
+</code></pre>
+<p><em>上述代码中，<code>MyThread</code>类实现了<code>java.lang.Runnable</code>接口，并覆写了<code>run</code>方法，其它与继承<code>java.lang.Thread</code>完全相同。实际上，<code>java.lang.Thread</code>类本身也实现了<code>Runnable</code>接口，只不过<code>java.lang.Thread</code>类的run方法主体里空的，通常被子类覆写（<code>override</code>）。</em></p>
+<blockquote>
+<p>注意：主线程执行完成后，如果还有子线程正在执行，程序也不会结束。只有当所有线程都结束时（不含Daemon Thread），程序才会结束。</p>
+</blockquote>
+<h3 id="2-2-">2.2 暂停</h3>
+<p>Java中线程的暂停是调用<code>java.lang.Thread</code>类的<code>sleep</code>方法（注意是<strong>类方法</strong>）。该方法会使<strong>当前正在执行的线程</strong>暂停指定的时间，如果线程持有锁，<code>sleep</code>方法结束前并不会释放该锁。</p>
+<p><em>Java示例：</em></p>
+<pre><code class="lang-java">public class Main {
+    public static void main(String[] args) {
+        for (int i = 0; i &lt; 10; i++) {
+            System.out.print(i + " ");
+            try {
+                Thread.sleep(1000);    //当前main线程暂停1000ms
+            } catch (InterruptedException e) {
+            }
+        }
+    }
+}
+</code></pre>
+<p><em>上述代码中，当main线程调用<code>Thread.sleep(1000)</code>后，线程会被暂停，如果被<code>interrupt</code>，则会抛出<code>InterruptedException</code>异常。</em></p>
+<h3 id="2-3-">2.3 互斥</h3>
+<p>Java中线程的共享互斥操作，会使用synchronized关键字。线程共享互斥的架构称为监视（monitor），而获取锁有时也称为“持有(own)监视”。</p>
+<p>每个锁在同一时刻，只能由一个线程持有。<br/><em>注意：<code>synchronized</code>方法或声明执行期间，如程序遇到任何异常或return，线程都会释放锁。</em></p>
+<p><strong>1、synchronized方法</strong></p>
+<p><em>Java示例1：</em></p>
+<pre><code class="lang-java">//synchronized实例方法
+public synchronized void deposit(int m) {
+    System.out.print("This is synchronized method.");
+}
+</code></pre>
+<p><em>注：synchronized实例方法采用this锁（即当前对象）去做线程的共享互斥。</em></p>
+<p><em>Java示例2：</em></p>
+<pre><code class="lang-java">//synchronized类方法
+public static synchronized void deposit(int m) {
+    System.out.print("This is synchronized static method.");
+}
+</code></pre>
+<p><em>注：synchronized类方法采用类对象锁（即当前类的类对象）去做线程的共享互斥。如上述示例中，采用类.class（继承自 <code>java.lang.Class</code>）作为锁。</em></p>
+<p><strong>2、synchronized声明</strong><br/><em>Java示例：</em></p>
+<pre><code class="lang-java">public void deposit(int m) {
+    synchronized (this) {
+        System.out.print("This is synchronized statement with this lock.");
+    }
+    synchronized (Something.class) {
+        System.out.print("This is synchronized statement with class lock.");
+    }
+}
+</code></pre>
+<p><em>注：synchronized声明可以采用任意锁，上述示例中，分别采用了对象锁（this）和类锁（something.class）</em></p>
+<h3 id="2-4-">2.4 中断</h3>
+<p>java.lang.Thread类有一个<code>interrupt</code>方法，该方法直接对线程调用。当被interrupt的线程正在sleep或wait时，会抛出<code>InterruptedException</code>异常。<br/>事实上，<code>interrupt</code>方法只是改变目标线程的中断状态（interrupt status），而那些会抛出<code>InterruptedException</code>异常的方法，如wait、sleep、join等，都是在方法内部不断地检查中断状态的值。</p>
+<ul>
+<li><strong>interrupt方法</strong><br/>Thread实例方法：必须由其它线程获取被调用线程的实例后，进行调用。实际上，只是改变了被调用线程的内部中断状态；</li>
+<li><strong>Thread.interrupted方法</strong><br/>Thread类方法：必须在当前执行线程内调用，该方法返回当前线程的内部中断状态，然后清除中断状态（置为false） ；</li>
+<li><strong>isInterrupted方法</strong><br/>Thread实例方法：用来检查指定线程的中断状态。当线程为中断状态时，会返回true；否则返回false。<br/><img src="./img/20191021225135951.png" width="50%"/></li>
+</ul>
+<h3 id="2-5-">2.5 协调</h3>
+<p><strong>1、wait  set / wait方法</strong><br/>wait set是一个虚拟的概念，每个Java类的实例都有一个wait  set，当对象执行wait方法时，当前线程就会暂停，并进入该对象的wait  set。</p>
+<p>当发生以下事件时，线程才会退出wait  set：<br/>①有其它线程以notify方法唤醒该线程<br/>②有其它线程以notifyAll方法唤醒该线程<br/>③有其它线程以interrupt方法唤醒该线程<br/>④wait方法已到期</p>
+<p><em>注：当前线程若要执行<code>obj.wait()</code>，则必须先获取该对象锁。当线程进入wait set后，就已经释放了该对象锁。</em></p>
+<p>下图中线程A先获得对象锁，然后调用wait()方法（此时线程B无法获取锁，只能等待）。当线程A调用完wait()方法进入wait set后会自动释放锁，线程B获得锁。<br/><img src="./img/20191021225311153.jpg" width="60%"/><br/><img src="./img/20191021225320628.png" width="60%"/></p>
+<p><strong>2、notify方法</strong><br/>notify方法相当于从wait set中从挑出一个线程并唤醒。</p>
+<p>下图中线程A在当前实例对象的wait set中等待，此时线程B必须拿到同一实例的对象锁，才能调用notify方法唤醒wait set中的任意一个线程。</p>
+<p><em>注：线程B调用notify方法后，并不会立即释放锁，会有一段时间差。</em><br/><img src="./img/20191021225415699.jpg" width="60%"/><br/><img src="./img/20191021225423947.jpg" width="60%"/></p>
+<p><strong>3、notifyAll方法</strong><br/>notifyAll方法相当于将wait set中的所有线程都唤醒。</p>
+<p><strong>4、总结</strong><br/>wait、notify、notifyAll这三个方法都是java.lang.Object类的方法（注意，不是Thread类的方法）。<br/>若线程没有拿到当前对象锁就直接调用对象的这些方法，都会抛出<code>java.lang.IllegalMonitorStateException</code>异常。</p>
+<ul>
+<li><code>obj.wait()</code>是把当前线程放到obj的wait set；</li>
+<li><code>obj.notify()</code>是从obj的wait set里唤醒1个线程；</li>
+<li><code>obj.notifyAll()</code>是唤醒所有在obj的wait set里的线程。</li>
+</ul>
+<h2 id="-">三、线程的状态转移</h2>
+<p>线程的状态转移大致如下图：<br/><img src="./img/20191021225503605.png" width="65%"/></p>
+<ul>
+<li>当创建一个Thread子类或实现Runnable接口类的实例时，线程进入【初始】状态；</li>
+<li>调用实例的start方法后，线程进入【可执行】状态；</li>
+<li>系统会在某一时刻自动调度处于【可执行】状态的线程，被调度的线程会调用run方法，进入【执行中】状态；</li>
+<li>线程执行完run方法后，进入【结束】状态；</li>
+<li>处于【结束】状态的线程，在某一时刻，会被JVM垃圾回收；</li>
+<li>处于【执行中】状态的线程，若调用了Thread.yield方法，会回到【可执行】状态，等待再次被调度；</li>
+<li>处于【执行中】状态的线程，若调用了wait方法，会进入wait set并一直等待，直到被其它线程通过notify、notifyAll、interrupt方法唤醒；</li>
+<li>处于【执行中】状态的线程，若调用了Thread.sleep方法，会进入【Sleep】状态，无法继续向下执行。当sleep时间结束或被interrupt时，会回到【可执行状态】；</li>
+<li>处于【执行中】状态的线程，若遇到阻塞I/O操作，也会停止等待I/O完成，然后回到【可执行状态】；</li>
+</ul>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

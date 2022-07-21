@@ -1,0 +1,104 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（十七）—— J.U.C之atomic框架：LongAdder</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（十七）—— J.U.C之atomic框架：LongAdder</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-longadder-">一、LongAdder简介</h2>
+<p>JDK1.8时，<code>java.util.concurrent.atomic</code>包中提供了一个新的原子类：<code>LongAdder</code>。<br/>根据Oracle官方文档的介绍，LongAdder在高并发的场景下会比它的前辈————AtomicLong 具有更好的性能，代价是消耗更多的内存空间：<br/><img alt="img" src="./img/20191027154555178.png" style="zoom:80%;"/></p>
+<p>那么，问题来了：</p>
+<blockquote>
+<p><strong>为什么要引入<code>LongAdder</code>？ <code>AtomicLong</code>在高并发的场景下有什么问题吗？  如果低并发环境下，<code>LongAdder</code>和<code>AtomicLong</code>性能差不多，那<code>LongAdder</code>是否就可以替代<code>AtomicLong</code>了？</strong></p>
+</blockquote>
+<h3 id="1-1-longadder-">1.1 为什么要引入LongAdder？</h3>
+<p>我们知道，<strong>AtomicLong</strong>是利用了底层的CAS操作来提供并发性的，比如<strong>addAndGet</strong>方法：</p>
+<p><img alt="img" src="./img/20191027154601091.png" style="zoom:80%;"/></p>
+<p>上述方法调用了<strong>Unsafe</strong>类的<strong>getAndAddLong</strong>方法，该方法是个<strong>native</strong>方法，它的逻辑是采用自旋的方式不断更新目标值，直到更新成功。</p>
+<p>在并发量较低的环境下，线程冲突的概率比较小，自旋的次数不会很多。但是，高并发环境下，N个线程同时进行自旋操作，会出现大量失败并不断自旋的情况，此时<strong>AtomicLong</strong>的自旋会成为瓶颈。</p>
+<p>这就是<strong>LongAdder</strong>引入的初衷——解决高并发环境下<strong>AtomicLong</strong>的自旋瓶颈问题。</p>
+<h3 id="1-2-longadder-">1.2 LongAdder快在哪里？</h3>
+<p>既然说到<strong>LongAdder</strong>可以显著提升高并发环境下的性能，那么它是如何做到的？这里先简单的说下<strong>LongAdder</strong>的思路，第二部分会详述<strong>LongAdder</strong>的原理。</p>
+<p>我们知道，<strong>AtomicLong</strong>中有个内部变量<strong>value</strong>保存着实际的long值，所有的操作都是针对该变量进行。也就是说，高并发环境下，value变量其实是一个热点，也就是N个线程竞争一个热点。</p>
+<p><strong>LongAdder</strong>的基本思路就是<strong><em>分散热点</em></strong>，将value值分散到一个数组中，不同线程会命中到数组的不同槽中，各个线程只对自己槽中的那个值进行CAS操作，这样热点就被分散了，冲突的概率就小很多。如果要获取真正的long值，只要将各个槽中的变量值累加返回。</p>
+<p>这种做法有没有似曾相识的感觉？没错，[ConcurrentHashMap][1]中的“分段锁”其实就是类似的思路。</p>
+<h3 id="1-3-longadder-atomiclong-">1.3 LongAdder能否替代AtomicLong？</h3>
+<p>回答这个问题之前，我们先来看下<strong>LongAdder</strong>提供的API：<br/><img alt="img" src="./img/20191027154607470.png" style="zoom:80%;"/></p>
+<p>可以看到，<strong>LongAdder</strong>提供的API和<strong>AtomicLong</strong>比较接近，两者都能以原子的方式对long型变量进行增减。</p>
+<p>但是<strong>AtomicLong</strong>提供的功能其实更丰富，尤其是<strong>addAndGet</strong>、<strong>decrementAndGet</strong>、<strong>compareAndSet</strong>这些方法。</p>
+<p><strong>addAndGet</strong>、<strong>decrementAndGet</strong>除了单纯的做自增自减外，还可以立即获取增减后的值，而<strong>LongAdder</strong>则需要做同步控制才能精确获取增减后的值。如果业务需求需要精确的控制计数，做计数比较，<strong>AtomicLong</strong>也更合适。</p>
+<p>另外，从空间方面考虑，<strong>LongAdder</strong>其实是一种“空间换时间”的思想，从这一点来讲<strong>AtomicLong</strong>更适合。当然，如果你一定要跟我杠现代主机的内存对于这点消耗根本不算什么，那我也办法。</p>
+<p>总之，低并发、一般的业务场景下AtomicLong是足够了。如果并发量很多，存在大量写多读少的情况，那LongAdder可能更合适。适合的才是最好的，如果真出现了需要考虑到底用AtomicLong好还是LongAdder的业务场景，那么这样的讨论是没有意义的，因为这种情况下要么进行性能测试，以准确评估在当前业务场景下两者的性能，要么换个思路寻求其它解决方案。</p>
+<p>最后，给出国外一位博主对LongAdder和AtomicLong的性能评测，以供参考：<a href="http://blog.palominolabs.com/2014/02/10/java-8-performance-improvements-longadder-vs-atomiclong">http://blog.palominolabs.com/2014/02/10/java-8-performance-improvements-longadder-vs-atomiclong</a></p>
+<h2 id="-longadder-">二、LongAdder原理</h2>
+<p>之前说了，<strong>AtomicLong</strong>是多个线程针对单个热点值value进行原子操作。而<strong>LongAdder</strong>是每个线程拥有自己的槽，各个线程一般只对自己槽中的那个值进行CAS操作。</p>
+<blockquote>
+<p>比如有三个ThreadA、ThreadB、ThreadC，每个线程对value增加10。</p>
+</blockquote>
+<p>对于<strong>AtomicLong</strong>，最终结果的计算始终是下面这个形式：<br/>$$<br/>value = 10 + 10 + 10 = 30<br/>$$<br/>但是对于<strong>LongAdder</strong>来说，内部有一个<code>base</code>变量，一个<code>Cell[]</code>数组。<br/><code>base</code>变量：非竞态条件下，直接累加到该变量上<br/><code>Cell[]</code>数组：竞态条件下，累加个各个线程自己的槽<code>Cell[i]</code>中</p>
+<p>最终结果的计算是下面这个形式：<br/>$$<br/>value = base + \sum_{i=0}^nCell[i]<br/>$$</p>
+<h3 id="2-1-longadder-">2.1 LongAdder的内部结构</h3>
+<p><strong>LongAdder</strong>只有一个空构造器，其本身也没有什么特殊的地方，所有复杂的逻辑都在它的父类<strong>Striped64</strong>中。<br/><img alt="img" src="./img/20191027154614939.png" style="zoom:80%;"/></p>
+<p>来看下<strong>Striped64</strong>的内部结构，这个类实现一些核心操作，处理64位数据。<br/><strong>Striped64</strong>只有一个空构造器，初始化时，通过Unsafe获取到类字段的偏移量，以便后续CAS操作：</p>
+<p><img alt="img" src="./img/20191027154622957.png" style="zoom: 80%;"/></p>
+<p>上面有个比较特殊的字段是<code>threadLocalRandomProbe</code>，可以把它看成是线程的hash值。这个后面我们会讲到。</p>
+<p>定义了一个内部Cell类，这就是我们之前所说的槽，每个Cell对象存有一个value值，可以通过<strong>Unsafe</strong>来CAS操作它的值：<br/><img alt="img" src="./img/20191027154629881.png" style="zoom:80%;"/></p>
+<p>其它的字段：<br/>可以看到<strong>Cell[]</strong>就是之前提到的槽数组，<strong>base</strong>就是非并发条件下的基数累计值。<br/><img alt="img" src="./img/20191027154636771.png" style="zoom:80%;"/></p>
+<h3 id="2-2-longadder-">2.2 LongAdder的核心方法</h3>
+<p>还是通过例子来看：<br/>假设现在有一个<strong>LongAdder</strong>对象la，四个线程A、B、C、D同时对la进行累加操作。</p>
+<pre><code class="lang-java">LongAdder la = new LongAdder();
+la.add(10);
+</code></pre>
+<p>①<strong><em>ThreadA调用add方法（假设此时没有并发）：</em></strong><br/><img alt="img" src="./img/20191027154643424.png" style="zoom:80%;"/></p>
+<p>初始时Cell[]为null，base为0。所以ThreadA会调用<strong>casBase</strong>方法（定义在<strong>Striped64</strong>中），因为没有并发，CAS操作成功将base变为10：<br/><img alt="img" src="./img/20191027154652603.png" style="zoom:80%;"/></p>
+<p>可以看到，如果线程A、B、C、D线性执行，那<strong>casBase</strong>永远不会失败，也就永远不会进入到<strong>base</strong>方法的if块中，所有的值都会累积到<strong>base</strong>中。<br/>那么，如果任意线程有并发冲突，导致<strong>caseBase</strong>失败呢？</p>
+<p>失败就会进入if方法体：<br/><img alt="img" src="./img/20191027154700075.png" style="zoom:80%;"/></p>
+<p>这个方法体会先再次判断<strong>Cell[]</strong>槽数组有没初始化过，如果初始化过了，以后所有的CAS操作都只针对槽中的Cell；否则，进入<strong>longAccumulate</strong>方法。</p>
+<p>整个<strong>add</strong>方法的逻辑如下图：<br/><img alt="img" src="./img/20191027154706889.png" style="zoom:80%;"/></p>
+<blockquote>
+<p>可以看到，只有从未出现过并发冲突的时候，base基数才会使用到，一旦出现了并发冲突，之后所有的操作都只针对<code>Cell[]</code>数组中的单元Cell。<br/>如果<code>Cell[]</code>数组未初始化，会调用父类的<code>longAccumelate</code>去初始化<code>Cell[]</code>，如果<code>Cell[]</code>已经初始化但是冲突发生在<code>Cell</code>单元内，则也调用父类的<code>longAccumelate</code>，此时可能就需要对<code>Cell[]</code>扩容了。</p>
+</blockquote>
+<p><strong><em>这也是LongAdder设计的精妙之处：尽量减少热点冲突，不到最后万不得已，尽量将CAS操作延迟。</em></strong></p>
+<h3 id="2-3-striped64-">2.3 Striped64的核心方法</h3>
+<p>我们来看下<strong>Striped64</strong>的核心方法<strong>longAccumulate</strong>到底做了什么：<br/><img alt="img" src="./img/20191027154714729.png" style="zoom:80%;"/></p>
+<p>上述代码首先给当前线程分配一个hash值，然后进入一个自旋，这个自旋分为三个分支：</p>
+<ul>
+<li><p><strong><em>CASE1：Cell[]数组已经初始化</em></strong></p>
+</li>
+<li><p><strong><em>CASE2：Cell[]数组未初始化</em></strong></p>
+</li>
+<li><p><strong><em>CASE3：Cell[]数组正在初始化中</em></strong></p>
+</li>
+</ul>
+<h4 id="case2-cell-">CASE2：Cell[]数组未初始化</h4>
+<p>我们之前讨论了，初始时<strong>Cell[]</strong>数组还没有初始化，所以会进入分支②：<br/><img alt="img" src="./img/20191027154721356.png" style="zoom:80%;"/></p>
+<p>首先会将<strong>cellsBusy</strong>置为<strong><em>1-加锁状态</em></strong><br/><img alt="img" src="./img/20191027154730611.png" style="zoom:80%;"/></p>
+<p>然后，初始化<strong>Cell[]</strong>数组（初始大小为2），根据当前线程的hash值计算映射的索引，并创建对应的<strong>Cell</strong>对象，<strong>Cell</strong>单元中的初始值x就是本次要累加的值。</p>
+<hr/>
+<h4 id="case3-cell-">CASE3：Cell[]数组正在初始化中</h4>
+<p>如果在初始化过程中，另一个线程ThreadB也进入了<strong>longAccumulate</strong>方法，就会进入分支③：<br/><img alt="img" src="./img/20191027154737189.png" style="zoom:80%;"/></p>
+<p>可以看到，分支③直接操作<strong>base</strong>基数，将值累加到<strong>base</strong>上。</p>
+<hr/>
+<h4 id="case1-cell-">CASE1：Cell[]数组已经初始化</h4>
+<p>如果初始化完成后，其它线程也进入了<strong>longAccumulate</strong>方法，就会进入分支①：<br/><img alt="img" src="./img/20191027154744084.png" style="zoom:80%;"/></p>
+<p>整个<strong>longAccumulate</strong>的流程图如下：<br/><img alt="img" src="./img/20191027154751281.png" style="zoom:80%;"/></p>
+<h3 id="2-4-longadder-sum-">2.4 LongAdder的sum方法</h3>
+<p>最后，我们来看下<strong>LongAdder</strong>的<strong>sum</strong>方法：<br/><img alt="img" src="./img/20191027154758243.png" style="zoom:80%;"/></p>
+<p><strong>sum</strong>求和的公式就是我们开头说的：<br/>$$<br/>value = base + \sum_{i=0}^nCell[i]<br/>$$<br/>需要注意的是，这个方法只能得到某个时刻的近似值，这也就是<strong>LongAdder</strong>并不能完全替代<strong>LongAtomic</strong>的原因之一。</p>
+<h2 id="-longadder-">三、LongAdder的其它兄弟</h2>
+<p>JDK1.8时，<code>java.util.concurrent.atomic</code>包中，除了新引入<strong>LongAdder</strong>外，还有引入了它的三个兄弟类：<strong><em>LongAccumulator</em></strong>、<strong><em>DoubleAdder</em></strong>、<strong><em>DoubleAccumulator</em></strong></p>
+<p><img alt="img" src="./img/20191027154804870.png" style="zoom: 67%;"/></p>
+<h3 id="3-1-longaccumulator">3.1 LongAccumulator</h3>
+<p><strong>LongAccumulator</strong>是<strong>LongAdder</strong>的增强版。<strong>LongAdder</strong>只能针对数值的进行加减运算，而<strong>LongAccumulator</strong>提供了自定义的函数操作。其构造函数如下：<br/><img alt="img" src="./img/20191027154811027.png" style="zoom:80%;"/></p>
+<p>通过<strong>LongBinaryOperator</strong>，可以自定义对入参的任意操作，并返回结果（<strong>LongBinaryOperator</strong>接收2个long作为参数，并返回1个long）</p>
+<p><strong>LongAccumulator</strong>内部原理和LongAdder几乎完全一样，都是利用了父类<strong>Striped64</strong>的<strong>longAccumulate</strong>方法。这里就不再赘述了，读者可以自己阅读源码。</p>
+<h3 id="3-2-doubleadder-doubleaccumulator">3.2 DoubleAdder和DoubleAccumulator</h3>
+<p>从名字也可以看出，<strong>DoubleAdder</strong>和<strong>DoubleAccumulator</strong>用于操作double原始类型。</p>
+<p>与<strong>LongAdder</strong>的唯一区别就是，其内部会通过一些方法，将原始的double类型，转换为long类型，其余和<strong>LongAdder</strong>完全一样：<br/><img alt="img" src="./img/20191027154817430.png" style="zoom:80%;"/></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

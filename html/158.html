@@ -1,0 +1,157 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（十二）——Proximity Match近似匹配</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（十二）——Proximity Match近似匹配</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Proximity Match（近似匹配），包含两种类型：<strong>phrase match</strong>和<strong>proximity match</strong>。什么情况下需要使用近似匹配？我们先看下下面的检索需求：</p>
+<pre><code class="lang-JAVA"># doc1
+java is my favourite programming language, and I also think spark is a very good big data system.
+# doc2
+java spark are very related, because scala is spark's programming language and scala is also based on jvm like java.
+</code></pre>
+<p>假设我们有上述两条document，希望检索出包含“java spark”关键字的doc，但是必须满足以下任一条件：</p>
+<ul>
+<li>java spark，就靠在一起，中间不能插入任何其他字符；</li>
+<li>java和spark两个单词靠的越近，doc的分数越高，排名越靠前。</li>
+</ul>
+<p>思考一下，如果使用全文检索中的math query，能否满足我们的需求？答案是不能，此时就要用到近似匹配了。</p>
+<h2 id="-phrase-match">一、phrase match</h2>
+<p>Phrase Match（短语匹配），就是将搜索词中的多个term作为一个短语，一起去搜索，只有包含这个短语的doc才会作为结果返回，不像是match query，任何一个term匹配就会返回结果。</p>
+<p>Phrase Match的基本语法如下，只有包含“java spark”这个短语的doc才会被返回，对于本章开头的那两条doc，只有doc2满足条件：</p>
+<pre><code>GET /forum/_search
+{
+    "query": {
+        "match_phrase": {
+            "title": {
+                "query": "java spark",
+                "slop":  1
+            }
+        }
+    }
+}
+</code></pre><h3 id="1-1-">1.1 基本原理</h3>
+<p>Elasticsearch在建立倒排索引时，会记录每个term在文本内容中的位置。比如我们有下面两条doc：</p>
+<pre><code class="lang-JAVA">doc1: hello world, java spark        
+doc2: hi, spark java
+</code></pre>
+<p>建立完的倒排索引包含以下内容，hello这个term出现在doc1的position 0，以此类推：</p>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Doc1中的位置</th>
+<th>Doc2中的位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>hello</td>
+<td>doc1(0)</td>
+<td>N</td>
+</tr>
+<tr>
+<td>wolrd</td>
+<td>doc1(1)</td>
+<td>N</td>
+</tr>
+<tr>
+<td>java</td>
+<td>doc1(2)</td>
+<td>doc2(2)</td>
+</tr>
+<tr>
+<td>spark</td>
+<td>doc1(3)</td>
+<td>doc2(1)</td>
+</tr>
+</tbody>
+</table>
+<p>当使用Phrase Match（短语匹配）时，步骤如下：</p>
+<ol>
+<li>Elasticsearch会首先对短语分词，"java spark"拆分为"java"和"spark" ；</li>
+<li>筛选出“java”和“spark”都存在的doc，也就是说doc必须包含短语中的所有term，那doc1和doc2都满足；</li>
+<li>后一个短语的position必须比前一个大1，即“spark”的position要比java的position大1，那只有doc1满足条件。</li>
+</ol>
+<h3 id="1-2-slop-">1.2 slop参数</h3>
+<p>Phrase Match有一个很重要的参数——slop，表示短语中的term，最多经过几次移动才能与一个document匹配，这个移动次数，就是slop。</p>
+<p>举个例子，假如有下面这样一条doc，搜索的短语是"spark data"：</p>
+<pre><code class="lang-JAVA">spark is best big data solution based on scala.
+</code></pre>
+<p>那么slop=3时，就可以匹配到，可以看下面的移动步骤：</p>
+<pre><code class="lang-JAVA">spark         is         best         big         data...
+spark        data
+                 --&gt;data
+                             --&gt;data
+                                          --&gt;data
+</code></pre>
+<p>注意，移动的方向可以是双向的，比如搜索的短语是"data spark"，那么slop=5时，也可以匹配到：</p>
+<pre><code class="lang-JAVA">spark         is         best         big         data...
+data        spark
+spark  &lt;--&gt;    data
+spark             --&gt;data
+spark                          --&gt;data
+spark                                       --&gt;data
+</code></pre>
+<blockquote>
+<p>当使用Phrase Match时，term靠的越近，相关度分数会越高。</p>
+</blockquote>
+<h3 id="1-3-rescore">1.3 rescore</h3>
+<p>rescore(重打分），通常与match query配合使用。比如，我们有以下请求：</p>
+<pre><code class="lang-JAVA">GET /forum/_search 
+{
+  "query": {
+    "match": {
+      "content": "java spark"
+    }
+  },
+  "rescore": {
+    "window_size": 50,
+    "query": {
+      "rescore_query": {
+        "match_phrase": {
+          "content": {
+            "query": "java spark",
+            "slop": 50
+          }
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>使用<code>rescore</code>参数后，会对math query匹配到的结果重新打分，上述<code>window_size</code>表示取前50条记录进行打分，配合phrase match可以使term越接近的短语分数更高，从而既提供了精确度，又提升了召回率。</p>
+<blockquote>
+<p>所谓召回率，就是进行检索时，返回的document的数量，数量越多，召回率越高。近似匹配通常会和match query搭配使用以提升召回率。</p>
+</blockquote>
+<h3 id="1-4-">1.4 搜索推荐</h3>
+<p>我们还可以利用<code>match_phrase_prefix</code>进行搜索推荐。搜索推荐的原理跟<code>match_phrase</code>类似，唯一的区别就是把检索词中的最后一个term作为前缀去搜索。</p>
+<pre><code class="lang-JAVA">GET /forum/_search 
+{
+  "query": {
+    "match_phrase_prefix": {
+      "content": {
+          "query": "java s",
+          "slop": 10,
+          "max_expansions": 5
+      }
+    }
+  }
+}
+</code></pre>
+<p>默认情况下，前缀要扫描所有的倒排索引中的term，去查找"s"打头的单词，但是这样性能太差，所以可以用<code>max_expansions</code>限定，"s"前缀最多匹配多少个term，就不再继续搜索倒排索引了。</p>
+<blockquote>
+<p>一般来讲，不推荐使用<code>match_phrase_prefix</code>来实现搜索推荐，因为Elasticsearch会在扫描倒排索引时实时进行前缀匹配，性能很差。如果要实现搜索推荐功能，建议使用<a href="https://www.tpvlog.com/article/159">ngram分词机制</a>。</p>
+</blockquote>
+<h2 id="-proximity-match">二、proximity match</h2>
+<p>讲解完了phrase match，proximity match其实就没什么可讲了，底层原理都是一样的，proximity match可以看成是加了<code>slop</code>参数的phrase match。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，主要介绍了Elasticsearch中的近似匹配搜索，近似匹配搜索分为<strong>phrase match</strong>和<strong>proximity match</strong>，底层的原理是一样的，都是通过倒排索引去匹配搜索关键词中的各个term的位置。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

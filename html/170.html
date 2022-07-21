@@ -1,0 +1,52 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch进阶（一）——生产部署：集群规划</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch进阶（一）——生产部署：集群规划</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将讲解在生产环境部署Elasticsearch集群的一些核心关注点、调优方案、问题解决方案。</p>
+<p>一般来说，如果我们刚开始使用Elasticsearch，都是先在自己的笔记本上，安装一个Elasticsearch节点，然后开始学习和试用其中的功能。但是如果我们要将Elasticsearch部署到生产环境中，还需要考虑很多东西，比如部署的机器内存、CPU、磁盘、JVM等各种资源和配置。</p>
+<p>本章，我就聊一聊生产环境中的Elasticsearch集群规划。</p>
+<h2 id="-">一、集群规划</h2>
+<h3 id="1-1-">1.1 内存</h3>
+<p>Elasticsearch是非常消耗内存的，而且消耗的主要不是JVM内存，而是<em>Filesystem OS Cache</em>。如果读者还记得<a href="https://www.tpvlog.com/article/154">《持久化原理》</a>这一章的内容，就知道Elasticsearch底层是基于Lucene的，而Lucene又会基于磁盘文件来读写和保存索引数据。Lucene会尽量将频繁访问的segment缓存在<em>Filesystem OS Cache</em>中，以提升磁盘文件读写的性能。</p>
+<p>所以说，<strong>Elasticsearch的性能主要取决于机器除了分配给jvm heap以外的内存，这些剩下的内存会留给ES的segment文件做缓存</strong>。</p>
+<p>在生产环境中使用Elasticsearch，如果数据量达到亿级，那么建议每台机器的内存配置要给到64G。</p>
+<h3 id="1-2-cpu">1.2 CPU</h3>
+<p>Elasticsearch对于CPU的要求比较低一些，一般64G内存的机器，配个8~16核CPU就可以了。</p>
+<h3 id="1-3-">1.3 磁盘</h3>
+<p>Elasticsearch对于磁盘的要求是比较高的，尤其是那些涉及大量写操作的ES集群，比如日志分析系统，这类系统很容易因为磁盘的读写性能造成整个集群的性能瓶颈。</p>
+<h4 id="deadline-noop-scheduler">deadline/noop scheduler</h4>
+<p>如果我们能够使用SSD固态硬盘，而不是机械硬盘，那么当然是最好的，SSD的性能比普通机械硬盘高很多倍。但是使用SSD硬盘的话，需要注意正确配置<code>I/O scheduler</code>。当我们将数据写入磁盘时，<code>IO scheduler</code>会决定什么时候数据才会真正的写入磁盘，而不是停留在os cache中。</p>
+<p>在大多数机器上，默认的<code>IO scheduler</code>是<em>cfq——completely fair queuing</em>。cfq机制会给每个进程都分配一些时间片（time slice），然后优化每个进程的数据如何写入磁盘中，优化的思路主要是根据磁盘的物理布局来决定如何将数据写入磁盘，从而提升写入磁盘的性能。</p>
+<p>但是cfq这种机制，对于SSD来说是不太高效的，因为SSD跟机械硬盘是不一样的，SSD不涉及到机械磁盘旋转和磁头读取这种传统的读写机制。对于SSD来说，应该用<strong><em>deadline/noop scheduler</em></strong>。<em>deadline scheduler</em>会基于写操作被pending了多长时间来进行写磁盘优化，而<em>noop scheduler</em>就是一个简单的FIFO机制。</p>
+<p>所以，对于生产环境，如果使用的是SSD固态硬盘，建议调整IO scheduler为<strong><em>deadline/noop scheduler</em></strong>，这样可以带来很大的性能提升，甚至可以达到数百倍。</p>
+<h4 id="raid-0">RAID 0</h4>
+<p>此外，使用<strong><em>RAID 0</em></strong>也是一种提升磁盘读写速度的高效方式，无论是对于机械硬盘还是SSD都一样。RAID 0也叫做条带式存储机制（striping），在RAID各种级别中性能是最高的。RAID 0的基本原理，是把连续的数据分散存储到多个磁盘上进行读写，也就是对数据进行条带式存储。这样系统的磁盘读写请求就可以被分散到多个磁盘上并行执行，从而提供了磁盘IO性能。</p>
+<p>最后，我们要避免跟网络相关的存储模式——network-attached storage，比如NAS。虽然很多供应商都说他们的NAS解决方案性能非常高，而且比本地存储的可靠性更高。但是实际上用起来会有很多性能和可靠性上的风险，一般因为网络传输会造成较高的延时，同时还有单点故障的风险。</p>
+<h3 id="1-4-">1.4 网络</h3>
+<p>对于Elasticsearch，快速可靠的网络是非常重要的。因为高速网络通信可以让ES的节点间通信达到低延时的效果，高带宽也可以让shard分配、数据同步等操作更加快速。现代的数据中心网络对于大多数的集群来说，性能都足够高了，比如千兆网卡就可以满足Elasticsearch集群对网路的要求。</p>
+<p>但是，要避免一个Elasticsearch集群横跨多个数据中心的情况，比如异地多机房部署一个ES集群。因为跨机房的传输会导致网络通信和数据传输性能较差，而ES集群是一种p2p模式的分布式系统架构，不是master/slave。</p>
+<p>在ES集群中所有的node都是对等的，任意两个node间的互相通信都是很频繁和正常的，如果异地多机房部署，可能会导致node间频繁跨地域通信，通信延时会非常高，甚至造成集群运行频繁不正常。</p>
+<h2 id="-">二、容量规划</h2>
+<p>我们进行Elasticsearch集群规划时，需要确认使用多少台服务器，每台服务器的配置，能够支撑预计多大的数据量。但是这个东西不是一概而论的，要视具体的读写场景，根据读写QPS来确定。不过根据我的实际经验，对于很多的中小型公司来说，建议ES集群承载的数据量在10亿规模以内。</p>
+<p>我这里给出一个容量规划示例：</p>
+<ol>
+<li>预估希望能够承载的总数据量，比如10亿条document；</li>
+<li>预估希望的搜索性能，比如达到ms级别；</li>
+<li>计算数据所需的总内存：ES的内存开销主要有两部分——os cache和jvm heap，一般而言2:1分配就可以了。比如每条document的大小是250byte，那么10亿条总共就是250G，算上jvm heap，大约400G；由于最终落地磁盘时ES还有一些自身的数据需要缓存，再加上机器上的其它进程也需要消耗内存，所以总共分配600G。</li>
+<li>计算机器数量：8核64G的机器，支撑600G总内存，分配10台就足够了，这样所有数据基本都可以被缓存，性能其实可以达到ms级别。</li>
+</ol>
+<blockquote>
+<p>根据经验，对于10亿级的数据量，如果对于性能要求是秒级的，那么64G内存的机器，一般5台就够了，此时Elasticsearch不能缓存所有数据，很多数据的检索还是要走磁盘。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>本章，我介绍了在生产环境中部署Elasticsearch集群时，需要注意的机器CPU、内存、磁盘、网络的情况，同时对容量规划给出了建议。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

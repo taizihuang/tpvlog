@@ -1,0 +1,57 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（八）—— J.U.C之locks框架：AQS的Conditon等待(3)</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（八）—— J.U.C之locks框架：AQS的Conditon等待(3)</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、本章概述</h2>
+<p>本章将继续以ReentrantLock的调用为例，说明AbstractQueuedSynchronizer提供的Conditon等待功能。关于Conditon接口的介绍，可以参见：<a href="Java多线程进阶（2）——%20J.U.C之locks框架：接口.html#articleHeader3">Java多线程进阶（二）—— juc-locks锁框架：接口</a>。</p>
+<h2 id="-condition-">二、Condition接口的实现</h2>
+<p>J.U.C包提供了Conditon接口，用以对原生的<code>Object.wait()</code>、<code>Object.notify()</code>进行增强。</p>
+<p>Condition接口的实现类其实是在AQS中——<code>ConditionObject</code>，ReentrantLock的newConditon方法其实是创建了一个<code>AbstractQueuedSynchronizer.ConditionObject</code>对象：<br/><img alt="img" src="./img/20191027101717444.png" style="zoom:80%;"/></p>
+<p>ConditionObject作为AQS的内部类，复用了AQS的结点<code>Node</code>，维护一个条件队列，队列初始时的结构如下：<br><br/><img alt="img" src="./img/20191027101725259.png" style="zoom: 80%;"/></br></p>
+<center><br/><img src="./img/20191027101732800.png"/><br/></center>
+<h3 id="-">示例</h3>
+<blockquote>
+<p>假设现在有3个线程：ThreadA、ThreadB、ThreadC，一个Conditon实现对象。<br/> <code>ReentrantLock lock = new ReentrantLock();</code><br/> <code>Conditon con = lock.newConditon();</code></p>
+</blockquote>
+<p>线程将以以下的时序调用：</p>
+<pre><code class="lang-java">//ThreadA先调用lock方法获取到锁，然后调用con.await()
+
+//ThreadB获取锁，调用con.signal()唤醒ThreadA
+
+//ThreadB释放锁
+</code></pre>
+<h3 id="1-threada-await-">1. ThreadA获取到锁后，首先调用<strong>await</strong>方法</h3>
+<p><img alt="img" src="./img/20191027101739257.png" style="zoom: 80%;"/></p>
+<p>上述方法，先对线程中断做一次预判断，然后将线程包装成结点插入【条件队列】，插入完成后，条件队列的结构如下：</p>
+<center><br/><img alt="img" src="./img/20191027101745886.png" style="zoom: 80%;"/><br/></center>
+<p>我们知道，<code>await()</code>方法会释放当前线程持有的锁，这个过程其实就是<strong>fullyRelease</strong>方法的作用：<br/><img alt="img" src="./img/20191027101752856.png" style="zoom:80%;"/></p>
+<p>然后，判断当前结点是不是在【等待队列】中，不在的话就会阻塞线程。<br/>最终线程A释放了锁，并进入阻塞状态。</p>
+<h3 id="2-threadb-signal-">2. ThreadB获取到锁后，首先调用<strong>signal</strong>方法</h3>
+<p>由于Condition的signal方法要求线程必须获得与此Condition对象相关联的锁，所以这里有个中断判断：<br/><img alt="img" src="./img/20191027101759590.png" style="zoom:80%;"/></p>
+<p>然后，会调用<strong>doSignal</strong>方法，删除条件队列中的队首<strong>CONDITION</strong>类型结点：<br/><img alt="img" src="./img/20191027101806685.png" style="zoom: 80%;"/></p>
+<p>删除完成后，<strong>transferForSignal</strong>方法会将<strong>CONDITON</strong>结点转换为初始结点，并插入【等待队列】：<br/><img alt="img" src="./img/20191027101813149.png" style="zoom:80%;"/></p>
+<p>此时，【条件队列】已经空了：</p>
+<center><br/><img alt="img" src="./img/20191027101823020.png" style="zoom:80%;"/><br/></center>
+<p>而ThreadA被包装成新结点后，插入【等待队列】：</p>
+<center><br/><img alt="img" src="./img/20191027101831396.png" style="zoom:80%;"/><br/></center>
+<h3 id="3-threadb-">3. ThreadB释放锁</h3>
+<p>终于ThreadB释放了锁，释放成功后，会调用<strong>unparkSuccessor</strong>方法（参加AQS独占功能的讲解），唤醒队列中的首结点：<br/><img alt="img" src="./img/20191027101837823.png"/></p>
+<p>最终等待队列结构如下：</p>
+<center><br/><img alt="img" src="./img/20191027101844255.png" style="zoom:80%;"/><br/></center>
+<h3 id="4-threada-">4. ThreadA从唤醒处继续执行</h3>
+<p>ThreadA被唤醒后，从await方法的阻塞处开始继续往下执行：<br/><img alt="img" src="./img/20191027101850429.png" style="zoom:80%;"/></p>
+<p>之后会调用<strong>acquireQueued</strong>方法再次尝试获取锁，获取成功后，最终等待队列状态如下：</p>
+<center><br/><img alt="img" src="./img/20191027101857722.png" style="zoom:80%;"/><br/></center>
+<h2 id="-">三、总结</h2>
+<p>本章以ReentrantLock的公平锁为例，分析了AbstractQueuedSynchronizer的Condition功能。<br/>通过分析，可以看到，当线程在指定Condition对象上等待的时候，其实就是将线程包装成结点，加入了条件队列，然后阻塞。当线程被通知唤醒时，则是将条件队列中的结点转换成等待队列中的结点，之后的处理就和独占功能完全一样。</p>
+<p>除此之外，Condition还支持限时等待、非中断等待等功能，分析思路是一样的，读者可以自己去阅读AQS的源码，通过使用示例，加入调试断点一步步看内部的调用流程，主干理顺了之后，再看其它分支，其实是异曲同工的。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

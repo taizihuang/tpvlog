@@ -1,0 +1,188 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Java并发编程系列</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Java并发编程系列</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我们正式进入Java多线程系列的学习。透彻理解Java并发编程系列包括基础篇和进阶篇。初学者通过基础篇的学习，可以对多线程的初步使用有了基本概念和掌握。多线程这块知识的学习，真正的难点不在于多线程程序的逻辑有多复杂，而在于理清J.U.C包中各个多线程工具类之间的关系、特点及其使用场景（从整体到局部、高屋建瓴，这对学习任何知识都至关重要，如果读者能坚持阅读到本系列的Executors框架，你会明白我为什么强调全局视野的重要性）。</p>
+<p>坦白的说，我还没有遇到过程序逻辑复杂到看不懂的生产级别的代码，所以要真正掌握Java多线程，必须要弄懂J.U.C，并不是说必须是源码级别的，深入源码确实能够让你掌握底层原理，但死扣细节往往造成“当局者迷”。所以，从本阶段开始，我将带领读者去理解J.U.C的设计思路和各个模块中的工具类的特点、用法，然后抽丝剥茧，深入每个工具类的底层实现。</p>
+<p>如果你能跟着我的节奏，打开IDE，顺着我每篇进阶篇文章的思路去看J.U.C工具类的每行源码，回过头来，你会发现Java多线程领域最经典的<a href="https://book.douban.com/subject/1888733/">《Java Concurrency in Practice》</a>中的所有多线程设计原则、思想都包含在J.U.C的实现中，也会对整个J.U.C的设计有一个清晰的认识。</p>
+<h2 id="j-u-c-">J.U.C包简介</h2>
+<p>J.U.C并发包，即<code>java.util.concurrent</code>包，是JDK的核心工具包，是JDK1.5之后，由 Doug Lea实现并引入。</p>
+<p>整个<code>java.util.concurrent</code>包，按照功能可以大致划分如下：</p>
+<ul>
+<li>juc-locks 锁框架</li>
+<li>juc-atomic 原子类框架</li>
+<li>juc-sync 同步器框架</li>
+<li>juc-collections 集合框架</li>
+<li>juc-executors 执行器框架</li>
+</ul>
+<p>本系列将按上述顺序分析J.U.C，分析所基于的源码为Oracle JDK1.8.0_111。</p>
+<p>主要参考书籍：</p>
+<ul>
+<li>《Java Concurrency in Practice》 Brian Goetz等</li>
+<li>《JAVA多线程设计模式》 结城 浩</li>
+</ul>
+<blockquote>
+<p>Java多线程基础系列主要是考虑没有接触过多线程的初学者，该系列完全参考自结城浩的《Java多线程设计模式》，感兴趣的读者可以先阅读该书后再来看进阶部分的文章。</p>
+</blockquote>
+<center><br/><img alt="total" src="./img/20191022013210159.jpg"><br/></img></center>
+<hr/>
+<h2 id="juc-locks-">juc-locks 锁框架</h2>
+<p>早期的JDK版本中，仅仅提供了synchronizd、wait、notify等等比较底层的多线程同步工具，开发人员如果需要开发复杂的多线程应用，通常需要基于JDK提供的这些基础工具进行封装，开发自己的工具类。JDK1.5+后，Doug Lea根据一系列常见的多线程设计模式，设计了JUC并发包，其中<code>java.util.concurrent.locks</code>包下提供了一系列基础的锁工具，用以对synchronizd、wait、notify等进行补充、增强。</p>
+<p><code>java.util.concurrent.locks</code>包的结构如下：</p>
+<center><br/><img src="./img/20191022013217608.png"/><br/></center>
+<p>包内接口和类的简单UML图如下：</p>
+<center><br/><img src="./img/20191022013225327.png"/><br/></center>
+<p><strong>本部分包含以下文章：</strong></p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/18">J.U.C之locks框架（1）：接口说明</a></li>
+<li><a href="https://www.tpvlog.com/article/19">J.U.C之locks框架（2）：ReentrantLock 的使用</a></li>
+<li><a href="https://www.tpvlog.com/article/20">J.U.C之locks框架（3）：ReentrantReadWriteLock 的使用</a></li>
+<li><a href="https://www.tpvlog.com/article/21">J.U.C之locks框架（4）：LockSupport 工具类</a></li>
+<li><a href="https://www.tpvlog.com/article/22">J.U.C之locks框架（5）：AbstractQueuedSynchronizer 综述</a></li>
+<li><a href="https://www.tpvlog.com/article/23">J.U.C之locks框架（6）：AbstractQueuedSynchronizer 的独占功能原理</a></li>
+<li><a href="https://www.tpvlog.com/article/24">J.U.C之locks框架（7）：Condition 原理</a></li>
+<li><a href="https://www.tpvlog.com/article/25">J.U.C之locks框架（8）：AbstractQueuedSynchronizer 的共享功能原理</a></li>
+<li><a href="https://www.tpvlog.com/article/26">J.U.C之locks框架（9）：ReentrantReadWriteLock 原理</a></li>
+<li><a href="https://www.tpvlog.com/article/27">J.U.C之locks框架（10）：更强的读写锁——StampedLock</a></li>
+</ul>
+<hr/>
+<h2 id="juc-atomic-">juc-atomic 原子类框架</h2>
+<p>早期的JDK版本中，如果要并发的对Integer、Long、Double之类的Java原始类型或引用类型进行操作，一般都需要通过锁来控制并发，以防数据不一致。</p>
+<p>从JDK1.5开始，引入了<code>java.util.concurrent.atomic</code>工具包，该包提供了许多Java原始/引用类型的映射类，如<code>AtomicInteger</code>、<code>AtomicLong</code>、<code>AtomicBoolean</code>，这些类可以通过一种“无锁算法”，线程安全的操作Integer、Long、Boolean等原始类型。</p>
+<blockquote>
+<p>所谓“无锁算法”，我们在讲juc-locks锁框架系列中，已经接触过太多次了，其实底层就是通过Unsafe类实现的一种比较并交换的算法，大致的结构如下（具体入参，根据上下文有所不同）：<br/><code>boolean compareAndSet(expectedValue, updateValue);</code><br/>当希望修改的值与expectedValue相同时，则尝试将值更新为updateValue，更新成功返回true，否则返回false。</p>
+</blockquote>
+<p><code>java.util.concurrent.atomic</code>包结构如下：</p>
+<center><br/><img src="./img/20191022013233321.png" style="zoom: 80%;"/><br/></center>
+<p>包内类的简单UML图如下：</p>
+<center><br/><img src="./img/20191022013241577.png" style="zoom: 67%;"/><br/></center>
+<p><strong>本部分包含以下文章：</strong></p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/28">J.U.C之atomic框架（1）：Unsafe类</a></li>
+<li><a href="https://www.tpvlog.com/article/29">J.U.C之atomic框架（2）：AtomicInteger</a></li>
+<li><a href="https://www.tpvlog.com/article/30">J.U.C之atomic框架（3）：AtomicReference</a></li>
+<li><a href="https://www.tpvlog.com/article/31">J.U.C之atomic框架（4）：Atomic数组</a></li>
+<li><a href="https://www.tpvlog.com/article/32">J.U.C之atomic框架（5）：AtomicXXXFieldUpdater</a></li>
+<li><a href="https://www.tpvlog.com/article/33">J.U.C之atomic框架（6）：更强的原子类——LongAdder</a></li>
+</ul>
+<hr/>
+<h2 id="juc-sync-">juc-sync 同步器框架</h2>
+<p>这里的juc-sync同步器框架，是指<code>java.util.concurrent</code>包下一些辅助同步器类，每个类都有自己适合的使用场景：</p>
+<table>
+<thead>
+<tr>
+<th>同步器名称</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CountDownLatch</td>
+<td>倒数计数器，构造时设定计数值，当计数值归零后，所有阻塞线程恢复执行；其内部实现了AQS框架</td>
+</tr>
+<tr>
+<td>CyclicBarrier</td>
+<td>循环栅栏，构造时设定等待线程数，当所有线程都到达栅栏后，栅栏放行；其内部通过ReentrantLock和Condition实现同步</td>
+</tr>
+<tr>
+<td>Semaphore</td>
+<td>信号量，类似于“令牌”，用于控制共享资源的访问数量；其内部实现了AQS框架</td>
+</tr>
+<tr>
+<td>Exchanger</td>
+<td>交换器，类似于双向栅栏，用于线程之间的配对和数据交换；其内部根据并发情况有“单槽交换”和“多槽交换”之分</td>
+</tr>
+<tr>
+<td>Phaser</td>
+<td>多阶段栅栏，相当于CyclicBarrier的升级版，可用于分阶段任务的并发控制执行；其内部比较复杂，支持树形结构，以减少并发带来的竞争</td>
+</tr>
+</tbody>
+</table>
+<p><strong>本部分包含以下文章：</strong><br/><a href="https://www.tpvlog.com/article/37">https://www.tpvlog.com/article/37</a></p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/34">J.U.C之synchronizer框架（1）：倒数计数器——CountDownLatch</a></li>
+<li><a href="https://www.tpvlog.com/article/35">J.U.C之synchronizer框架（2）：循环栅栏——CyclicBarrier</a></li>
+<li><a href="https://www.tpvlog.com/article/36">J.U.C之synchronizer框架（3）：信号量——Semaphore</a></li>
+<li><a href="https://www.tpvlog.com/article/37">J.U.C之synchronizer框架（4）：数据交换器——Exchanger</a></li>
+<li><a href="https://www.tpvlog.com/article/38">J.U.C之synchronizer框架（5）：多阶段栅栏——Phaser</a></li>
+</ul>
+<hr/>
+<h2 id="juc-collections-">juc-collections 集合框架</h2>
+<p>这里的juc-collections集合框架，是指<code>java.util.concurrent</code>包下的一些同步集合类，按类型划分可以分为：<strong>符号表</strong>、<strong>队列</strong>、<strong>Set集合</strong>、<strong>列表</strong>四大类，每个类都有自己适合的使用场景，整个juc-collections集合框架的结构如下图：</p>
+<center><br/><img src="./img/20191022013249865.png" style="zoom: 67%;"/><br/></center>
+<p>其中阻塞队列的分类及特性如下表：</p>
+<table>
+<thead>
+<tr>
+<th>队列特性</th>
+<th>有界队列</th>
+<th>近似无界队列</th>
+<th>无界队列</th>
+<th>特殊队列</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>有锁算法</td>
+<td>ArrayBlockingQueue</td>
+<td>LinkedBlockingQueue、LinkedBlockingDeque</td>
+<td>/</td>
+<td>PriorityBlockingQueue、DelayQueue</td>
+</tr>
+<tr>
+<td>无锁算法</td>
+<td>/</td>
+<td>/</td>
+<td>LinkedTransferQueue</td>
+<td>SynchronousQueue</td>
+</tr>
+</tbody>
+</table>
+<p><strong>本部分包含以下文章：</strong><br/></p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/39">J.U.C之collections框架（1）：ConcurrentHashMap的基本原理</a></li>
+<li><a href="https://www.tpvlog.com/article/40">J.U.C之collections框架（2）：ConcurrentHashMap的扩容</a></li>
+<li><a href="https://www.tpvlog.com/article/41">J.U.C之collections框架（3）：跳表——ConcurrentSkipListMap</a></li>
+<li><a href="https://www.tpvlog.com/article/42">J.U.C之collections框架（4）：ConcurrentSkipListSet</a></li>
+<li><a href="https://www.tpvlog.com/article/43">J.U.C之collections框架（5）：“写时复制”的应用——CopyOnWriteArrayList</a></li>
+<li><a href="https://www.tpvlog.com/article/44">J.U.C之collections框架（6）：CopyOnWriteArraySet</a></li>
+<li><a href="https://www.tpvlog.com/article/45">J.U.C之collections框架（7）：无锁队列——ConcurrentLinkedQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/46">J.U.C之collections框架（8）：无锁双端队列——ConcurrentLinkedDeque</a></li>
+<li><a href="https://www.tpvlog.com/article/47">J.U.C之collections框架（9）：阻塞队列简介——BlockingQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/48">J.U.C之collections框架（10）：基于数组的阻塞队列——ArrayBlockingQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/49">J.U.C之collections框架（11）：基于单链表的阻塞队列——LinkedBlockingQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/50">J.U.C之collections框架（12）：基于堆的优先级阻塞队列——PriorityBlockingQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/51">J.U.C之collections框架（13）：特殊的同步队列——SynchronousQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/52">J.U.C之collections框架（14）：延时阻塞队列——DelayQueue</a></li>
+<li><a href="https://www.tpvlog.com/article/53">J.U.C之collections框架（15）：基于双链表的阻塞双端队列——LinkedBlockingDeque</a></li>
+<li><a href="https://www.tpvlog.com/article/54">J.U.C之collections框架（16）：LinkedTransferQueue</a></li>
+</ul>
+<hr/>
+<h2 id="juc-executors-">juc-executors 执行器框架</h2>
+<p>executors框架是整个J.U.C包中类/接口关系最复杂的框架，executors其实可以划分为3大块，每一块的核心都是基于<strong><em>Executor</em></strong>这个接口：</p>
+<ol>
+<li>线程池</li>
+<li>Future模式</li>
+<li>Fork/Join框架</li>
+</ol>
+<p><strong>本部分包含以下文章：</strong><br/></p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/55">J.U.C之executors框架（1）：executors框架概述</a></li>
+<li><a href="https://www.tpvlog.com/article/56">J.U.C之executors框架（2）：普通线程池——ThreadPoolExecutor</a></li>
+<li><a href="https://www.tpvlog.com/article/57">J.U.C之executors框架（3）：计划线程池——ScheduledThreadPoolExecutor</a></li>
+<li><a href="https://www.tpvlog.com/article/58">J.U.C之executors框架（4）：Future 模式</a></li>
+<li><a href="https://www.tpvlog.com/article/60">J.U.C之executors框架（5）：Fork/Join 框架的原理</a></li>
+<li><a href="https://www.tpvlog.com/article/61">J.U.C之executors框架（6）：Fork/Join 框架的实现</a></li>
+</ul>
+<hr/>
+<p>后续文章将从juc-locks锁框架开始，循序渐进得介绍各个框架中得多线程工具的使用方法和原理。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

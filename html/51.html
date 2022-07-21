@@ -1,0 +1,516 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（三五）—— J.U.C之collections框架：SynchronousQueue</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（三五）—— J.U.C之collections框架：SynchronousQueue</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-synchronousqueue-">一、SynchronousQueue简介</h2>
+<p><code>SynchronousQueue</code>是JDK1.5时，随着J.U.C包一起引入的一种阻塞队列，它实现了BlockingQueue接口，底层基于<strong>栈</strong>和<strong>队列</strong>实现：</p>
+<center><br/> <img src="./img/20191031212630000.png"><br/></img></center>
+<p>没有看错，SynchronousQueue的底层实现包含两种数据结构——<strong>栈</strong>和<strong>队列</strong>。这是一种非常特殊的阻塞队列，它的特点简要概括如下：</p>
+<ol>
+<li>入队线程和出队线程必须一一匹配，否则任意先到达的线程会阻塞。比如ThreadA进行入队操作，在有其它线程执行出队操作之前，ThreadA会一直等待，反之亦然；</li>
+<li>SynchronousQueue内部不保存任何元素，也就是说它的容量为0，数据直接在配对的生产者和消费者线程之间传递，不会将数据缓冲到队列中。</li>
+<li>SynchronousQueue支持公平/非公平策略。其中非公平模式，基于内部数据结构——“栈”来实现，公平模式，基于内部数据结构——“队列”来实现；</li>
+<li>SynchronousQueue基于一种名为“<a href="http://www.cs.rochester.edu/research/synchronization/pseudocode/duals.html">Dual stack and Dual queue</a>”的无锁算法实现。</li>
+</ol>
+<blockquote>
+<p><em>注意：上述的特点1，和我们之前介绍的Exchanger其实非常相似，可以类比<a href="https://www.tpvlog.com/article/37">Exchanger</a>的功能来理解。</em></p>
+</blockquote>
+<h2 id="-synchronousqueue-">二、SynchronousQueue原理</h2>
+<h3 id="2-1-">2.1 构造</h3>
+<p>之前提到，SynchronousQueue根据公平/非公平访问策略的不同，内部使用了两种不同的数据结构：栈和队列。我们先来看下对象的构造，SynchronousQueue只有2种构造器：</p>
+<pre><code class="lang-java">/**
+ * 默认构造器.
+ * 默认使用非公平策略.
+ */
+public SynchronousQueue() {
+    this(false);
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 指定策略的构造器.
+ */
+public SynchronousQueue(boolean fair) {
+    transferer = fair ? new TransferQueue&lt;E&gt;() : new TransferStack&lt;E&gt;();
+}
+</code></pre>
+<p>可以看到，对于公平策略，内部构造了一个<strong>TransferQueue</strong>对象，而非公平策略则是构造了<strong>TransferStack</strong>对象。这两个类都继承了内部类<strong>Transferer</strong>，SynchronousQueue中的所有方法，其实都是委托调用了TransferQueue/TransferStack的方法：</p>
+<pre><code class="lang-JAVA">public class SynchronousQueue&lt;E&gt; extends AbstractQueue&lt;E&gt;
+        implements BlockingQueue&lt;E&gt;, java.io.Serializable {
+
+    /**
+     * tranferer对象, 构造时根据策略类型确定.
+     */
+    private transient volatile Transferer&lt;E&gt; transferer;
+
+    /**
+     * Shared internal API for dual stacks and queues.
+     */
+    abstract static class Transferer&lt;E&gt; {
+        /**
+         * Performs a put or take.
+         *
+         * @param e 非null表示 生产者 -&gt; 消费者;
+         *          null表示, 消费者 -&gt; 生产者.
+         * @return 非null表示传递的数据; null表示传递失败（超时或中断）.
+         */
+        abstract E transfer(E e, boolean timed, long nanos);
+    }
+
+    /**
+     * Dual stack（双栈结构）.
+     * 非公平策略时使用.
+     */
+    static final class TransferStack&lt;E&gt; extends Transferer&lt;E&gt; {
+        // ...
+    }
+
+    /**
+     * Dual Queue（双端队列）.
+     * 公平策略时使用.
+     */
+    static final class TransferQueue&lt;E&gt; extends Transferer&lt;E&gt; {
+        // ...
+    }
+
+    // ...
+}
+</code></pre>
+<hr/>
+<h3 id="2-2-">2.2 栈结构</h3>
+<p>非公平策略由TransferStack类实现，既然TransferStack是栈，那就有结点。TransferStack内部定义了名为<strong>SNode</strong>的结点：</p>
+<pre><code class="lang-JAVA">static final class SNode {
+    volatile SNode next;
+    volatile SNode match;       // 与当前结点配对的结点
+    volatile Thread waiter;     // 当前结点对应的线程
+    Object item;                // 实际数据或null
+    int mode;                   // 结点类型
+
+    SNode(Object item) {
+        this.item = item;
+    }
+
+    // Unsafe mechanics
+    private static final sun.misc.Unsafe UNSAFE;
+    private static final long matchOffset;
+    private static final long nextOffset;
+
+    static {
+        try {
+            UNSAFE = sun.misc.Unsafe.getUnsafe();
+            Class&lt;?&gt; k = SNode.class;
+            matchOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("match"));
+            nextOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("next"));
+        } catch (Exception e) {
+            throw new Error(e);
+        }
+    }
+
+    // ...
+
+}
+</code></pre>
+<p>上述SNode结点的定义中有个<code>mode</code>字段，表示结点的类型。TransferStack一共定义了<strong>三种结点类型</strong>，任何线程对TransferStack的操作都会创建下述三种类型的某种结点：</p>
+<ul>
+<li><strong><em>REQUEST</em></strong>：表示未配对的消费者（当线程进行出队操作时，会创建一个mode值为REQUEST的SNode结点 ）</li>
+<li><strong><em>DATA</em></strong>：表示未配对的生产者（当线程进行入队操作时，会创建一个mode值为DATA的SNode结点 ）</li>
+<li><strong><em>FULFILLING</em></strong>：表示配对成功的消费者/生产者</li>
+</ul>
+<pre><code class="lang-JAVA">static final class TransferStack&lt;E&gt; extends Transferer&lt;E&gt; {
+
+    /**
+     * 未配对的消费者
+     */
+    static final int REQUEST = 0;
+    /**
+     * 未配对的生产者
+     */
+    static final int DATA = 1;
+    /**
+     * 配对成功的消费者/生产者
+     */
+    static final int FULFILLING = 2;
+
+     volatile SNode head;
+
+    // Unsafe mechanics
+    private static final sun.misc.Unsafe UNSAFE;
+    private static final long headOffset;
+
+    static {
+        try {
+            UNSAFE = sun.misc.Unsafe.getUnsafe();
+            Class&lt;?&gt; k = TransferStack.class;
+            headOffset = UNSAFE.objectFieldOffset(k.getDeclaredField("head"));
+        } catch (Exception e) {
+            throw new Error(e);
+        }
+    }
+
+    // ...
+}
+</code></pre>
+<hr/>
+<h3 id="2-3-put-take">2.3 核心操作——put/take</h3>
+<p>SynchronousQueue的入队操作调用了<strong>put</strong>方法：</p>
+<pre><code class="lang-java">/**
+ * 入队指定元素e.
+ * 如果没有另一个线程进行出队操作, 则阻塞该入队线程.
+ */
+public void put(E e) throws InterruptedException {
+    if (e == null) throw new NullPointerException();
+    if (transferer.transfer(e, false, 0) == null) {
+        Thread.interrupted();
+        throw new InterruptedException();
+    }
+}
+</code></pre>
+<p>SynchronousQueue的出队操作调用了<strong>take</strong>方法：</p>
+<pre><code class="lang-JAVA">/**
+ * 出队一个元素.
+ * 如果没有另一个线程进行出队操作, 则阻塞该入队线程.
+ */
+public E take() throws InterruptedException {
+    E e = transferer.transfer(null, false, 0);
+    if (e != null)
+        return e;
+    Thread.interrupted();
+    throw new InterruptedException();
+}
+</code></pre>
+<p>可以看到，SynchronousQueue一样不支持null元素，实际的入队/出队操作都是委托给了<strong>transfer</strong>方法，该方法返回null表示出/入队失败（通常是线程被中断或超时）：</p>
+<pre><code class="lang-JAVA">/**
+ * 入队/出队一个元素.
+ */
+E transfer(E e, boolean timed, long nanos) {
+    SNode s = null; // s表示新创建的结点
+    // 入参e==null, 说明当前是出队线程（消费者）, 否则是入队线程（生产者）
+    // 入队线程创建一个DATA结点, 出队线程创建一个REQUEST结点
+    int mode = (e == null) ? REQUEST : DATA;
+
+    for (; ; ) {    // 自旋
+        SNode h = head;
+        if (h == null || h.mode == mode) {          // CASE1: 栈为空 或 栈顶结点类型与当前mode相同
+            if (timed &amp;&amp; nanos &lt;= 0) {              // case1.1: 限时等待的情况
+                if (h != null &amp;&amp; h.isCancelled())
+                    casHead(h, h.next);
+                else
+                    return null;
+            } else if (casHead(h, s = snode(s, e, h, mode))) {  // case1.2 将当前结点压入栈
+                SNode m = awaitFulfill(s, timed, nanos);        // 阻塞当前调用线程
+                if (m == s) {                                   // 阻塞过程中被中断
+                    clean(s);
+                    return null;
+                }
+
+                // 此时m为配对结点
+                if ((h = head) != null &amp;&amp; h.next == s)
+                    casHead(h, s.next);
+
+                // 入队线程null, 出队线程返回配对结点的值
+                return (E) ((mode == REQUEST) ? m.item : s.item);
+            }
+            // 执行到此处说明入栈失败(多个线程同时入栈导致CAS操作head失败),则进入下一次自旋继续执行
+
+        } else if (!isFulfilling(h.mode)) {          // CASE2: 栈顶结点还未配对成功
+            if (h.isCancelled())                     // case2.1: 元素取消情况（因中断或超时）的处理
+                casHead(h, h.next);
+            else if (casHead(h, s = snode(s, e,
+                h, FULFILLING | mode))) {      // case2.2: 将当前结点压入栈中
+                for (; ; ) {
+                    SNode m = s.next;       // s.next指向原栈顶结点（也就是与当前结点匹配的结点）
+                    if (m == null) {        // m==null说明被其它线程抢先匹配了, 则跳出循环, 重新下一次自旋
+                        casHead(s, null);
+                        s = null;
+                        break;
+                    }
+
+                    SNode mn = m.next;
+                    if (m.tryMatch(s)) {    // 进行结点匹配
+                        casHead(s, mn);     // 匹配成功, 将匹配的两个结点全部弹出栈
+                        return (E) ((mode == REQUEST) ? m.item : s.item);   // 返回匹配值
+                    } else                  // 匹配失败
+                        s.casNext(m, mn);   // 移除原待匹配结点
+                }
+            }
+        } else {                            // CASE3: 其它线程正在匹配
+            SNode m = h.next;
+            if (m == null)                  // 栈顶的next==null, 则直接弹出, 重新进入下一次自旋
+                casHead(h, null);
+            else {                          // 尝试和其它线程竞争匹配
+                SNode mn = m.next;
+                if (m.tryMatch(h))
+                    casHead(h, mn);         // 匹配成功
+                else
+                    h.casNext(m, mn);       // 匹配失败（被其它线程抢先匹配成功了）
+            }
+        }
+    }
+}
+</code></pre>
+<p>整个<strong>transfer</strong>方法考虑了限时等待的情况，且入队/出队其实都是调用了同一个方法，其主干逻辑就是在一个自旋中完成以下三种情况之一的操作，直到成功，或者被中断或超时取消：</p>
+<ol>
+<li>栈为空，或栈顶结点类型与当前入队结点相同。这种情况，调用线程会阻塞；</li>
+<li>栈顶结点还未配对成功，且与当前入队结点可以配对。这种情况，直接进行配对操作；</li>
+<li>栈顶结点正在配对中。这种情况，直接进行下一个结点的配对。</li>
+</ol>
+<hr/>
+<h3 id="2-4-">2.4 出/入队示例讲解</h3>
+<p>为了便于理解，我们来看下面这个调用示例（假设不考虑限时等待的情况），假设一共有三个线程ThreadA、ThreadB、ThreadC：</p>
+<p><strong>①初始栈结构</strong></p>
+<p>初始栈为空，<code>head</code>为栈顶指针，始终指向栈顶结点：</p>
+<center><br/> <img src="./img/20191031212643731.png"/><br/></center>
+<p><strong>②ThreadA（生产者）执行入队操作</strong></p>
+<p>由于此时栈为空，所以ThreadA会进入<strong><em>CASE1</em></strong>，创建一个类型为<code>DATA</code>的结点：</p>
+<pre><code class="lang-JAVA">if (h == null || h.mode == mode) {          // CASE1: 栈为空 或 栈顶结点类型与当前mode相同
+    if (timed &amp;&amp; nanos &lt;= 0) {              // case1.1: 限时等待的情况
+        if (h != null &amp;&amp; h.isCancelled())
+            casHead(h, h.next);
+        else
+            return null;
+    } else if (casHead(h, s = snode(s, e, h, mode))) {  // case1.2 将当前结点压入栈
+        SNode m = awaitFulfill(s, timed, nanos);        // 阻塞当前调用线程
+        if (m == s) {                                   // 阻塞过程中被中断
+            clean(s);
+            return null;
+        }
+
+        // 此时m为配对结点
+        if ((h = head) != null &amp;&amp; h.next == s)
+            casHead(h, s.next);
+
+        // 入队线程null, 出队线程返回配对结点的值
+        return (E) ((mode == REQUEST) ? m.item : s.item);
+    }
+    // 执行到此处说明入栈失败(多个线程同时入栈导致CAS操作head失败),则进入下一次自旋继续执行
+}
+</code></pre>
+<p><strong><em>CASE1</em></strong>分支中，将结点压入栈后，会调用<code>awaitFulfill</code>方法，该方法会阻塞调用线程：</p>
+<pre><code class="lang-JAVA">/**
+ * 阻塞当前调用线程, 并将线程信息记录在s.waiter字段上.
+ *
+ * @param s 等待的结点
+ * @return 返回配对的结点 或 当前结点（说明线程被中断了）
+ */
+SNode awaitFulfill(SNode s, boolean timed, long nanos) {
+    final long deadline = timed ? System.nanoTime() + nanos : 0L;
+    Thread w = Thread.currentThread();
+
+    // 性能优化操作（计算自旋次数）
+    int spins = (shouldSpin(s) ? (timed ? maxTimedSpins : maxUntimedSpins) : 0);
+    for (; ; ) {
+        if (w.isInterrupted())
+            s.tryCancel();
+        /**
+         * s.match保存当前结点的匹配结点.
+         * s.match==null说明还没有匹配结点
+         * s.match==s说明当前结点s对应的线程被中断了
+         */
+        SNode m = s.match;
+        if (m != null)
+            return m;
+        if (timed) {
+            nanos = deadline - System.nanoTime();
+            if (nanos &lt;= 0L) {
+                s.tryCancel();
+                continue;
+            }
+        }
+        if (spins &gt; 0)
+            spins = shouldSpin(s) ? (spins - 1) : 0;
+        else if (s.waiter == null)  // 还没有匹配结点, 则保存当前线程
+            s.waiter = w;           // s.waiter保存当前阻塞线程
+        else if (!timed)
+            LockSupport.park(this); // 阻塞当前线程
+        else if (nanos &gt; spinForTimeoutThreshold)
+            LockSupport.parkNanos(this, nanos);
+    }
+}
+</code></pre>
+<p>此时栈结构如下，结点的<code>waiter</code>字段保存着创建该结点的线程ThreadA，ThreadA等待着被配对消费者线程唤醒：</p>
+<center><br/> <img src="./img/20191031212654788.png"/><br/></center>
+<p><strong>③ThreadB（生产者）执行入队操作</strong></p>
+<p>此时栈顶结点的类型和ThreadB创建的结点相同（都是<code>DATA</code>类型的结点），所以依然走<strong><em>CASE1</em></strong>分支，直接将结点压入栈：</p>
+<center><br/> <img src="./img/20191031212710058.png"/><br/></center>
+<p><strong>④ThreadC（消费者）执行出队操作</strong></p>
+<p>此时栈顶结点的类型和ThreadC创建的结点匹配（栈顶<code>DATA</code>类型，ThreadC创建的是<code>REQUEST</code>类型），所以走<strong><em>CASE2</em></strong>分支，该分支会将匹配的两个结点弹出栈：</p>
+<pre><code class="lang-JAVA">else if (!isFulfilling(h.mode)) {          // CASE2: 栈顶结点还未配对成功
+    if (h.isCancelled())                     // case2.1: 元素取消情况（因中断或超时）的处理
+        casHead(h, h.next);
+    else if (casHead(h, s = snode(s, e,
+        h, FULFILLING | mode))) {      // case2.2: 将当前结点压入栈中
+        for (; ; ) {
+            SNode m = s.next;       // s.next指向原栈顶结点（也就是与当前结点匹配的结点）
+            if (m == null) {        // m==null说明被其它线程抢先匹配了, 则跳出循环, 重新下一次自旋
+                casHead(s, null);
+                s = null;
+                break;
+            }
+
+            SNode mn = m.next;
+            if (m.tryMatch(s)) {    // 进行结点匹配
+                casHead(s, mn);     // 匹配成功, 将匹配的两个结点全部弹出栈
+                return (E) ((mode == REQUEST) ? m.item : s.item);   // 返回匹配值
+            } else                  // 匹配失败
+                s.casNext(m, mn);   // 移除原待匹配结点
+        }
+    }
+}
+</code></pre>
+<p>上述<strong>isFulfilling</strong>方法就是判断结点是否匹配：</p>
+<pre><code class="lang-JAVA">/**
+ * 判断m是否已经配对成功.
+ */
+static boolean isFulfilling(int m) {
+    return (m &amp; FULFILLING) != 0;
+}
+</code></pre>
+<p>ThreadC创建结点并压入栈后，栈的结构如下：</p>
+<center><br/> <img src="./img/20191031212721851.png"/><br/></center>
+<p>此时，ThreadC会调用<strong>tryMatch</strong>方法进行匹配，该方法的主要作用有两点：</p>
+<ol>
+<li>将待结点的<code>match</code>字段置为与当前配对的结点（如上图中，结点m是待配对结点，最终<code>m.math == s</code>）</li>
+<li>唤醒待配对结点中的线程（如上图中，唤醒结点m中ThreadB线程）</li>
+</ol>
+<pre><code class="lang-JAVA">/**
+ * 尝试将当前结点和s结点配对.
+ */
+boolean tryMatch(SNode s) {
+    if (match == null &amp;&amp; UNSAFE.compareAndSwapObject(this, matchOffset, null, s)) {
+        Thread w = waiter;
+        if (w != null) {    // 唤醒当前结点对应的线程
+            waiter = null;
+            LockSupport.unpark(w);
+        }
+        return true;
+    }
+    return match == s;      // 配对成功返回true
+}
+</code></pre>
+<p>匹配完成后，会将匹配的两个结点弹出栈，并返回匹配值：</p>
+<pre><code class="lang-JAVA">if (m.tryMatch(s)) {    // 进行结点匹配
+    casHead(s, mn);     // 匹配成功, 将匹配的两个结点全部弹出栈
+    return (E) ((mode == REQUEST) ? m.item : s.item);   // 返回匹配值
+}
+</code></pre>
+<p>最终，ThreadC拿到了等待配对结点中的数据并返回，此时栈的结构如下：</p>
+<center><br/> <img src="./img/20191031212735507.png"/><br/></center>
+<blockquote>
+<p><strong>注意:</strong> <strong><em>CASE2</em></strong>分支中ThreadC创建的结点的mode值并不是REQUEST，其mode值为<code>FULFILLING | mode</code>，<code>FULFILLING | mode</code>的主要作用就是给栈顶结点置一个标识（二进制为11或10），<strong>表示当前有线程正在对栈顶匹配</strong>，这时如果有其它线程进入自旋（并发情况），则CASE2一定失败，因为<code>isFulfilling</code>的结果必然为true，所以会进入<strong><em>CASE3</em></strong>分支——跳过栈顶结点进行匹配。</p>
+</blockquote>
+<pre><code class="lang-java">casHead(h, s = snode(s, e, h, FULFILLING | mode))
+</code></pre>
+<p><strong>⑤ThreadB（生产者）唤醒后继续执行</strong></p>
+<p>ThreadB被唤醒后，会从原阻塞处继续执行，并进入下一次自旋，在下一次自旋中，由于结点的<code>match</code>字段已经有了匹配结点，所以直接返回配对结点：</p>
+<pre><code class="lang-JAVA">/**
+ * 阻塞当前调用线程, 并将线程信息记录在s.waiter字段上.
+ *
+ * @param s 等待的结点
+ * @return 返回配对的结点 或 当前结点（说明线程被中断了）
+ */
+SNode awaitFulfill(SNode s, boolean timed, long nanos) {
+    final long deadline = timed ? System.nanoTime() + nanos : 0L;
+    Thread w = Thread.currentThread();
+
+    // 性能优化操作（计算自旋次数）
+    int spins = (shouldSpin(s) ? (timed ? maxTimedSpins : maxUntimedSpins) : 0);
+    for (; ; ) {
+        if (w.isInterrupted())
+            s.tryCancel();
+        /**
+         * s.match保存当前结点的匹配结点.
+         * s.match==null说明还没有匹配结点
+         * s.match==s说明当前结点s对应的线程被中断了
+         */
+        SNode m = s.match;
+        if (m != null)
+            return m;
+        if (timed) {
+            nanos = deadline - System.nanoTime();
+            if (nanos &lt;= 0L) {
+                s.tryCancel();
+                continue;
+            }
+        }
+        if (spins &gt; 0)
+            spins = shouldSpin(s) ? (spins - 1) : 0;
+        else if (s.waiter == null)  // 还没有匹配结点, 则保存当前线程
+            s.waiter = w;           // s.waiter保存当前阻塞线程
+        else if (!timed)
+            LockSupport.park(this); // 阻塞当前线程
+        else if (nanos &gt; spinForTimeoutThreshold)
+            LockSupport.parkNanos(this, nanos);
+    }
+}
+</code></pre>
+<p>最终，在下面分支中返回：</p>
+<pre><code class="lang-JAVA">else if (casHead(h, s = snode(s, e, h, mode))) {  // case1.2 将当前结点压入栈
+    SNode m = awaitFulfill(s, timed, nanos);        // 阻塞当前调用线程
+    if (m == s) {                                   // 阻塞过程中被中断
+        clean(s);
+        return null;
+    }
+
+    // 此时m为配对结点
+    if ((h = head) != null &amp;&amp; h.next == s)
+        casHead(h, s.next);
+
+    // 入队线程null, 出队线程返回配对结点的值
+    return (E) ((mode == REQUEST) ? m.item : s.item);
+}
+</code></pre>
+<blockquote>
+<p><strong>注意：</strong>对于<strong>入队</strong>线程（生产者），返回的是它入队时携带的<strong>原有元素值。</strong></p>
+</blockquote>
+<hr/>
+<h3 id="2-5-">2.5 队列结构</h3>
+<p>SynchronousQueue的公平策略由<strong>TransferQueue</strong>类实现，TransferQueue内部定义了名为<code>QNode</code>的结点,一个<code>head</code>队首指针，一个<code>tail</code>队尾指针：</p>
+<pre><code class="lang-JAVA">/**
+ * Dual Queue（双端队列）.
+ * 公平策略时使用.
+ */
+static final class TransferQueue&lt;E&gt; extends Transferer&lt;E&gt; {
+
+    /**
+     * Head of queue
+     */
+    transient volatile QNode head;
+    /**
+     * Tail of queue
+     */
+    transient volatile QNode tail;
+    /**
+     * Reference to a cancelled node that might not yet have been
+     * unlinked from queue because it was the last inserted node
+     * when it was cancelled.
+     */
+    transient volatile QNode cleanMe;
+
+    /**
+     * 队列结点定义.
+     */
+    static final class QNode {
+        volatile QNode next;          // next node in queue
+        volatile Object item;         // CAS'ed to or from null
+        volatile Thread waiter;       // to control park/unpark
+        final boolean isData;
+        // ...
+    }
+
+    // ...
+}
+</code></pre>
+<blockquote>
+<p>关于TransferQueue的transfer方法就不再赘述了，其思路和TransferStack大致相同，总之就是入队/出队必须一一匹配，否则任意一方就会加入队列并等待匹配线程唤醒。读者可以自行阅读TransferQueued的源码。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>TransferQueue主要用于线程之间的数据交换，由于采用无锁算法，其性能一般比单纯的其它阻塞队列要高。它的最大特点时不存储实际元素，而是在内部通过栈或队列结构保存阻塞线程。后面我们讲<strong>JUC线程池框架</strong>的时候，还会再次看到它的身影。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

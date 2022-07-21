@@ -1,0 +1,288 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（二十）——Spring Cloud Eureka：注解式启动Eureka原理</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（二十）——Spring Cloud Eureka：注解式启动Eureka原理</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>前面章节，我针对Netflix Eureka的核心源码进行了讲解。Spring Cloud在Netflix Eureka的基础上封装了一层，将Netflix Eureka整合到Spring技术体系中，也就是<code>spring-cloud-netflix-eureka</code>项目。这个项目仅仅是对Netflix Eureka的一个封装，提供了一些Spring Boot的注解，让Netflix Eureka更易于使用。</p>
+<p>本章，我们就来看看，Spring Cloud是如何将Netflix Eureka整合到springboot技术栈中的。本章主要分为两部分：<strong>Eureka-Server注解式启动</strong>、<strong>Eureka-Client注解式启动</strong>。</p>
+<h2 id="-eureka-server-">一、Eureka-Server注解式启动</h2>
+<p>首先，我们来看下Spring Boot工程下，Eureka-Server是如何启动的。首先，我们引入<code>spring-cloud-starter-eureka</code>这个依赖，然后仅仅用了一个注解<code>@EnableEurekaServer</code>，最后直接启动一个main方法，就可以将Eureka-Server给启动起来了：</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaServer
+public class EurekaServer {
+    public static void main(String[] args) {
+        SpringApplication.run(EurekaServer.class, args);
+    }
+}
+</code></pre>
+<h3 id="1-1-enableeurekaserver-">1.1 EnableEurekaServer注解</h3>
+<p><code>@EnableEurekaServer</code>注解，这个注解作用就是在Spring Boot启动一个内嵌的tomcat容器之后，将Eureka-Server在tomcat内部启动起来。这里的核心其实就是Spring Boot自身提供的<strong>Auto Configuration机制</strong>。</p>
+<pre><code class="lang-JAVA">/**
+ * Annotation to activate Eureka Server related configuration {@link EurekaServerAutoConfiguration}
+ *
+ * @author Dave Syer
+ * @author Biju Kunjummen
+ *
+ */
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Import(EurekaServerMarkerConfiguration.class)
+public @interface EnableEurekaServer {
+
+}
+</code></pre>
+<p>依托Spring Boot的auto configuration机制，可以让我们使用一个注解<code>@EnableEurekaServer</code>，就触发<code>EurekaServerAutoConfiguration</code>的执行，从而完成Eureka-Server的初始化和启动。</p>
+<h3 id="1-2-eurekaserverautoconfiguration-">1.2 EurekaServerAutoConfiguration自动装配</h3>
+<p>我们来看下EurekaServerAutoConfiguration，可以看到它自动帮我们组装好了Eureka-Server启动需要的各种配置和组件：</p>
+<pre><code class="lang-JAVA">@Configuration
+@Import(EurekaServerInitializerConfiguration.class)
+@ConditionalOnBean(EurekaServerMarkerConfiguration.Marker.class)
+@EnableConfigurationProperties({ EurekaDashboardProperties.class, InstanceRegistryProperties.class })
+@PropertySource("classpath:/eureka/server.properties")
+public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
+    /**
+     * List of packages containing Jersey resources required by the Eureka server
+     */
+    private static String[] EUREKA_PACKAGES = new String[] { "com.netflix.discovery",
+            "com.netflix.eureka" };
+
+    @Autowired
+    private ApplicationInfoManager applicationInfoManager;
+
+    @Autowired
+    private EurekaServerConfig eurekaServerConfig;
+
+    @Autowired
+    private EurekaClientConfig eurekaClientConfig;
+
+    @Autowired
+    private EurekaClient eurekaClient;
+
+    @Autowired
+    private InstanceRegistryProperties instanceRegistryProperties;
+
+    //...
+
+    @Bean
+    public PeerAwareInstanceRegistry peerAwareInstanceRegistry(
+            ServerCodecs serverCodecs) {
+        this.eurekaClient.getApplications(); // force initialization
+        return new InstanceRegistry(this.eurekaServerConfig, this.eurekaClientConfig,
+                serverCodecs, this.eurekaClient,
+                this.instanceRegistryProperties.getExpectedNumberOfRenewsPerMin(),
+                this.instanceRegistryProperties.getDefaultOpenForTrafficCount());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PeerEurekaNodes peerEurekaNodes(PeerAwareInstanceRegistry registry,
+            ServerCodecs serverCodecs) {
+        return new PeerEurekaNodes(registry, this.eurekaServerConfig,
+                this.eurekaClientConfig, serverCodecs, this.applicationInfoManager);
+    }
+
+    @Bean
+    public EurekaServerContext eurekaServerContext(ServerCodecs serverCodecs,
+            PeerAwareInstanceRegistry registry, PeerEurekaNodes peerEurekaNodes) {
+        return new DefaultEurekaServerContext(this.eurekaServerConfig, serverCodecs,
+                registry, peerEurekaNodes, this.applicationInfoManager);
+    }
+
+    @Bean
+    public EurekaServerBootstrap eurekaServerBootstrap(PeerAwareInstanceRegistry registry,
+            EurekaServerContext serverContext) {
+        return new EurekaServerBootstrap(this.applicationInfoManager,
+                this.eurekaClientConfig, this.eurekaServerConfig, registry,
+                serverContext);
+    }
+
+    //...
+}
+</code></pre>
+<h3 id="1-3-eurekaserverinitializerconfiguration">1.3 EurekaServerInitializerConfiguration</h3>
+<p>最后，Spring Boot启动之后，就会执行<code>EurekaServerInitializerConfiguration.start()</code>，启动一个后台线程，完成剩余的Eureka-Srver初始化过程：</p>
+<pre><code class="lang-JAVA">// EurekaServerInitializerConfiguration.java
+
+@Autowired
+private EurekaServerBootstrap eurekaServerBootstrap;
+
+public void start() {
+    new Thread(new Runnable() {
+        @Override
+        public void run() {
+            try { 
+                 //初始化
+                eurekaServerBootstrap
+                     .contextInitialized(EurekaServerInitializerConfiguration.this.servletContext);
+                log.info("Started Eureka Server");
+
+                publish(new EurekaRegistryAvailableEvent(getEurekaServerConfig()));
+                EurekaServerInitializerConfiguration.this.running = true;
+                publish(new EurekaServerStartedEvent(getEurekaServerConfig()));
+            }
+            catch (Exception ex) {
+                // Help!
+                log.error("Could not initialize Eureka servlet context", ex);
+            }
+        }
+    }).start();
+}
+</code></pre>
+<blockquote>
+<p>EurekaServerInitializerConfiguration是Spring Boot自身的机制，我这里就不赘述，后续有时间我出个专栏讲解下Spring Boot的核心源码。</p>
+</blockquote>
+<p>EurekaServerBootstrap是Spring Cloud自己封装的一个类，相当于把Eureka自身的<code>EurekaBootStrap</code>类的功能复制了一份：</p>
+<pre><code class="lang-JAVA">public void contextInitialized(ServletContext context) {
+    try {
+        initEurekaEnvironment();
+        initEurekaServerContext();
+
+        context.setAttribute(EurekaServerContext.class.getName(), this.serverContext);
+    }
+    catch (Throwable e) {
+        log.error("Cannot bootstrap eureka server :", e);
+        throw new RuntimeException("Cannot bootstrap eureka server :", e);
+    }
+}
+</code></pre>
+<p>经过上述流程，最终就完成了Eureka-Server的启动。</p>
+<h2 id="-eureka-client-">二、Eureka-Client注解式启动</h2>
+<p>接着，我们再来看下Eureka-Client的注解式启动，原理几乎和Eureka-Server注解式启动一模一样。Spring Cloud就是做了一层简单的封装而已。</p>
+<pre><code class="lang-JAVA">@SpringBootApplication
+@EnableEurekaClient
+public class EurekaClient {
+    public static void main(String[] args) {
+        SpringApplication.run(EurekaServer.class, args);
+    }
+}
+</code></pre>
+<h3 id="2-1-enableeurekaclient-">2.1 EnableEurekaClient注解</h3>
+<p><code>@EnableEurekaClient</code>注解，这个注解作用就是在Spring Boot启动一个内嵌的tomcat容器之后，将Eureka-Client在tomcat内部启动起来。这里的核心其实就是Spring Boot自身提供的<strong>Auto Configuration机制</strong>。</p>
+<pre><code class="lang-JAVA">@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Inherited
+public @interface EnableEurekaClient {
+
+}
+</code></pre>
+<p>依托Spring Boot的auto configuration机制，可以让我们使用一个注解<code>@EnableEurekaClient</code>，就触发<code>EurekaClientAutoConfiguration</code>的执行，从而完成Eureka-Client的初始化和启动。</p>
+<h3 id="2-2-eurekaclientautoconfiguration-">2.2 EurekaClientAutoConfiguration自动装配</h3>
+<p>我们来看下EurekaClientAutoConfiguration，可以看到它自动帮我们组装好了Eureka-Client启动需要的各种配置和组件：</p>
+<pre><code class="lang-JAVA">@Configuration
+@EnableConfigurationProperties
+@ConditionalOnClass(EurekaClientConfig.class)
+@Import(DiscoveryClientOptionalArgsConfiguration.class)
+@ConditionalOnBean(EurekaDiscoveryClientConfiguration.Marker.class)
+@ConditionalOnProperty(value = "eureka.client.enabled", matchIfMissing = true)
+@AutoConfigureBefore({ NoopDiscoveryClientAutoConfiguration.class,
+        CommonsClientAutoConfiguration.class, ServiceRegistryAutoConfiguration.class })
+@AutoConfigureAfter(name = {"org.springframework.cloud.autoconfigure.RefreshAutoConfiguration",
+        "org.springframework.cloud.netflix.eureka.EurekaDiscoveryClientConfiguration",
+        "org.springframework.cloud.client.serviceregistry.AutoServiceRegistrationAutoConfiguration"})
+public class EurekaClientAutoConfiguration {
+
+    //...
+
+    @Bean
+    @ConditionalOnMissingBean(value = EurekaClientConfig.class, search = SearchStrategy.CURRENT)
+    public EurekaClientConfigBean eurekaClientConfigBean(ConfigurableEnvironment env) {
+        EurekaClientConfigBean client = new EurekaClientConfigBean();
+        if ("bootstrap".equals(new RelaxedPropertyResolver(env).getProperty("spring.config.name"))) {
+            client.setRegisterWithEureka(false);
+        }
+        return client;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(value = EurekaInstanceConfig.class, search = SearchStrategy.CURRENT)
+    public EurekaInstanceConfigBean eurekaInstanceConfigBean(InetUtils inetUtils,
+                                                             ManagementMetadataProvider managementMetadataProvider, ConfigurableEnvironment env) throws MalformedURLException {
+        //...
+        EurekaInstanceConfigBean instance = new EurekaInstanceConfigBean(inetUtils);
+        //...
+        return instance;
+    }
+
+    @Bean
+    public DiscoveryClient discoveryClient(EurekaInstanceConfig config, EurekaClient client) {
+        return new EurekaDiscoveryClient(config, client);
+    }
+
+    @Bean
+    public EurekaServiceRegistry eurekaServiceRegistry() {
+        return new EurekaServiceRegistry();
+    }
+
+    @Configuration
+    @ConditionalOnMissingRefreshScope
+    protected static class EurekaClientConfiguration {
+
+        @Autowired
+        private ApplicationContext context;
+
+        @Autowired
+        private AbstractDiscoveryClientOptionalArgs&lt;?&gt; optionalArgs;
+
+        @Bean(destroyMethod = "shutdown")
+        @ConditionalOnMissingBean(value = EurekaClient.class, search = SearchStrategy.CURRENT)
+        public EurekaClient eurekaClient(ApplicationInfoManager manager, EurekaClientConfig config) {
+            return new CloudEurekaClient(manager, config, this.optionalArgs,
+                    this.context);
+        }
+
+        @Bean
+        @ConditionalOnMissingBean(value = ApplicationInfoManager.class, search = SearchStrategy.CURRENT)
+        public ApplicationInfoManager eurekaApplicationInfoManager(
+                EurekaInstanceConfig config) {
+            InstanceInfo instanceInfo = new InstanceInfoFactory().create(config);
+            return new ApplicationInfoManager(config, instanceInfo);
+        }
+    }
+}
+</code></pre>
+<h3 id="2-3-eurekaautoserviceregistration">2.3 EurekaAutoServiceRegistration</h3>
+<p>最后，Spring Boot启动之后，就会执行<code>EurekaAutoServiceRegistration.start()</code>，启动一个后台线程，完成剩余的Eureka-Client初始化过程：</p>
+<pre><code class="lang-JAVA">//EurekaAutoServiceRegistration.java
+
+public void start() {
+    // only set the port if the nonSecurePort or securePort is 0 and this.port != 0
+    if (this.port.get() != 0) {
+        if (this.registration.getNonSecurePort() == 0) {
+            this.registration.setNonSecurePort(this.port.get());
+        }
+
+        if (this.registration.getSecurePort() == 0 &amp;&amp; this.registration.isSecure()) {
+            this.registration.setSecurePort(this.port.get());
+        }
+    }
+
+    // only initialize if nonSecurePort is greater than 0 and it isn't already running
+    // because of containerPortInitializer below
+    if (!this.running.get() &amp;&amp; this.registration.getNonSecurePort() &gt; 0) {
+
+        this.serviceRegistry.register(this.registration);
+
+        this.context.publishEvent(
+            new InstanceRegisteredEvent&lt;&gt;(this, this.registration.getInstanceConfig()));
+        this.running.set(true);
+    }
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我讲解了Spring Cloud Eureka启动的核心原理，看懂了Netflix Eureka的源码后，再看Spring Cloud其实就一目了然了。Spring Cloud的整体封装逻辑就是：</p>
+<ol>
+<li>Spring Boot的main方法启动，内嵌一个tomcat容器启动；</li>
+<li>扫描到@EnableEurekaServer注解，就利用<code>EurekaServerAutoConfiguration</code>完成Eureka-Server依赖的各种组件的组件，然后通过<code>EurekaServerInitializerConfiguration.start()</code>最终完成Eureka-Server的所有组件的初始化和启动；</li>
+<li>扫描到@EnableEurekaClient注解，就利用<code>EurekaClientAutoConfiguration</code>完成Eureka-Client依赖的各种组件的组件，然后通过<code>EurekaAutoServiceRegistration.start()</code>最终完成Eureka-Client的所有组件的初始化和启动；</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

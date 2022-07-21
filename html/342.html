@@ -1,0 +1,623 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解秒杀系统（五）——项目实战：工程搭建</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解秒杀系统（五）——项目实战：工程搭建</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>通过前面几个章节，我基本上已经讲解完了整个分布式秒杀系统的架构。现在，我们正式进入实战阶段，本章我会先构建起整个秒杀系统的工程项目，然后初步对几个非核心模块的功能进行讲解，后续章节我再讲解核心模块的功能：</p>
+<center><br/> <img src="./img/20210814154809692.png" style="zoom:65%"><br/></img></center>
+<p>整个工程我划分为八个模块：</p>
+<ul>
+<li><strong>seckill-eureka-server：</strong>服务注册中心</li>
+<li><strong>seckill-common：</strong>通用模块</li>
+<li><strong>seckill-flash-sale：</strong>秒杀抢购服务</li>
+<li><strong>seckill-inventory：</strong>秒杀商品库存管理服务</li>
+<li><strong>seckill-operation：</strong>秒杀活动管理服务</li>
+<li><strong>seckill-order：</strong>秒杀下单服务</li>
+<li><strong>seckill-page：</strong>秒杀页面渲染服务</li>
+<li><strong>seckill-web：</strong>电商网站秒杀活动页</li>
+</ul>
+<blockquote>
+<p>本章的代码，我上传到了<a href="[https://gitee.com/ressmix/source-code/tree/master/3.%E5%88%86%E5%B8%83%E5%BC%8F%E7%A7%92%E6%9D%80%E7%B3%BB%E7%BB%9F/1.%E5%B7%A5%E7%A8%8B%E6%90%AD%E5%BB%BA/seckill](https://gitee.com/ressmix/source-code/tree/master/3.分布式秒杀系统/1.工程搭建/seckill">Gitee仓库</a>)上，需要的读者请自行下载。另外，工程依赖的数据库、RocketMQ我不再带领大家安装部署，可以参考网上资料或者我写的<a href="https://www.tpvlog.com/article/62">《分布式系统从理论到实战》</a>系列的实战篇进行搭建。</p>
+</blockquote>
+<h2 id="-">一、公共服务</h2>
+<p>公共服务主要是提供一些工具方法，比如Redis、MQ进行封装。</p>
+<h3 id="1-1-redis-">1.1 Redis工具</h3>
+<p>运营人员配置完成秒杀活动后，秒杀商品的库存会被缓存到Redis集群中，我这里不采用Redis中间件了（比如Twemproxy），而是自己写一个普通工具类做商品库存的分片存储。</p>
+<p><strong>Jedis管理组件：</strong></p>
+<pre><code class="lang-JAVA">/**
+ * 管理多个Jedis实例的组件
+ *
+ * @author Ressmix
+ */
+public class JedisManager {
+
+    /**
+     * 缓存Jedis实例
+     */
+    private Map&lt;String, Jedis&gt; jedisMap = new ConcurrentHashMap&lt;String, Jedis&gt;();
+
+    private JedisManager() {
+    }
+
+    private static class Singleton {
+        private static JedisManager instance = new JedisManager();
+    }
+
+    public static JedisManager getInstance() {
+        return Singleton.instance;
+    }
+
+    /**
+     * 获取Jedis实例，同时进行缓存
+     *
+     * @param host redis实例地址
+     * @param port redis实例端口号
+     */
+    public Jedis getJedis(String host, Integer port) {
+        String cacheKey = host + port;
+
+        if (!jedisMap.containsKey(cacheKey)) {
+            synchronized (this) {
+                if (!jedisMap.containsKey(cacheKey)) {
+                    Jedis jedis = new Jedis(host, port);
+                    jedisMap.put(cacheKey, jedis);
+                }
+            }
+        }
+        return jedisMap.get(cacheKey);
+    }
+
+    /**
+     * 获取默认的jedis实例
+     */
+    public Jedis getJedis() {
+        return getJedis("127.0.0.1", 6379);
+    }
+}
+</code></pre>
+<p><strong>Redis工具类：</strong></p>
+<pre><code class="lang-JAVA">/**
+ * 用于Redis集群数据分片的工具类
+ *
+ * @author Ressmix
+ */
+public class RedisCluster {
+
+    /**
+     * Redis集群对应的Jedis列表
+     */
+    private List&lt;Jedis&gt; cluster = new ArrayList&lt;Jedis&gt;();
+
+    /**
+     * 私有构造函数
+     */
+    private RedisCluster() {
+        // 初始化redis集群，假设我们就三个Master节点构成一个集群
+        cluster.add(new Jedis("127.0.0.1", 6479));
+        cluster.add(new Jedis("127.0.0.1", 6579));
+        cluster.add(new Jedis("127.0.0.1", 6679));
+    }
+
+    /**
+     * 单例
+     */
+    private static class Singleton {
+        static RedisCluster instance = new RedisCluster();
+    }
+
+    /**
+     * 获取单例
+     */
+    public static RedisCluster getInstance() {
+        return Singleton.instance;
+    }
+
+    /**
+     * 分片缓存秒杀商品库存
+     *
+     * @param productId    商品id
+     * @param seckillStock 秒杀总库存
+     */
+    public void initSeckillProductStock(Long productId, Long seckillStock) {
+        //...
+    }
+
+    /**
+     * 对商品进行秒杀抢购
+     *
+     * @param userId    用户ID
+     * @param productId 秒杀商品ID
+     */
+    public Boolean flashSale(Long userId, Long productId) {
+        //...
+    }
+
+    /**
+     * 支付成功通知时的库存处理逻辑
+     *
+     * @param stockShardRedisNode 秒杀成功时所在的库存分片节点
+     * @param productId           商品ID
+     */
+    public Boolean flashSaleOrderPaySuccess(String stockShardRedisNode, Long productId) {
+        //...
+    }
+
+    /**
+     * 支付失败的库存处理逻辑
+     *
+     * @param stockShardRedisNode   秒杀成功时所在的库存分片节点
+     * @param productId 商品ID
+     */
+    public Boolean flashSaleOrderPayFail(String stockShardRedisNode, Long productId) {
+        //...
+    }
+}
+</code></pre>
+<h3 id="1-2-rocketmq-">1.2 RocketMQ工具</h3>
+<p>RocketMQ工具类比较简单，就是一个生产者单例：</p>
+<pre><code class="lang-JAVA">/**
+ * RocketMQ生产者单例类
+ *
+ * @author Ressmix
+ */
+public class RocketMQProducer {
+    private DefaultMQProducer producer;
+
+    private RocketMQProducer(String producerGroup) {
+        try {
+            this.producer = new DefaultMQProducer(producerGroup);
+            this.producer.setNamesrvAddr("localhost:9876");
+            this.producer.setSendMsgTimeout(60 * 1000);
+            this.producer.start();
+        } catch (MQClientException e) {
+            System.err.println("初始化RocketMQ生产者失败：" + e);
+        }
+    }
+
+    private static class Singleton {
+        static RocketMQProducer instance = new RocketMQProducer(producerGroup);
+    }
+
+    private static String producerGroup;
+
+    /**
+     * 设置生产者分组名称
+     */
+    public static void setProducerGroup(String producerGroup) {
+        RocketMQProducer.producerGroup = producerGroup;
+    }
+
+    /**
+     * 获取单例
+     */
+    public static RocketMQProducer getInstance() {
+        return Singleton.instance;
+    }
+
+    /**
+     * 获取MQ生产者
+     */
+    public DefaultMQProducer getProducer() {
+        return producer;
+    }
+}
+</code></pre>
+<h2 id="-">二、秒杀活动管理服务</h2>
+<p>秒杀活动管理服务<code>seckill-operation</code>主要提供给运营人员使用，对秒杀活动进行增删改查，活动变更后会发送通知到MQ。</p>
+<center><br/> <img src="./img/20210814154819832.png" style="zoom:50%"/><br/></center>
+<blockquote>
+<p>我会尽量简化代码，说明服务的主体功能，因为我这个系列的重点不是讲怎么写CRUD代码，所以很多地方我都会略过。</p>
+</blockquote>
+<h3 id="2-1-">2.1 对外接口</h3>
+<p>秒杀活动管理服务对外提供两类接口：</p>
+<ul>
+<li>秒杀场次管理；</li>
+<li>秒杀商品管理。</li>
+</ul>
+<pre><code class="lang-JAVA">/**
+ * 秒杀活动管理服务接口
+ */
+@RestController
+@RequestMapping("/seckill/operation")
+public class SeckillOperationController {
+    @Autowired
+    private SeckillSessionService seckillSessionService;
+
+    @Autowired
+    private SeckillProductService seckillProductService;
+
+    /**
+     * 增加秒杀场次
+     */
+    @GetMapping("/session/add")
+    public String addSeckillSession(SeckillSession seckillSession) {
+        seckillSessionService.add(seckillSession);
+        return "success";
+    }
+
+    /**
+     * 增加秒杀商品
+     */
+    @GetMapping("/product/add")
+    public String addSeckillProduct(SeckillProduct seckillProduct) {
+        // 1.执行秒杀（内部基于Redis LUa扣减库存）
+        seckillProductService.add(seckillProduct);
+
+        // 2.将变动通知到MQ
+        DefaultMQProducer producer = RocketMQProducer.getInstance().getProducer();
+        try {
+            Message message = new Message("seckill_product_added_topic", null,
+                    JSONObject.toJSONString(seckillProduct).getBytes(RemotingHelper.DEFAULT_CHARSET)
+            );
+            SendResult sendResult = producer.send(message);
+            System.out.printf("%s%n", sendResult);
+            System.out.println("推送秒杀商品增加通知到MQ成功......");
+        } catch (Exception e) {
+            System.err.println("增加秒杀商品时，推送消息到MQ失败：" + e);
+            return "failure";
+        }
+
+        return "success";
+    }
+}
+</code></pre>
+<p>秒杀场次Bean：</p>
+<pre><code class="lang-JAVA">/**
+ * 秒杀场次
+ */
+public class SeckillSession {
+    private Long id;
+    /**
+     * 秒杀场次id
+     */
+    private Long sessionId;
+    /**
+     * 秒杀场次日期
+     */
+    private String sessionDate;
+    /**
+     * 秒杀场次时间
+     */
+    private String sessionTime;
+}
+</code></pre>
+<p>秒杀商品Bean：</p>
+<pre><code class="lang-JAVA">/**
+ * 秒杀商品
+ */
+public class SeckillProduct {
+
+    private Long id;
+    /**
+     * 所属秒杀场次id
+     */
+    private Long sessionId;
+    /**
+     * 商品id
+     */
+    private Long productId;
+    /**
+     * 秒杀价格
+     */
+    private Double seckillPrice;
+    /**
+     * 秒杀库存数量
+     */
+    private Long seckillStock;
+}
+</code></pre>
+<h3 id="2-2-">2.2 服务</h3>
+<p>秒杀场次服务：</p>
+<pre><code class="lang-JAVA">/**
+ * 秒杀场次Service
+ */
+public interface SeckillSessionService {
+
+    /**
+     * 增加秒杀场次
+     */
+    void add(SeckillSession seckillSession);
+
+}
+</code></pre>
+<p>秒杀商品服务：</p>
+<pre><code class="lang-JAVA">/**
+ * 秒杀商品Service
+ */
+public interface SeckillProductService {
+
+    /**
+     * 增加秒杀商品
+     */
+    void add(SeckillProduct seckillProduct);
+}
+</code></pre>
+<h2 id="-">三、秒杀页面渲染服务</h2>
+<p>秒杀页面渲染服务<code>seckill-page</code>主要监听运营人员对秒杀活动的变更，同时从其它系统查询秒杀商品详情页依赖的数据，通过模板引擎直接渲染出Html页面，最后将Html页面推送到Nginx群组：</p>
+<center><br/> <img src="./img/20210814154830160.png" style="zoom:50%"/><br/></center>
+<h3 id="3-1-">3.1 监听数据变动</h3>
+<p>我这里直接通过Spring Boot的<code>CommandLineRunner</code>来实现Bean加载完成后的注册监听动作：</p>
+<ol>
+<li><code>seckill-page</code>服务启动后，会创建一个RocketMQ消费者，订阅主题<code>seckill_product_added_topic</code>；</li>
+<li>当接受到消息时，先判断是哪个商品的变动，然后调用商品系统或其它依赖系统的接口获取详细数据；</li>
+<li>最后，利用模板引擎渲染HTML并推送到Nginx和CDN。</li>
+</ol>
+<pre><code class="lang-JAVA">@Component
+public class BootListener implements CommandLineRunner {
+
+    public void run(String... strings) throws Exception {
+        DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("seckill-page-consumer-group");
+        consumer.setNamesrvAddr("localhost:9876");
+        consumer.subscribe("seckill_product_added_topic", "*");
+
+        consumer.registerMessageListener(new MessageListenerConcurrently() {
+            @Override
+            public ConsumeConcurrentlyStatus consumeMessage(List&lt;MessageExt&gt; messageExts,
+                                                            ConsumeConcurrentlyContext context) {
+                for (MessageExt messageExt : messageExts) {
+                    System.out.println(new String(messageExt.getBody()));
+
+                    // 1.秒杀场次里增加的商品
+                    String seckillProductJSON = new String(messageExt.getBody());
+                    JSONObject seckillProductJSONObject = JSONObject.parseObject(seckillProductJSON);
+
+                    // 2.这里模拟调用商品系统的接口，获取商品的详细数据（也可能还涉及调用其它系统接口）
+                    Long productId = seckillProductJSONObject.getLong("productId");
+                    Double seckillPrice = seckillProductJSONObject.getDouble("seckillPrice");
+                    Long seckillStock = seckillProductJSONObject.getLong("seckillStock");
+
+                    // 3.使用freemarker模板引擎把商品数据渲染到一个html模板里去
+                    FreemarkerHelper viewEngine = new FreemarkerHelper();
+
+                    Map&lt;String, Object&gt; paras = new HashMap&lt;String, Object&gt;();
+                    paras.put("productId", productId);
+                    paras.put("seckillPrice", seckillPrice);
+                    paras.put("seckillStock", seckillStock);
+
+                    String html = viewEngine.parseTemplate("autolist.ftl", paras);
+
+                    // 4.将渲染后的静态html通过scp等命令推送到nginx服务器的指定目录
+                    System.out.println("将渲染完毕的秒杀商品html页面写入磁盘文件......");
+                    System.out.println(html);
+                    System.out.println("将磁盘上的html文件使用scp命令传送到nginx服务器上去......");
+
+                    // 5.调用CDN厂商的API，让CDN刷新一下静态页面的缓存
+                    System.out.println("调用CDN产品的API，让CDN刷新一下静态页面的缓存.......");
+                }
+                return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+            }
+        });
+        consumer.start();
+        System.out.println("消费者启动......");
+    }
+}
+</code></pre>
+<p>我这里简化起见，用注释表示具体的业务逻辑。</p>
+<h3 id="3-2-">3.2 模板工具类</h3>
+<p>我这里使用Freemarker作为模板渲染引擎：</p>
+<pre><code class="lang-JAVA">/**
+ * freemarker工具类
+ */
+public class FreemarkerHelper {
+    private static Configuration tplConfig = new Configuration();
+
+    static {
+        try {
+            // 设置模板路径
+            tplConfig.setDirectoryForTemplateLoading(new File("/Users/shishan/Documents/development"));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * 解析freemarker模板
+     */
+    public String parseTemplate(String tplName, String encoding, Map&lt;String, Object&gt; paras) {
+        try {
+            StringWriter swriter = new StringWriter();
+            Template mytpl = null;
+            mytpl = tplConfig.getTemplate(tplName, encoding);
+            mytpl.process(paras, swriter);
+            return swriter.toString();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return e.toString();
+        }
+    }
+
+    public String parseTemplate(String tplName, Map&lt;String, Object&gt; paras) {
+        return this.parseTemplate(tplName, "utf-8", paras);
+    }
+}
+</code></pre>
+<h2 id="-">四、秒杀库存管理服务</h2>
+<p>秒杀商品库存管理服务<code>seckill-inventory</code>主要监听各类数据的变动，比如运营人员对秒杀活动的变更，订单系统对订单状态的更新通知。<code>seckill-inventory</code>负责将商品库存<strong>分片缓存/更新</strong>到Redis集群中：</p>
+<center><br/> <img src="./img/20210814154839959.png" style="zoom:50%"/><br/></center>
+<h3 id="4-1-">4.1 监听数据变动</h3>
+<p>监听数据变动通知，主要是针对两类通知做处理：</p>
+<ol>
+<li>运营人员对秒杀活动进行配置或变更的通知，此时应该更新库存到Redis的不同分片中去；</li>
+<li>订单系统对已经支付成功或失败的订单的通知，此时也应该更新Redis中的库存。</li>
+</ol>
+<p>另外，特别要注意接口处理的幂等性，一般可以用一个唯一业务操作标识进行判断：</p>
+<pre><code class="lang-JAVA">@Component
+public class BootListener implements CommandLineRunner {
+    public void run(String... strings) throws Exception {
+        DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("seckill-inventory-consumer-group");
+        consumer.setNamesrvAddr("localhost:9876");
+        // 订阅秒杀活动变动通知
+        consumer.subscribe("seckill_product_added_topic", "*");
+        // 订阅订单支付成功/失败通知
+        consumer.subscribe("order_pay_result_inform", "*");
+
+        consumer.registerMessageListener(new MessageListenerConcurrently() {
+            @Override
+            public ConsumeConcurrentlyStatus consumeMessage(List&lt;MessageExt&gt; messageExts,
+                                                            ConsumeConcurrentlyContext context) {
+                for (MessageExt messageExt : messageExts) {
+                    System.out.println(new String(messageExt.getBody()));
+                    String topic = messageExt.getTopic();
+
+                    // 秒杀活动变动通知
+                    if (topic.equals("seckill_product_added_topic")) {
+                        String seckillProductJSON = new String(messageExt.getBody());
+                        JSONObject seckillProductJSONObject = JSONObject.parseObject(seckillProductJSON);
+
+                        // 1.幂等控制
+                        JedisManager jedisManager = JedisManager.getInstance();
+                        Jedis jedis = jedisManager.getJedis();
+                        String inventoryInitedFlag = jedis.get("seckill::product-inventory-inited::flag::"
+                                                              + productId);
+                        if (inventoryInitedFlag != null &amp;&amp; inventoryInitedFlag.equals("inited")) {
+                            continue;
+                        }
+                        jedis.set("seckill::product-inventory-inited::flag::" + productId, "inited");
+
+                        System.out.println("调用库存中心提供的接口，冻结商品用于秒杀活动的库存");
+
+                        // 2.分片缓存秒杀商品库存
+                        RedisCluster redisCluster = RedisCluster.getInstance();
+                        redisCluster.initSeckillProductStock(productId, seckillStock);
+                    } 
+                    // 商品订单支付成功/失败通知
+                    else if (topic.equals("order_pay_result_inform")) {
+                        JSONObject orderPayResult = JSONObject
+                            .parseObject(new String(messageExt.getBody()));
+                        Long userId = orderPayResult.getLong("userId");
+                        Long productId = orderPayResult.getLong("productId");
+                        Boolean orderPaySuccess = orderPayResult.getInteger("orderPaySuccess") == 1 ? 
+                            true : false;
+
+                        // 1.幂等性控制
+                        JedisManager jedisManager = JedisManager.getInstance();
+                        Jedis jedis = jedisManager.getJedis();
+                        String orderPayResultProcessedFlag = jedis
+                            .get("seckill::order-pay-result-processed::flag::" + userId + "::" + productId);
+
+                        if (orderPayResultProcessedFlag != null &amp;&amp; 
+                            orderPayResultProcessedFlag.equals("processed")) {
+                            continue;
+                        }
+                        jedis.set("seckill::order-pay-result-processed::flag::"
+                                  + userId + "::" + productId, "processed");
+
+                        // 2.获取当时秒杀成功时的库存分片所在redis节点
+                        String stockShardRedisNode = jedis.get("flash_sale::stock_shard::" 
+                                                               + userId + "::" + productId);
+
+                        RedisCluster redisCluster = RedisCluster.getInstance();
+
+                        // 订单支付成功
+                        if (orderPaySuccess) {
+                            redisCluster.flashSaleOrderPaySuccess(stockShardRedisNode, productId);
+                        }
+                        // 订单支付失败
+                        else {
+                            redisCluster.flashSaleOrderPayFail(stockShardRedisNode, productId);
+                        }
+
+                        System.out.println("秒杀抢购商品的订单支付结果处理成功......");
+                    }
+                }
+                return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+            }
+        });
+        consumer.start();
+        System.out.println("消费者启动......");
+    }
+}
+</code></pre>
+<h3 id="4-2-">4.2 分片缓存商品库存</h3>
+<p>我们先来看下分片缓存商品库存的逻辑，：</p>
+<pre><code class="lang-JAVA">public class RedisCluster {
+    /**
+     * 分片缓存秒杀商品库存
+     * @param productId 商品id
+     * @param seckillStock 秒杀商品总库存
+     */
+    public void initSeckillProductStock(Long productId, Long seckillStock) {
+        // 1.将总库存分摊到各个分片
+        int clusterSize = cluster.size();
+        Long seckillStockPerNode = seckillStock / clusterSize;
+        Long remainSeckillStock = seckillStock - seckillStockPerNode * clusterSize;
+        Long seckillStockLastNode = seckillStockPerNode + remainSeckillStock;
+
+        System.out.println("每个redis节点（除最后一个节点外）的库存数量为：" + seckillStockPerNode);
+        System.out.println("最后一个redis节点的库存数量为：" + seckillStockLastNode);
+        System.out.println("redis集群的总库存数量为：" + (seckillStockPerNode * (clusterSize - 1) + seckillStockLastNode));
+
+        // 2.1库存分片数据初始化（除了最后一个节点）
+        for(int i = 0; i &lt; cluster.size() - 1; i++) {
+            Jedis jedis = cluster.get(i);
+            jedis.hset("seckill::product::" + productId + "::stock", "salingStock", String.valueOf(seckillStockPerNode));
+            jedis.hset("seckill::product::" + productId + "::stock", "lockedStock", "0");
+            jedis.hset("seckill::product::" + productId + "::stock", "saledStock", "0");
+        }
+
+        // 2.2库存分片数据初始化（最后一个节点）
+        Jedis jedis = cluster.get(cluster.size() - 1);
+        jedis.hset("seckill::product::" + productId + "::stock", "salingStock", String.valueOf(seckillStockLastNode));
+        jedis.hset("seckill::product::" + productId + "::stock", "lockedStock", "0");
+        jedis.hset("seckill::product::" + productId + "::stock", "saledStock", "0");
+    }
+    //...
+}
+</code></pre>
+<h3 id="4-3-">4.3 支付通知处理</h3>
+<p>当用户完成对抢购订单的支付后，订单系统会将支付结果通知发送到MQ，而秒杀库存管理服务会监听MQ，对已经支付成功或失败的订单的更新Redis中的库存：</p>
+<pre><code class="lang-JAVA">public class RedisCluster {
+
+    /**
+     * 秒杀订单支付成功的库存处理逻辑
+     * @param stockShardRedisNode 抢购下单时扣减库存所在的Redis节点
+     * @param productId 商品ID
+     */
+    public void flashSaleOrderPaySuccess(String stockShardRedisNode, Long productId) {
+        Integer redisNodeIndex = Integer.valueOf(stockShardRedisNode);
+        Jedis redisNode = cluster.get(redisNodeIndex);
+
+        // 扣减锁定库存，增加已销售库存
+        String luaScript = ""
+                + "local productKey = 'seckill::product::" + productId + "::stock';"
+                + "local lockedStock = redis.call('hget', productKey, 'lockedStock') + 0;"
+                + "local saledStock = redis.call('hget', productKey, 'saledStock') + 0;"
+                + "redis.call('hset', productKey, 'lockedStock', lockedStock - 1);"
+                + "redis.call('hset', productKey, 'saledStock', lockedStock + 1);";
+
+        redisNode.eval(luaScript);
+    }
+
+    /**
+     * 秒杀订单支付失败的库存处理逻辑
+     * @param stockShardRedisNode 抢购下单时扣减库存所在的Redis节点
+     * @param productId 商品ID
+     */
+    public void flashSaleOrderPayFail(String stockShardRedisNode, Long productId) {
+        Integer redisNodeIndex = Integer.valueOf(stockShardRedisNode);
+        Jedis redisNode = cluster.get(redisNodeIndex);
+
+        // 扣减锁定库存，增加可销售库存
+        String luaScript = ""
+                + "local productKey = 'seckill::product::" + productId + "::stock';"
+                + "local salingStock = redis.call('hget', productKey, 'salingStock') + 0;"
+                + "local lockedStock = redis.call('hget', productKey, 'lockedStock') + 0;"
+                + "redis.call('hset', productKey, 'lockedStock', lockedStock - 1);"
+                + "redis.call('hset', productKey, 'salingStock', salingStock + 1);";
+
+        redisNode.eval(luaScript);
+    }
+
+}
+</code></pre>
+<h2 id="-">五、总结</h2>
+<p>本章，我对整个分布式秒杀系统的非核心模块功能的代码进行了讲解。下一章，我将讲解如何基于Nignx完成系统限流和业务限流，并对秒杀抢购服务的逻辑进行讲解。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式秒杀分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/66">分布式秒杀</a></div>
+</div></body>
+        </html>
+        

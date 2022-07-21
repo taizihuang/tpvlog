@@ -1,0 +1,116 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（七）——分布式框架之高性能：分布式搜索引擎</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（七）——分布式框架之高性能：分布式搜索引擎</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本章开始，我将讲解和高性能相关的另一类分布式框架——分布式搜索引擎。目前开源界主要的搜索引擎框架有三个：Lucene、Elasticsearch、Solr。事实上，Lucene仅仅只是一个库，而Elasticsearch和Solr在底层都是使用了Lucene，相当于对它进行了封装，从而对用户更加友好，使用更加便捷。</p>
+<p>Elasticsearch是一个开源的分布式、RESTful 风格的搜索和数据分析引擎，采用Java编写，内部使用Apache Lucene 做索引与搜索，它的目标是使数据搜索和分析变得更简单。简单来说，Elasticsearch就是对Lucene 做了一层封装，它提供了一套简单一致的 RESTful API 来帮助我们实现数据的存储、检索、分析。</p>
+<p>当然，Elasticsearch 不仅仅是 Lucene，并且也不仅仅只是一个搜索引擎。 它主要可以用作以下用途：</p>
+<ul>
+<li><p>作为一个分布式的NoSQL文档数据库；</p>
+</li>
+<li><p>进行数据的准实时搜索和聚合分析；</p>
+</li>
+</ul>
+<blockquote>
+<p>Solr这里就不再介绍了，它和Elasticsearch一样都是比较火的，各有优劣，读者可以自行查找相关资料进行了解。</p>
+</blockquote>
+<p>后续章节，我将以Elasticsearch为例，主要从架构层面讲解它的核心设计要点。由于本系列是<a href="https://www.tpvlog.com/article/62#menu_2">分布式系统进阶篇系列</a>，不是开源框架使用教程，所以我只会围绕分布式系统的四个核心要点——<strong>高性能</strong>、<strong>高可用</strong>、<strong>可扩展</strong>、<strong>数据一致性</strong>去讲解。</p>
+<blockquote>
+<p>更多关于Elasticsearch的知识和底层原理，读者可以参阅<a href="https://www.elastic.co/guide/index.html">官方文档</a>和相关书籍，也可以参阅我写的《深入浅出Elasticsearch系列》。</p>
+</blockquote>
+<p>本章，我们先来了解下Elasticsearch中的一些核心概念。</p>
+<h2 id="-">一、核心概念</h2>
+<h3 id="1-1-document-">1.1 Document（文档）</h3>
+<p>在Elasticsearch中，数据以JSON格式进行存储，最小数据单元就叫<strong>document</strong>。一个document可以是一条客户数据、一条商品信息数据，一条订单数据等等。比如，下面就是一个商品信息document：</p>
+<pre><code class="lang-JAVA">{
+  "product_id": "1",
+  "product_name": "高露洁牙膏",
+  "product_desc": "高效美白",
+  "category_id": "2",
+  "category_name": "日化用品"
+}
+</code></pre>
+<h3 id="1-2-index-">1.2 Index（索引）</h3>
+<p>Index，指包含一堆有相似结构的document数据，比如一个客户索引，商品索引，订单索引等等。一个Index包含很多document，代表了一类相似或者相同的document。</p>
+<h3 id="1-3-type-">1.3 Type（分类）</h3>
+<p>Type，表示Index中的一个<strong>逻辑数据分类</strong>。每个Index可以有多个type，而每个type又可以存储多个document。</p>
+<h3 id="1-4-field-">1.4 Field（字段）</h3>
+<p>一个document里面有多个field，每个field就是一个数据字段。</p>
+<p>以关系型数据库来类比理解：</p>
+<table>
+<thead>
+<tr>
+<th>Elasticsearch</th>
+<th>关系型数据库</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Index</td>
+<td>数据库实例</td>
+</tr>
+<tr>
+<td>Type</td>
+<td>表</td>
+</tr>
+<tr>
+<td>Document</td>
+<td>行</td>
+</tr>
+<tr>
+<td>Field</td>
+<td>列</td>
+</tr>
+</tbody>
+</table>
+<p>还是不理解？没关系，我再来举个示例，假设我们的系统要存储商品信息。</p>
+<ul>
+<li>首先“商品”这个概念就可以作为一个Index，比如我们叫它<code>mer_idx</code>；</li>
+<li>然后，商品有很多分类，比如日化商品、电器商品、生鲜商品，每一个分类我们把它作为一个Type，那么就有<code>mer_normal_type</code>、<code>mer_elc_type</code>、<code>mer_sea_type</code>。</li>
+<li>每一种Type分类下都有自己的一些商品信息，这些商品信息的大部分Field都是相同的，比如商品ID、商品名称、数量、描述等等，但是每个分类又略有差别，比如电器商品类相比生鲜商品类，可能多了些电器参数字段。</li>
+</ul>
+<pre><code class="lang-JAVA"># Type
+mer_elc_type(电器商品类型)：product_id，product_name，product_desc，electic_power
+mer_sea_type(生鲜商品类型)：product_id，product_name，product_desc，expired_date
+
+# Document
+{
+  #一条电器类商品Document
+  "product_id": "2",
+  "product_name": "长虹电视机",
+  "product_desc": "4k高清",
+  "electic_power": "250V"
+}
+{
+  #一条生鲜类商品Document
+  "product_id": "3",
+  "product_name": "基围虾",
+  "product_desc": "纯天然，冰岛产",
+  "expired_date": "3天"
+}
+</code></pre>
+<h3 id="1-5-shard-">1.5 Shard（分片）</h3>
+<p>单台机器无法存储大量数据，Elasticsearch可以将一个Index（索引）中的数据切分为多个Shard，分布在不同服务器节点上，这样就可以实现水平扩展，提升吞吐量和性能。这其实是一种<a href="https://www.tpvlog.com/article/76#menu_1">数据分散集群</a>的架构模式。</p>
+<blockquote>
+<p>每个Shard都是一个Lucene index，可以看成是一个Lucene实例，后续章节我会专门讲解Shard。</p>
+</blockquote>
+<h3 id="1-6-replica-">1.6 Replica（副本）</h3>
+<p>任何一台服务器随时都可能故障或宕机，此时Shard中的数据就可能丢失，因此可以为每个Shard创建多个备份——Replica副本。Replica可以在Shard故障时提供备用服务，保证数据不丢失，多个Replica还可以提升搜索的吞吐量和性能。这其实是一种<a href="https://www.tpvlog.com/article/75">主从架构模式</a>。</p>
+<blockquote>
+<p>每个索引的Primary Shard数量，需要在索引建立时就设置，一旦设置完不能修改，而Replica Shard可以随时修改数量。</p>
+</blockquote>
+<h2 id="-type-">二、关于Type的补充说明</h2>
+<p>Elasticsearch从<code>7.0</code>版本开始，移除了Type这个概念。主要原因是在同一个索引中，存储仅有小部分字段相同或者全部字段都不相同的document，会导致数据稀疏，影响Lucene有效压缩数据的能力。</p>
+<p>但是，我在本系列的讲解中仍然沿用<code>Type</code>这个概念，主要是考虑到向前兼容，因为很多公司都是用的5.x、6.x版本。事实上，这也引入<code>Type</code>讲解也不会造成什么影响，因为目前在<code>7.x</code>中，还是兼容Type的。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我简单介绍了Elasticsearch的一些基本概念。下一章我将对Elasticsearch的架构做一个完整阐述。对Elasticsearch感兴趣的读者，可以参考我的<a href="https://www.tpvlog.com/article/147">《深入浅出Elasticsearch系列》</a>。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,95 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（十）——Eureka Server：EurekaServerContext构造</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（十）——Eureka Server：EurekaServerContext构造</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>EurekaServerContext，代表了当前这个Eureka-Server的服务上下文，包含了服务需要的所有东西。可以这么说，整个Eureka-Server的初始化过程，最终的目的其实就是构建这个服务上下文：</p>
+<pre><code class="lang-java">serverContext = new DefaultEurekaServerContext(
+    eurekaServerConfig,
+    serverCodecs,
+    registry,
+    peerEurekaNodes,
+    applicationInfoManager
+);
+
+// 将EurekaServerContext保存到EurekaServerContextHolder中，方便使用
+EurekaServerContextHolder.initialize(serverContext);
+// 初始化EurekaServerContext
+serverContext.initialize();
+</code></pre>
+<p>通过上述EurekaBootStrap启动流程的代码也可以知道，EurekaServerContext的构造依赖了我们之前讲过的EurekaServerConfig、PeerAwareInstanceRegistry、PeerEurekaNodes、ApplicationInfoManager等。</p>
+<h2 id="-eurekaservercontext">一、EurekaServerContext</h2>
+<h3 id="1-1-">1.1 接口</h3>
+<p>EurekaServerContext是一个接口，通过方法名，我们可以知道，除了一些get方法获取内部的属性信息外，它的核心部分是<code>initialize</code>和<code>shutdown</code>：</p>
+<pre><code class="lang-JAVA">public interface EurekaServerContext {
+
+    /**
+     * 执行初始化上下文
+     */
+    void initialize() throws Exception;
+
+    /**
+     * 关闭上下文
+     */
+    void shutdown() throws Exception;
+
+    EurekaServerConfig getServerConfig();
+
+    PeerEurekaNodes getPeerEurekaNodes();
+
+    ServerCodecs getServerCodecs();
+
+    PeerAwareInstanceRegistry getRegistry();
+
+    ApplicationInfoManager getApplicationInfoManager();
+}
+</code></pre>
+<h3 id="1-2-">1.2 实现类</h3>
+<p>EurekaServerContext的实现类是<code>DefaultEurekaServerContext</code>，它的构造函数纯粹就是设置属性：</p>
+<pre><code class="lang-JAVA">public class DefaultEurekaServerContext implements EurekaServerContext {
+    private final EurekaServerConfig serverConfig;
+    private final ServerCodecs serverCodecs;
+    private final PeerAwareInstanceRegistry registry;
+    private final PeerEurekaNodes peerEurekaNodes;
+    private final ApplicationInfoManager applicationInfoManager;
+
+    @Inject
+    public DefaultEurekaServerContext(EurekaServerConfig serverConfig,
+                               ServerCodecs serverCodecs,
+                               PeerAwareInstanceRegistry registry,
+                               PeerEurekaNodes peerEurekaNodes,
+                               ApplicationInfoManager applicationInfoManager) {
+        this.serverConfig = serverConfig;
+        this.serverCodecs = serverCodecs;
+        this.registry = registry;
+        this.peerEurekaNodes = peerEurekaNodes;
+        this.applicationInfoManager = applicationInfoManager;
+    }
+}
+</code></pre>
+<h2 id="-initialize-">二、initialize初始化</h2>
+<p>我们重点看下EurekaServerContext的初始化方法——<code>initialize</code>，它的内部其实就是调用了<code>PeerEurekaNodes.start()</code>和<code>PeerAwareInstanceRegistry.init()</code>进行初始化：</p>
+<pre><code class="lang-JAVA">public void initialize() throws Exception {
+    logger.info("Initializing ...");
+    // 启动 Eureka-Server 集群节点集合（复制）
+    peerEurekaNodes.start();
+    // 初始化 应用实例信息的注册表
+    registry.init(peerEurekaNodes);
+    logger.info("Initialized");
+}
+</code></pre>
+<ul>
+<li><code>PeerEurekaNodes.start()</code>：初始化集群节点信息；创建定时任务，自动更新集群节点信息。</li>
+<li><code>PeerAwareInstanceRegistry.init()</code>：就是开启一些定时调度任务，对集群的实例注册表进行初始化。</li>
+</ul>
+<h2 id="-">三、总结</h2>
+<p>本章，我对EurekaServerContext进行了介绍，它其实就代表了当前这个Eureka-Server的服务上下文，包含了服务需要的所有东西。EurekaServerContext的初始化其实就内部的<code>PeerEurekaNodes</code>和<code>PeerAwareInstanceRegistry</code>的初始化。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

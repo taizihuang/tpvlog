@@ -1,0 +1,286 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式实战（五）——Redis读写分离实战</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式实战（五）——Redis读写分离实战</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>对于一个能够支撑超高并发的大型分布式系统来说，像Redis这类分布式缓存是必不可少。Redis在单机部署的模式下，QPS几乎不可能超过10万+，除非机器配置特别好且Redis操作不太复杂。</p>
+<p>我们知道，对于数据库来说，如果想要提升读写性能，最简单的方式就是做<strong>一主多从+读写分离</strong>。对于分布式缓存也是一样的道理，因为缓存一般都是用来支撑读请求的高并发，写请求相对较少（一般也就每秒一两千写请求），所以非常适合读写分离的架构。</p>
+<blockquote>
+<p>关于Redis的复制原理，我在进阶篇的<a href="https://www.tpvlog.com/article/183">《分布式框架之高性能：Redis主从同步》</a>已经详细讲解过了，不熟悉的读者可以先去了解下。</p>
+</blockquote>
+<h2 id="-">一、主从架构搭建</h2>
+<p>在生产环境下，我们必须要将Master节点的持久化功能打开，否则万一Master宕机后重启，此时Slave连上Master后，会触发一次全量复制，master就会将空的数据集同步到slave上去，导致Slave中的数据也被清空。</p>
+<p>我们先来搭建一个一主二从的Redis构架，我首先在ressmix-dsf02这个节点上安装单机版本的Redis。具体的安装步骤不再赘述，读者可以参考我在《Redis持久化实战》中讲解的搭建步骤。</p>
+<h3 id="1-1-">1.1 配置步骤</h3>
+<p>搭建完Redis节点后，我们按照以下步骤进行读写分离的配置，ressmix-dsf01作为Master，ressmix-dsf02和ressmix-dsf03作为Slave。（我这里只操作ressmix-dsf02，ressmix-dsf03读者可以自行操作）</p>
+<ol>
+<li>修改Slave节点的配置文件，配置<code>replicaof ressmix-dsf01 6379</code>，这样ressmix-dsf01节点就作为了ressmix-dsf02的Master节点；</li>
+<li>强制读写分离：修改Slave节点的配置文件，配置<code>replica-read-only yes</code>，这样Slave节点会拒绝所有的写操作（Redis 2.6以后Slave节点默认就是只读的，所以这个版本以后的Redis默认可以不设置）；</li>
+<li>集群安全认证：修改Slave节点的配置文件，配置<code>masterauth ressmix</code>，其中ressmix是我设置的认证密码；</li>
+<li>停止Master节点，然后修改Master节点的配置文件，配置<code>requirepass ressmix</code>；</li>
+<li>主从节点均配置<code>appendonly yes</code>，开启AOF持久化；</li>
+<li>绑定节点IP：修改Slave节点的配置文件，配置<code>bind 192.168.0.109</code>，其中192.168.0.109为ressmix-dsf02的IP，同理也把Master节点的这个配置修改下。另外，为了以防外一，每个节点都执行下<code>iptables -A INPUT -ptcp --dport  6379 -j ACCEPT</code>，用于放开6379端口，然后清理下防火墙：<code>sudo iptables -F</code>。</li>
+</ol>
+<p>上述操作全部配置完成后，我们通过以下命令启动主节点，然后以相同方式启动从节点ressmix-dsf02。</p>
+<pre><code class="lang-SHELL">cd /etc/init.d
+./redis_6379 start
+</code></pre>
+<p>节点启动后，我们可以先在Master节点中写入一条记录：</p>
+<pre><code class="lang-SHELL">redis-cli -h 192.168.0.107 -a ressmix
+set k1 v1
+</code></pre>
+<center><br/><img src="./img/20200501160547442.png" style="zoom:90%"><br/></img></center>
+<p>然后在ressmix-dsf02节点可以查看到同步过来的数据：</p>
+<center><br/><img src="./img/20200501160557581.png" style="zoom:90%"/><br/></center>
+<p>我们可以通过执行<code>info replication</code>查看主从复制的状态：</p>
+<center><br/><img src="./img/20200501160746400.png" style="zoom:90%"/><br/></center>
+<h2 id="-">二、性能压测</h2>
+<p>搭建完Redis的主从架构后，可以对其做一个基准压测，测一下Redis的性能和QPS。Redis自身提供了redis-benchmark压测工具，可以用于一些简单场景下性能测试。</p>
+<p>压测工具位于redis安装包的src目录下：</p>
+<pre><code class="lang-SHELL">./redis-benchmark -h 192.168.0.107
+</code></pre>
+<p>常用参数如下：</p>
+<pre><code class="lang-TXT">-c &lt;clients&gt;       Number of parallel connections (default 50)
+-n &lt;requests&gt;      Total number of requests (default 100000)
+-d &lt;size&gt;          Data size of SET/GET value in bytes (default 2)
+</code></pre>
+<p>我们可以根据自己系统高峰期的业务量来设置参数，比如在高峰期，瞬时最大用户量会达到10万，总请求数为1000万，每条数据的大小为50字节，则可以像下面这样模拟请求：</p>
+<pre><code class="lang-SHELL">./redis-benchmark -h 192.168.0.107 -c 100000 -n 10000000 -d 50
+</code></pre>
+<p>压测的结果可能像下面这样，显示了不同操作的每秒请求数：</p>
+<pre><code class="lang-JAVA">====== PING_INLINE ======
+  100000 requests completed in 1.28 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+99.78% &lt;= 1 milliseconds
+99.93% &lt;= 2 milliseconds
+99.97% &lt;= 3 milliseconds
+100.00% &lt;= 3 milliseconds
+78308.54 requests per second
+
+====== PING_BULK ======
+  100000 requests completed in 1.30 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+99.87% &lt;= 1 milliseconds
+100.00% &lt;= 1 milliseconds
+76804.91 requests per second
+
+====== SET ======
+  100000 requests completed in 2.50 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+5.95% &lt;= 1 milliseconds
+99.63% &lt;= 2 milliseconds
+99.93% &lt;= 3 milliseconds
+99.99% &lt;= 4 milliseconds
+100.00% &lt;= 4 milliseconds
+40032.03 requests per second
+
+====== GET ======
+  100000 requests completed in 1.30 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+99.73% &lt;= 1 milliseconds
+100.00% &lt;= 2 milliseconds
+100.00% &lt;= 2 milliseconds
+76628.35 requests per second
+
+====== INCR ======
+  100000 requests completed in 1.90 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+80.92% &lt;= 1 milliseconds
+99.81% &lt;= 2 milliseconds
+99.95% &lt;= 3 milliseconds
+99.96% &lt;= 4 milliseconds
+99.97% &lt;= 5 milliseconds
+100.00% &lt;= 6 milliseconds
+52548.61 requests per second
+
+====== LPUSH ======
+  100000 requests completed in 2.58 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+3.76% &lt;= 1 milliseconds
+99.61% &lt;= 2 milliseconds
+99.93% &lt;= 3 milliseconds
+100.00% &lt;= 3 milliseconds
+38684.72 requests per second
+
+====== RPUSH ======
+  100000 requests completed in 2.47 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+6.87% &lt;= 1 milliseconds
+99.69% &lt;= 2 milliseconds
+99.87% &lt;= 3 milliseconds
+99.99% &lt;= 4 milliseconds
+100.00% &lt;= 4 milliseconds
+40469.45 requests per second
+
+====== LPOP ======
+  100000 requests completed in 2.26 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+28.39% &lt;= 1 milliseconds
+99.83% &lt;= 2 milliseconds
+100.00% &lt;= 2 milliseconds
+44306.60 requests per second
+
+====== RPOP ======
+  100000 requests completed in 2.18 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+36.08% &lt;= 1 milliseconds
+99.75% &lt;= 2 milliseconds
+100.00% &lt;= 2 milliseconds
+45871.56 requests per second
+
+====== SADD ======
+  100000 requests completed in 1.23 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+99.94% &lt;= 1 milliseconds
+100.00% &lt;= 2 milliseconds
+100.00% &lt;= 2 milliseconds
+81168.83 requests per second
+
+====== SPOP ======
+  100000 requests completed in 1.28 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+99.80% &lt;= 1 milliseconds
+99.96% &lt;= 2 milliseconds
+99.96% &lt;= 3 milliseconds
+99.97% &lt;= 5 milliseconds
+100.00% &lt;= 5 milliseconds
+78369.91 requests per second
+
+====== LPUSH (needed to benchmark LRANGE) ======
+  100000 requests completed in 2.47 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+15.29% &lt;= 1 milliseconds
+99.64% &lt;= 2 milliseconds
+99.94% &lt;= 3 milliseconds
+100.00% &lt;= 3 milliseconds
+40420.37 requests per second
+
+====== LRANGE_100 (first 100 elements) ======
+  100000 requests completed in 3.69 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+30.86% &lt;= 1 milliseconds
+96.99% &lt;= 2 milliseconds
+99.94% &lt;= 3 milliseconds
+99.99% &lt;= 4 milliseconds
+100.00% &lt;= 4 milliseconds
+27085.59 requests per second
+
+====== LRANGE_300 (first 300 elements) ======
+  100000 requests completed in 10.22 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+0.03% &lt;= 1 milliseconds
+5.90% &lt;= 2 milliseconds
+90.68% &lt;= 3 milliseconds
+95.46% &lt;= 4 milliseconds
+97.67% &lt;= 5 milliseconds
+99.12% &lt;= 6 milliseconds
+99.98% &lt;= 7 milliseconds
+100.00% &lt;= 7 milliseconds
+9784.74 requests per second
+
+====== LRANGE_500 (first 450 elements) ======
+  100000 requests completed in 14.71 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+0.00% &lt;= 1 milliseconds
+0.07% &lt;= 2 milliseconds
+1.59% &lt;= 3 milliseconds
+89.26% &lt;= 4 milliseconds
+97.90% &lt;= 5 milliseconds
+99.24% &lt;= 6 milliseconds
+99.73% &lt;= 7 milliseconds
+99.89% &lt;= 8 milliseconds
+99.96% &lt;= 9 milliseconds
+99.99% &lt;= 10 milliseconds
+100.00% &lt;= 10 milliseconds
+6799.48 requests per second
+
+====== LRANGE_600 (first 600 elements) ======
+  100000 requests completed in 18.56 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+0.00% &lt;= 2 milliseconds
+0.23% &lt;= 3 milliseconds
+1.75% &lt;= 4 milliseconds
+91.17% &lt;= 5 milliseconds
+98.16% &lt;= 6 milliseconds
+99.04% &lt;= 7 milliseconds
+99.83% &lt;= 8 milliseconds
+99.95% &lt;= 9 milliseconds
+99.98% &lt;= 10 milliseconds
+100.00% &lt;= 10 milliseconds
+5387.35 requests per second
+
+====== MSET (10 keys) ======
+  100000 requests completed in 4.02 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+
+0.01% &lt;= 1 milliseconds
+53.22% &lt;= 2 milliseconds
+99.12% &lt;= 3 milliseconds
+99.55% &lt;= 4 milliseconds
+99.70% &lt;= 5 milliseconds
+99.90% &lt;= 6 milliseconds
+99.95% &lt;= 7 milliseconds
+100.00% &lt;= 8 milliseconds
+24869.44 requests per second
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我重点讲解了如何进行生产环境的Redis读写分离部署，读者可以自己尝试在虚拟机中动手进行节点部署，以加深印象。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

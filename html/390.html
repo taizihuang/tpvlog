@@ -1,0 +1,654 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（十九）——dubbo-cluster模块：Router路由</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（十九）——dubbo-cluster模块：Router路由</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将对 <code>dubbo-cluster</code> 模块中的Router路由机制进行讲解。Router 的主要功能就是根据用户配置的路由规则以及请求携带的信息，过滤出符合条件的 Invoker 集合，供后续负载均衡逻辑使用。</p>
+<p>在上一章介绍 RegistryDirectory 的实现时，我们看到了 RouterChain 这个 Router 链的存在，但是没有深入分析，下面我就对 RouterChain 进行分析。</p>
+<h2 id="-routerchain">一、RouterChain</h2>
+<h3 id="1-1-">1.1 核心字段</h3>
+<p>RouterChain的核心字段如下：</p>
+<pre><code class="lang-JAVA">// RouterChain.java
+
+public class RouterChain&lt;T&gt; {
+
+    // 待过滤的 Invoker 集合
+    private List&lt;Invoker&lt;T&gt;&gt; invokers = Collections.emptyList();
+
+    // 真正要使用的 Router 集合
+    // 不仅包括了上面 builtinRouters 集合中全部的 Router 对象，还包括通过 addRouters() 方法添加的 Router 对象
+    private volatile List&lt;Router&gt; routers = Collections.emptyList();
+
+    //  激活的内置 Router 集合
+    private List&lt;Router&gt; builtinRouters = Collections.emptyList();
+
+}
+</code></pre>
+<p>在 RouterChain 的构造函数中，会在传入的 URL 参数中查找 <code>router</code> 参数值，并根据该值获取确定激活的 RouterFactory，之后通过 Dubbo SPI 机制加载这些激活的 RouterFactory 对象，由 RouterFactory 创建内置 Router 实例：</p>
+<pre><code class="lang-JAVA">// RouterChain.java
+
+private RouterChain(URL url) {
+
+    // 通过ExtensionLoader加载激活的RouterFactory
+    List&lt;RouterFactory&gt; extensionFactories = ExtensionLoader.getExtensionLoader(RouterFactory.class)
+            .getActivateExtension(url, "router");
+
+    // 遍历所有RouterFactory，调用其getRouter()方法创建相应的Router对象
+    List&lt;Router&gt; routers = extensionFactories.stream()
+            .map(factory -&gt; factory.getRouter(url))
+            .collect(Collectors.toList());
+
+    // 初始化buildinRouters字段以及routers字段
+    initWithRouters(routers); 
+}
+
+public void initWithRouters(List&lt;Router&gt; builtinRouters) {
+    this.builtinRouters = builtinRouters;
+    this.routers = new ArrayList&lt;&gt;(builtinRouters);
+    // 这里会对routers集合进行排序
+    this.sort(); 
+}
+</code></pre>
+<h3 id="1-2-addrouter-">1.2 addRouter方法</h3>
+<p>完成内置 Router 的初始化之后，在 Directory 实现中还可以通过 addRouter() 方法添加新的 Router 实例到 <code>routers</code> 字段中：</p>
+<pre><code class="lang-JAVA">// RouterChain.java
+
+public void addRouters(List&lt;Router&gt; routers) {
+    List&lt;Router&gt; newRouters = new ArrayList&lt;&gt;();
+    // 添加builtinRouters集合
+    newRouters.addAll(builtinRouters); 
+    // 添加传入的Router集合
+    newRouters.addAll(routers); 
+    // 重新排序
+    CollectionUtils.sort(newRouters); 
+    this.routers = newRouters;
+}
+</code></pre>
+<h3 id="1-3-route-">1.3 route方法</h3>
+<p>RouterChain.route() 方法会遍历 <code>routers</code> 字段，逐个调用 Router 对象的 route() 方法，对 <code>invokers</code> 集合进行过滤，具体实现如下：</p>
+<pre><code class="lang-JAVA">// RouterChain.java
+
+public List&lt;Invoker&lt;T&gt;&gt; route(URL url, Invocation invocation) {
+    List&lt;Invoker&lt;T&gt;&gt; finalInvokers = invokers;
+
+    // 遍历全部的Router对象
+    for (Router router : routers) { 
+        finalInvokers = router.route(finalInvokers, url, invocation);
+
+    }
+    return finalInvokers;
+}
+</code></pre>
+<h2 id="-routerfactory">二、RouterFactory</h2>
+<p>了解了 RouterChain 的大致逻辑之后，我们知道<strong>真正进行路由的是 routers 集合中的 Router 对象</strong>。接下来我们再来看 RouterFactory 这个工厂接口，<strong>RouterFactory 接口是一个扩展接口</strong>，具体定义如下：</p>
+<pre><code class="lang-JAVA">// RouterFactory.java
+
+@SPI
+public interface RouterFactory {
+    // 动态生成的适配器会根据protocol参数选择扩展实现
+    @Adaptive("protocol") 
+    Router getRouter(URL url);
+}
+</code></pre>
+<h3 id="2-1-">2.1 继承关系</h3>
+<p>RouterFactory 接口有很多实现类，如下图所示：</p>
+<center><br/> <img src="./img/20211127175450299.png" style="zoom:100%"><br/></img></center>
+<p>下面我们就来深入介绍下每个 RouterFactory 实现类以及对应的 Router 实现对象。<strong>Router 决定了一次 Dubbo 调用的目标服务，Router 接口的每个实现类代表了一个路由规则</strong>，当 Consumer 访问 Provider 时，Dubbo 根据路由规则筛选出合适的 Provider 列表，之后通过负载均衡算法再次进行筛选。Router 接口的继承关系如下图所示：</p>
+<center><br/> <img src="./img/20211127175501436.png" style="zoom:68%"/><br/></center>
+<h3 id="2-2-conditionrouterfactory">2.2 ConditionRouterFactory</h3>
+<p>首先来看 ConditionRouterFactory 实现，其扩展名为 <code>condition</code>，在其 getRouter() 方法中会创建 ConditionRouter 对象，如下所示：</p>
+<pre><code class="lang-JAVA">// ConditionRouterFactory.java
+
+public class ConditionRouterFactory implements RouterFactory {
+    public static final String NAME = "condition";
+
+    @Override
+    public Router getRouter(URL url) {
+        return new ConditionRouter(url);
+    }
+}
+</code></pre>
+<h4 id="conditionrouter">ConditionRouter</h4>
+<p><strong>ConditionRouter 是基于条件表达式的路由实现类</strong>，下面就是一条基于条件表达式的路由规则：</p>
+<pre><code class="lang-TXT">host = 192.168.0.100 =&gt; host = 192.168.0.150
+</code></pre>
+<p>在上述规则中：</p>
+<ul>
+<li><code>=&gt;</code>之前的为 Consumer 匹配的条件，该条件中的所有参数会与 Consumer 的 URL 进行对比，当 Consumer 满足匹配条件时，会对该 Consumer 的此次调用执行 <code>=&gt;</code> 后面的过滤规则；</li>
+<li><code>=&gt;</code> 之后为 Provider 地址列表的过滤条件，该条件中的所有参数会和 Provider 的 URL 进行对比，Consumer 最终只拿到过滤后的地址列表。</li>
+</ul>
+<p><strong>如果 Consumer 匹配条件为空，表示 =&gt; 之后的过滤条件对所有 Consumer 生效</strong>，例如：=&gt; host != 192.168.0.150，含义是所有Consumer 都不能请求 192.168.0.150 这个 Provider 节点。</p>
+<p><strong>如果 Provider 过滤条件为空，表示禁止访问所有 Provider</strong>，例如：host = 192.168.0.100 =&gt;，含义是 192.168.0.100 这个 Consumer 不能访问任何 Provider 节点。</p>
+<p>ConditionRouter 的核心字段有如下几个：</p>
+<ul>
+<li>url（URL 类型）：路由规则的 URL，可以从 rule 参数中获取具体的路由规则；</li>
+<li>ROUTE_PATTERN（Pattern 类型）：用于切分路由规则的正则表达式；</li>
+<li>priority（int 类型）：路由规则的优先级，用于排序，该字段值越大，优先级越高，默认值为 0；</li>
+<li>force（boolean 类型）：当路由结果为空时，是否强制执行。如果不强制执行，则路由结果为空的路由规则将会自动失效；如果强制执行，则直接返回空的路由结果；</li>
+<li>whenCondition（Map<string, matchpair=""> 类型）：Consumer 匹配的条件集合，通过解析条件表达式 rule 的 <code>=&gt;</code> 之前半部分，可以得到该集合中的内容；</string,></li>
+<li>thenCondition（Map<string, matchpair=""> 类型）：Provider 匹配的条件集合，通过解析条件表达式 rule 的 <code>=&gt;</code> 之后半部分，可以得到该集合中的内容。</string,></li>
+</ul>
+<p>在 ConditionRouter 的构造方法中，会根据 URL 中携带的相应参数初始化 priority、force、enable 等字段，然后从 URL 的 rule 参数中获取路由规则进行解析，具体的解析逻辑是在 init() 方法中实现的，如下所示：</p>
+<pre><code class="lang-JAVA">// ConditionRouter.java
+
+public void init(String rule) {
+
+    // 将路由规则中的"consumer."和"provider."字符串清理掉
+    rule = rule.replace("consumer.", "").replace("provider.", "");
+
+    // 按照"=&gt;"字符串进行分割，得到whenRule和thenRule两部分
+    int i = rule.indexOf("=&gt;"); 
+    String whenRule = i &lt; 0 ? null : rule.substring(0, i).trim();
+    String thenRule = i &lt; 0 ? rule.trim() : rule.substring(i + 2).trim();
+
+    // 解析whenRule和thenRule，得到whenCondition和thenCondition两个条件集合
+    Map&lt;String, MatchPair&gt; when = StringUtils.isBlank(whenRule) || "true".equals(whenRule) ? new HashMap&lt;String, MatchPair&gt;() : parseRule(whenRule);
+    Map&lt;String, MatchPair&gt; then = StringUtils.isBlank(thenRule) || "false".equals(thenRule) ? null : parseRule(thenRule);
+
+    this.whenCondition = when;
+    this.thenCondition = then;
+}
+</code></pre>
+<p>whenCondition 和 thenCondition 两个集合中，Key 是条件表达式中指定的参数名称（例如 host = 192.168.0.150 这个表达式中的 host）。ConditionRouter 支持三类参数：</p>
+<ul>
+<li>服务调用信息，例如，method、argument 等；</li>
+<li>URL 本身的字段，例如，protocol、host、port 等；</li>
+<li>URL 上的所有参数，例如，application 等。</li>
+</ul>
+<p>Value 是 MatchPair 对象，包含两个 Set 类型的集合—— matches 和 mismatches。在<strong>使用 MatchPair 进行过滤</strong>的时候，会按照下面四条规则执行。</p>
+<ol>
+<li>当 mismatches 集合为空的时候，会逐个遍历 matches 集合中的匹配条件，匹配成功任意一条即会返回 true。这里具体的匹配逻辑以及后续 mismatches 集合中条件的匹配逻辑，都是在 UrlUtils.isMatchGlobPattern() 方法中实现，其中完成了如下操作：如果匹配条件以 "$" 符号开头，则从 URL 中获取相应的参数值进行匹配；当遇到 "<em>" 通配符的时候，会处理"</em>"通配符在匹配条件开头、中间以及末尾三种情况；</li>
+<li>当 matches 集合为空的时候，会逐个遍历 mismatches 集合中的匹配条件，匹配成功任意一条即会返回 false；</li>
+<li>当 matches 集合和 mismatches 集合同时不为空时，会优先匹配 mismatches 集合中的条件，成功匹配任意一条规则，就会返回 false；若 mismatches 中的条件全部匹配失败，才会开始匹配 matches 集合，成功匹配任意一条规则，就会返回 true；</li>
+<li>当上述三个步骤都没有成功匹配时，直接返回 false。</li>
+</ol>
+<p>上述流程具体实现在 MatchPair 的 isMatch() 方法中，比较简单，这里就不再展示。</p>
+<p>了解了每个 MatchPair 的匹配流程之后，我们来看<strong>parseRule() 方法是如何解析一条完整的条件表达式，生成对应 MatchPair 的</strong>，具体实现如下：</p>
+<pre><code class="lang-java">// ConditionRouter.java
+
+private static Map&lt;String, MatchPair&gt; parseRule(String rule) throws ParseException {
+
+    Map&lt;String, MatchPair&gt; condition = new HashMap&lt;String, MatchPair&gt;();
+
+    MatchPair pair = null;
+
+    Set&lt;String&gt; values = null;
+
+    // 首先，按照ROUTE_PATTERN指定的正则表达式匹配整个条件表达式
+    final Matcher matcher = ROUTE_PATTERN.matcher(rule);
+
+    while (matcher.find()) { // 遍历匹配的结果
+        // 每个匹配结果有两部分(分组)，第一部分是分隔符，第二部分是内容
+        String separator = matcher.group(1); 
+        String content = matcher.group(2);
+
+        if (StringUtils.isEmpty(separator)) { // ---(1) 没有分隔符，content即为参数名称
+            pair = new MatchPair();
+            // 初始化MatchPair对象，并将其与对应的Key(即content)记录到condition集合中
+            condition.put(content, pair); 
+        }
+
+        else if ("&amp;".equals(separator)) { // ---(4)
+            // &amp;分隔符表示多个表达式,会创建多个MatchPair对象
+            if (condition.get(content) == null) {
+                pair = new MatchPair();
+                condition.put(content, pair);
+            } else {
+                pair = condition.get(content);
+            }
+        }else if ("=".equals(separator)) { // ---(2) 
+            // =以及!=两个分隔符表示KV的分界线
+            if (pair == null) {
+                throw new ParseException("..."");
+            }
+            values = pair.matches;
+            values.add(content);
+        }else if ("!=".equals(separator)) { // ---(5)
+            if (pair == null) {
+                throw new ParseException("...");
+            }
+            values = pair.mismatches;
+            values.add(content);
+        }else if (",".equals(separator)) { // ---(3)
+            // 逗号分隔符表示有多个Value值
+            if (values == null || values.isEmpty()) {
+                throw new ParseException("...");
+            }
+            values.add(content);
+        } else {
+            throw new ParseException("...");
+        }
+    }
+    return condition;
+}
+</code></pre>
+<p>介绍完 parseRule() 方法的实现之后，我们可以再通过下面这个条件表达式示例的解析流程，更深入地体会 parseRule() 方法的工作原理：</p>
+<pre><code class="lang-TXT">host = 2.2.2.2,1.1.1.1,3.3.3.3 &amp; method !=get =&gt; host = 1.2.3.4
+</code></pre>
+<p>经过 ROUTE_PATTERN 正则表达式的分组之后，我们得到如下分组：</p>
+<center><br/> <img src="./img/20211127175518444.png" style="zoom:60%"/><br/></center>
+<p>我们先来看 <code>=&gt;</code> 之前的 Consumer 匹配规则的处理。</p>
+<ol>
+<li>分组 1 中，separator 为空字符串，content 为 host 字符串。此时会进入上面示例代码展示的 parseRule() 方法中（1）处的分支，创建 MatchPair 对象，并以 host 为 Key 记录到 condition 集合中。</li>
+<li>分组 2 中，separator 为 "=" 空字符串，content 为 "2.2.2.2" 字符串。处理该分组时，会进入 parseRule() 方法中（2） 处的分支，在 MatchPair 的 matches 集合中添加 "2.2.2.2" 字符串。</li>
+<li>分组 3 中，separator 为 "," 字符串，content 为 "3.3.3.3" 字符串。处理该分组时，会进入 parseRule() 方法中（3）处的分支，继续向 MatchPair 的 matches 集合中添加 "3.3.3.3" 字符串。</li>
+<li>分组 4 中，separator 为 "&amp;" 字符串，content 为 "method" 字符串。处理该分组时，会进入 parseRule() 方法中（4）处的分支，创建新的 MatchPair 对象，并以 method 为 Key 记录到 condition 集合中。</li>
+<li>分组 5 中，separator 为 "!=" 字符串，content 为 "get" 字符串。处理该分组时，会进入 parseRule() 方法中（5）处的分支，向步骤 4 新建的 MatchPair 对象中的 mismatches 集合添加 "get" 字符串。</li>
+</ol>
+<p>最后，我们得到的 whenCondition 集合如下图所示：</p>
+<center><br/> <img src="./img/20211127175532177.png" style="zoom:68%"/><br/></center>
+<p>同理，parseRule() 方法解析上述表达式 <code>=&gt;</code> 之后的规则得到的 thenCondition 集合，如下图所示：</p>
+<center><br/> <img src="./img/20211127175544699.png" style="zoom:68%"/><br/></center>
+<p>了解了 ConditionRouter 解析规则的流程以及 MatchPair 内部的匹配原则之后，ConditionRouter 中最后一个需要介绍的内容就是它的 route() 方法了。</p>
+<p>ConditionRouter.route() 方法首先会尝试前面创建的 whenCondition 集合，判断此次发起调用的 Consumer 是否符合表达式中 <code>=&gt;</code> 之前的 Consumer 过滤条件，若不符合，直接返回整个 invokers 集合；若符合，则通过 thenCondition 集合对 invokers 集合进行过滤，得到符合 Provider 过滤条件的 Invoker 集合，然后返回给上层调用方。ConditionRouter.route() 方法的核心实现如下：</p>
+<pre><code class="lang-JAVA">// ConditionRouter.java
+
+public &lt;T&gt; List&lt;Invoker&lt;T&gt;&gt; route(List&lt;Invoker&lt;T&gt;&gt; invokers, URL url, Invocation invocation)
+        throws RpcException {
+
+    // ...通过enable字段判断当前ConditionRouter对象是否可用
+
+    // ...当前invokers集合为空，则直接返回
+
+    // 匹配发起请求的Consumer是否符合表达式中=&gt;之前的过滤条件
+    if (!matchWhen(url, invocation)) { 
+        return invokers;
+    }
+
+    // 判断=&gt;之后是否存在Provider过滤条件，若不存在则直接返回空集合，表示无Provider可用
+    List&lt;Invoker&lt;T&gt;&gt; result = new ArrayList&lt;Invoker&lt;T&gt;&gt;();
+    if (thenCondition == null) { 
+        return result;
+    }
+
+    // 逐个判断Invoker是否符合表达式中=&gt;之后的过滤条件
+    for (Invoker&lt;T&gt; invoker : invokers) { 
+        if (matchThen(invoker.getUrl(), url)) {
+            // 记录符合条件的Invoker
+            result.add(invoker); 
+        }
+    }
+
+    if (!result.isEmpty()) {
+        return result;
+    } else if (force) { 
+        // 在无Invoker符合条件时，根据force决定是返回空集合还是返回全部Invoker
+        return result;
+    }
+
+    return invokers;
+}
+</code></pre>
+<h3 id="2-3-scriptrouterfactory">2.3 ScriptRouterFactory</h3>
+<p>ScriptRouterFactory 的扩展名为 <code>script</code>，其 getRouter() 方法中会创建一个 ScriptRouter 对象并返回：</p>
+<pre><code class="lang-JAVA">// ScriptRouterFactory.java
+
+public class ScriptRouterFactory implements RouterFactory {
+
+    public static final String NAME = "script";
+
+    @Override
+    public Router getRouter(URL url) {
+        return new ScriptRouter(url);
+    }
+}
+</code></pre>
+<h4 id="scriptrouter">ScriptRouter</h4>
+<p><strong>ScriptRouter 支持 JDK 脚本引擎的所有脚本</strong>，例如，JavaScript、JRuby、Groovy 等，通过 <code>type=javascript</code> 参数设置脚本类型，缺省为 javascript。下面我们就定义一个 route() 函数进行 host 过滤：</p>
+<pre><code class="lang-JAVA">function route(invokers, invocation, context){
+    var result = new java.util.ArrayList(invokers.size()); 
+
+    var targetHost = new java.util.ArrayList();
+    targetHost.add("10.134.108.2"); 
+
+    // 遍历Invoker集合
+    for (var i = 0; i &lt; invokers.length; i) {  
+        // 判断Invoker的host是否符合条件
+        if(targetHost.contains(invokers[i].getUrl().getHost())){
+            result.add(invokers[i]);
+        }
+    }
+    return result;
+}
+
+// 立即执行route()函数
+route(invokers, invocation, context)
+</code></pre>
+<p>我们可以将上面这段代码进行编码并作为 rule 参数的值添加到 URL 中，在这个 URL 传入 ScriptRouter 的构造函数时，即可被 ScriptRouter 解析。ScriptRouter 的<strong>核心字段</strong>有如下几个：</p>
+<ul>
+<li>url（URL 类型）：路由规则的 URL，可以从 rule 参数中获取具体的路由规则。</li>
+<li>priority（int 类型）：路由规则的优先级，用于排序，该字段值越大，优先级越高，默认值为 0。</li>
+<li>ENGINES（ConcurrentHashMap<string, scriptengine=""> 类型）：这是一个 static 集合，其中的 Key 是脚本语言的名称，Value 是对应的 ScriptEngine 对象。这里会按照脚本语言的类型复用 ScriptEngine 对象。</string,></li>
+<li>engine（ScriptEngine 类型）：当前 ScriptRouter 使用的 ScriptEngine 对象。</li>
+<li>rule（String 类型）：当前 ScriptRouter 使用的具体脚本内容。</li>
+<li>function（CompiledScript 类型）：根据 rule 这个具体脚本内容编译得到。</li>
+</ul>
+<p>在 ScriptRouter 的构造函数中，首先会初始化 url 字段以及 priority 字段（用于排序），然后根据 URL 中的 type 参数初始化 engine、rule 和 function 三个核心字段 ，具体实现如下：</p>
+<pre><code class="lang-JAVA">// ScriptRouter.java
+
+public ScriptRouter(URL url) {
+
+    this.url = url;
+    this.priority = url.getParameter(PRIORITY_KEY, SCRIPT_ROUTER_DEFAULT_PRIORITY);
+
+    // 根据URL中的type参数值，从ENGINES集合中获取对应的ScriptEngine对象
+    engine = getEngine(url);
+
+    // 获取URL中的rule参数值，即为具体的脚本
+    rule = getRule(url);
+
+    Compilable compilable = (Compilable) engine;
+
+    // 编译rule字段中的脚本，得到function字段
+    function = compilable.compile(rule);
+}
+</code></pre>
+<p>接下来看 ScriptRouter 对 route() 方法的实现，其中首先会创建调用 function 函数所需的入参，也就是 Bindings 对象，然后调用 function 函数得到过滤后的 Invoker 集合，最后通过 getRoutedInvokers() 方法整理 Invoker 集合得到最终的返回值：</p>
+<pre><code class="lang-JAVA">// ScriptRouter.java
+
+public &lt;T&gt; List&lt;Invoker&lt;T&gt;&gt; route(List&lt;Invoker&lt;T&gt;&gt; invokers, URL url, Invocation invocation) throws RpcException {
+
+    // 创建Bindings对象作为function函数的入参
+    Bindings bindings = createBindings(invokers, invocation);
+
+    if (function == null) {
+        return invokers;
+    }
+
+    // 调用function函数，并在getRoutedInvokers()方法中整理得到的Invoker集合
+    return getRoutedInvokers(function.eval(bindings));
+}
+
+private &lt;T&gt; Bindings createBindings(List&lt;Invoker&lt;T&gt;&gt; invokers, Invocation invocation) {
+    Bindings bindings = engine.createBindings();
+
+    // 与前面的javascript的示例脚本结合，我们可以看到这里在Bindings中为脚本中的route()函数提供了invokers、Invocation、context三个参数
+    bindings.put("invokers", new ArrayList&lt;&gt;(invokers));
+    bindings.put("invocation", invocation);
+    bindings.put("context", RpcContext.getContext());
+
+    return bindings;
+}
+</code></pre>
+<h3 id="2-4-filerouterfactory">2.4 FileRouterFactory</h3>
+<p><strong>FileRouterFactory 是 ScriptRouterFactory 的装饰器</strong>，其扩展名为 <code>file</code>，FileRouterFactory 在 ScriptRouterFactory 基础上<strong>增加了读取文件的能力</strong>。我们可以将 ScriptRouter 使用的路由规则保存到文件中，然后在 URL 中指定文件路径，FileRouterFactory 从中解析到该脚本文件的路径并进行读取，调用 ScriptRouterFactory 去创建相应的 ScriptRouter 对象。</p>
+<p>下面我们来看 FileRouterFactory 对 getRouter() 方法的具体实现，其中完成了 file 协议的 URL 到 script 协议 URL 的转换，如下是一个转换示例，首先会将 file:// 协议转换成 script:// 协议，然后会添加 type 参数和 rule 参数，其中 type 参数值根据文件后缀名确定，该示例为 js，rule 参数值为文件内容。</p>
+<center><br/> <img src="./img/20211127175555543.png" style="zoom:50%"/><br/></center>
+<p>我们可以再结合接下来这个示例分析 getRouter() 方法的具体实现：</p>
+<pre><code class="lang-java">// FileRouterFactory.java
+
+public class FileRouterFactory implements RouterFactory {
+
+    public static final String NAME = "file";
+    private RouterFactory routerFactory;
+
+    public void setRouterFactory(RouterFactory routerFactory) {
+        this.routerFactory = routerFactory;
+    }
+
+    @Override
+    public Router getRouter(URL url) {
+        try {
+            // 默认使用script协议
+            String protocol = url.getParameter(ROUTER_KEY, ScriptRouterFactory.NAME); 
+            String type = null;
+            String path = url.getPath();
+
+            // 获取脚本文件的语言类型
+            if (path != null) {
+                int i = path.lastIndexOf('.');
+                if (i &gt; 0) {
+                    type = path.substring(i + 1);
+                }
+            }
+            // 读取脚本文件中的内容
+            String rule = IOUtils.read(new FileReader(new File(url.getAbsolutePath())));
+
+            // 创建script协议的URL
+            boolean runtime = url.getParameter(RUNTIME_KEY, false);
+            URL script = URLBuilder.from(url)
+                    .setProtocol(protocol)
+                    .addParameter(TYPE_KEY, type)
+                    .addParameter(RUNTIME_KEY, runtime)
+                    .addParameterAndEncoded(RULE_KEY, rule)
+                    .build();
+            // 获取script对应的Router实现
+            return routerFactory.getRouter(script);
+        } catch (IOException e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+}
+</code></pre>
+<h3 id="2-5-tagrouterfactory">2.5 TagRouterFactory</h3>
+<p><strong>TagRouterFactory 作为 RouterFactory 接口的扩展实现</strong>，其扩展名为 <code>tag</code>。但是需要注意的是，TagRouterFactory 与 ConditionRouterFactory、ScriptRouterFactory 的不同之处在于：它是<strong>通过继承 CacheableRouterFactory 这个抽象类，间接实现了 RouterFactory 接口</strong>。</p>
+<pre><code class="lang-JAVA">// TagRouterFactory.java
+
+@Activate(order = 100)
+public class TagRouterFactory extends CacheableRouterFactory {
+
+    public static final String NAME = "tag";
+
+    @Override
+    protected Router createRouter(URL url) {
+        return new TagRouter(url);
+    }
+}
+</code></pre>
+<p>CacheableRouterFactory 抽象类中维护了一个 ConcurrentMap 集合，用来缓存 Router，其中的 Key 是 ServiceKey。在 CacheableRouterFactory 的 getRouter() 方法中，会优先根据 URL 的 ServiceKey 查询 routerMap 集合，查询失败之后会调用 createRouter() 抽象方法来创建相应的 Router 对象。在 TagRouterFactory.createRouter() 方法中，创建的自然就是 TagRouter 对象了。</p>
+<pre><code class="lang-JAVA">// CacheableRouterFactory.java
+
+public abstract class CacheableRouterFactory implements RouterFactory {
+    private ConcurrentMap&lt;String, Router&gt; routerMap = new ConcurrentHashMap&lt;&gt;();
+
+    @Override
+    public Router getRouter(URL url) {
+        return routerMap.computeIfAbsent(url.getServiceKey(), k -&gt; createRouter(url));
+    }
+
+    protected abstract Router createRouter(URL url);
+}
+</code></pre>
+<h4 id="tagrouter">TagRouter</h4>
+<p><strong>通过 TagRouter，我们可以将某一个或多个 Provider 划分到同一分组，约束流量只在指定分组中流转，这样就可以轻松达到流量隔离的目的，从而支持灰度发布等场景。</strong></p>
+<p>目前，Dubbo 提供了动态和静态两种方式给 Provider 打标签，其中动态方式就是通过服务治理平台动态下发标签，静态方式就是在 XML 等静态配置中打标签。Consumer 端可以在 RpcContext 的 attachment 中添加 <code>request.tag</code> 附加属性，注意<strong>保存在 attachment 中的值将会在一次完整的远程调用中持续传递</strong>，我们只需要在起始调用时进行设置，就可以达到标签的持续传递。</p>
+<p>了解了 Tag 的基本概念和功能之后，我再简单介绍一个 Tag 的使用示例。</p>
+<p>在实际的开发测试中，一个完整的请求会涉及非常多的 Provider，分属不同团队进行维护，这些团队每天都会处理不同的需求，并在其负责的 Provider 服务中进行修改，如果所有团队都使用一套测试环境，那么测试环境就会变得很不稳定。如下图所示，4 个 Provider 分属不同的团队管理，Provider 2 和 Provider 4 在测试环境测试，部署了有 Bug 的版本，这样就会导致整个测试环境无法正常处理请求，在这样一个不稳定的测试环境中排查 Bug 是非常困难的，因为可能排查到最后，发现是别人的 Bug。</p>
+<center><br/> <img src="./img/20211127175608641.png" style="zoom:60%"/><br/></center>
+<p>为了解决上述问题，我们可以针对每个需求分别独立出一套测试环境，但是这个方案会占用大量机器，前期的搭建成本以及后续的维护成本也都非常高。</p>
+<p>下面是一个通过 Tag 方式实现环境隔离的架构图，其中，需求 1 对 Provider 2 的请求会全部落到有需求 1 标签的 Provider 上，其他 Provider 使用稳定测试环境中的 Provider；需求 2 对 Provider 4 的请求会全部落到有需求 2 标签的 Provider 4 上，其他 Provider 使用稳定测试环境中的 Provider。</p>
+<center><br/> <img src="./img/20211127175622210.png" style="zoom:60%"/><br/></center>
+<p>在一些特殊场景中，会有 Tag 降级的场景，比如找不到对应 Tag 的 Provider，会按照一定的规则进行降级。如果在 Provider 集群中不存在与请求 Tag 对应的 Provider 节点，则默认将降级请求 Tag 为空的 Provider；如果希望在找不到匹配 Tag 的 Provider 节点时抛出异常的话，我们需设置 request.tag.force = true。</p>
+<p>如果请求中的 request.tag 未设置，只会匹配 Tag 为空的 Provider，也就是说即使集群中存在可用的服务，若 Tag 不匹配也就无法调用。一句话总结，<strong>携带 Tag 的请求可以降级访问到无 Tag 的 Provider，但不携带 Tag 的请求永远无法访问到带有 Tag 的 Provider</strong>。</p>
+<hr/>
+<p>下面我们再来看 TagRouter 的具体实现。在 TagRouter 中持有一个 TagRouterRule 对象的引用，在 TagRouterRule 中维护了一个 Tag 集合，而在每个 Tag 对象中又都维护了一个 Tag 的名称，以及 Tag 绑定的网络地址集合，如下图所示：</p>
+<center><br/> <img src="./img/20211127175635274.png" style="zoom:60%"/><br/></center>
+<p>另外，在 TagRouterRule 中还维护了 addressToTagnames、tagnameToAddresses 两个集合（都是 Map<string, list`<string="">`&gt; 类型），分别记录了 Tag 名称到各个 address 的映射以及 address 到 Tag 名称的映射。在 TagRouterRule 的 init() 方法中，会根据 tags 集合初始化这两个集合。</string,></p>
+<p>了解了 TagRouterRule 的基本构造之后，我们继续来看 TagRouter 构造 TagRouterRule 的过程。TagRouter 除了实现了 Router 接口之外，还实现了 ConfigurationListener 接口，如下图所示：</p>
+<center><br/> <img src="./img/20211127175646554.png" style="zoom:60%"/><br/></center>
+<p><strong>ConfigurationListener 用于监听配置的变化，其中就包括 TagRouterRule 配置的变更</strong>。当我们通过动态更新 TagRouterRule 配置的时候，就会触发 ConfigurationListener 接口的 process() 方法，TagRouter 对 process() 方法的实现如下：</p>
+<pre><code class="lang-JAVA">// TagRouter.java
+
+public synchronized void process(ConfigChangedEvent event) {
+
+    // DELETED事件会直接清空tagRouterRule
+    if (event.getChangeType().equals(ConfigChangeType.DELETED)) {
+        this.tagRouterRule = null;
+    } 
+    // 其他事件会解析最新的路由规则，并记录到tagRouterRule字段中
+    else { 
+        this.tagRouterRule = TagRuleParser.parse(event.getContent());
+    }
+}
+</code></pre>
+<p>我们可以看到，如果是删除配置的操作，则直接将 tagRouterRule 设置为 null，如果是修改或新增配置，则通过 TagRuleParser 解析传入的配置，得到对应的 TagRouterRule 对象。TagRuleParser 可以解析 yaml 格式的 TagRouterRule 配置，下面是一个配置示例：</p>
+<pre><code class="lang-YML">force: false
+runtime: true
+enabled: false
+priority: 1
+key: demo-provider
+tags:
+  - name: tag1
+    addresses: null
+  - name: tag2
+    addresses: ["30.5.120.37:20880"]
+  - name: tag3
+    addresses: []
+</code></pre>
+<p>经过 TagRuleParser 解析得到的 TagRouterRule 结构，如下所示：</p>
+<center><br/> <img src="./img/20211127175700651.png" style="zoom:70%"/><br/></center>
+<p>除了上图展示的几个集合字段，TagRouterRule 还从 AbstractRouterRule 抽象类继承了一些控制字段，后面介绍的 ConditionRouterRule 也继承了 AbstractRouterRule。</p>
+<center><br/> <img src="./img/20211127175713797.png" style="zoom:60%"/><br/></center>
+<p>AbstractRouterRule 中核心字段的具体含义大致可总结为如下。</p>
+<ul>
+<li>key（string 类型）、scope（string 类型）：key 明确规则体作用在哪个服务或应用。scope 为 service 时，key 由 [{group}:]{service}[:{version}] 构成；scope 为 application 时，key 为 application 的名称。</li>
+<li>rawRule（string 类型）：记录了路由规则解析前的原始字符串配置。</li>
+<li>runtime（boolean 类型）：表示是否在每次调用时执行该路由规则。如果设置为 false，则会在 Provider 列表变更时预先执行并缓存结果，调用时直接从缓存中获取路由结果。</li>
+<li>force（boolean 类型）：当路由结果为空时，是否强制执行，如果不强制执行，路由结果为空的路由规则将自动失效。该字段默认值为 false。</li>
+<li>valid（boolean 类型）：用于标识解析生成当前 RouterRule 对象的配置是否合法。</li>
+<li>enabled（boolean 类型）：标识当前路由规则是否生效。</li>
+<li>priority（int 类型）：用于表示当前 RouterRule 的优先级。</li>
+<li>dynamic（boolean 类型）：表示该路由规则是否为持久数据，当注册方退出时，路由规则是否依然存在。</li>
+</ul>
+<p>我们可以看到，AbstractRouterRule 中的核心字段与前面的示例配置是一一对应的。</p>
+<p>我们知道，Router 最终目的是要过滤符合条件的 Invoker 对象，下面我们一起来看 TagRouter 是如何使用 TagRouterRule 路由逻辑进行 Invoker 过滤的，大致步骤如下。</p>
+<ol>
+<li><p>如果 invokers 为空，直接返回空集合。</p>
+</li>
+<li><p>检查关联的 tagRouterRule 对象是否可用，如果不可用，则会直接调用 filterUsingStaticTag() 方法进行过滤，并返回过滤结果。在 filterUsingStaticTag() 方法中，会比较请求携带的 tag 值与 Provider URL 中的 tag 参数值。</p>
+</li>
+<li><p>获取此次调用的 tag 信息，这里会尝试从 Invocation 以及 URL 的参数中获取。</p>
+</li>
+<li><p>如果</p>
+<p>此次请求指定了 tag 信息</p>
+<p>，则首先会获取 tag 关联的 address 集合。</p>
+<ol>
+<li>如果 address 集合不为空，则根据该 address 集合中的地址，匹配出符合条件的 Invoker 集合。如果存在符合条件的 Invoker，则直接将过滤得到的 Invoker 集合返回；如果不存在，就会根据 force 配置决定是否返回空 Invoker 集合。</li>
+<li>如果 address 集合为空，则会将请求携带的 tag 值与 Provider URL 中的 tag 参数值进行比较，匹配出符合条件的 Invoker 集合。如果存在符合条件的 Invoker，则直接将过滤得到的 Invoker 集合返回；如果不存在，就会根据 force 配置决定是否返回空 Invoker 集合。</li>
+<li>如果 force 配置为 false，且符合条件的 Invoker 集合为空，则返回所有不包含任何 tag 的 Provider 列表。</li>
+</ol>
+</li>
+<li><p>如果<strong>此次请求未携带 tag 信息</strong>，则会先获取 TagRouterRule 规则中全部 tag 关联的 address 集合。如果 address 集合不为空，则过滤出不在 address 集合中的 Invoker 并添加到结果集合中，最后，将 Provider URL 中的 tag 值与 TagRouterRule 中的 tag 名称进行比较，得到最终的 Invoker 集合。</p>
+</li>
+</ol>
+<p>上述流程的具体实现是在 TagRouter.route() 方法中，如下所示：</p>
+<pre><code class="lang-java">// TagRouter.java
+
+public &lt;T&gt; List&lt;Invoker&lt;T&gt;&gt; route(List&lt;Invoker&lt;T&gt;&gt; invokers, URL url, Invocation invocation) throws RpcException {
+
+    //... 如果invokers为空，直接返回空集合(略)
+    final TagRouterRule tagRouterRuleCopy = tagRouterRule;
+    if (tagRouterRuleCopy == null || !tagRouterRuleCopy.isValid() || !tagRouterRuleCopy.isEnabled()) {
+        return filterUsingStaticTag(invokers, url, invocation);
+    }
+
+    // 检查关联的tagRouterRule对象是否可用，如果不可用，则会直接调用filterUsingStaticTag() 方法进行过滤
+    List&lt;Invoker&lt;T&gt;&gt; result = invokers;
+
+    // 获取此次调用的tag信息，尝试从Invocation以及URL中获取
+    String tag = StringUtils.isEmpty(invocation.getAttachment(TAG_KEY)) ? url.getParameter(TAG_KEY) :
+            invocation.getAttachment(TAG_KEY);
+
+    if (StringUtils.isNotEmpty(tag)) { // 此次请求一个特殊的tag
+        // 获取tag关联的address集合
+        List&lt;String&gt; addresses = tagRouterRuleCopy.getTagnameToAddresses().get(tag);
+        if (CollectionUtils.isNotEmpty(addresses)) {
+            // 根据上面的address集合匹配符合条件的Invoker
+            result = filterInvoker(invokers, invoker -&gt; addressMatches(invoker.getUrl(), addresses));
+
+            // 如果存在符合条件的Invoker，则直接将过滤得到的Invoker集合返回
+            // 如果不存在符合条件的Invoker，根据force配置决定是否返回空Invoker集合
+            if (CollectionUtils.isNotEmpty(result) || tagRouterRuleCopy.isForce()) {
+                return result;
+            }
+        } else {
+            // 如果 address 集合为空，则会将请求携带的 tag 与 Provider URL 中的 tag 参数值进行比较，匹配出符合条件的 Invoker 集合。
+            result = filterInvoker(invokers, invoker -&gt; tag.equals(invoker.getUrl().getParameter(TAG_KEY)));
+        }
+
+        if (CollectionUtils.isNotEmpty(result) || isForceUseTag(invocation)) {
+            return result; // 存在符合条件的Invoker或是force配置为true
+        }else { // 如果 force 配置为 false，且符合条件的 Invoker 集合为空，则返回所有不包含任何 tag 的 Provider 列表。
+            List&lt;Invoker&lt;T&gt;&gt; tmp = filterInvoker(invokers, invoker -&gt; addressNotMatches(invoker.getUrl(),
+                    tagRouterRuleCopy.getAddresses()));
+            return filterInvoker(tmp, invoker -&gt; StringUtils.isEmpty(invoker.getUrl().getParameter(TAG_KEY)));
+        }
+    } else {
+        // 如果此次请求未携带 tag 信息，则会先获取 TagRouterRule 规则中全部 tag 关联的 address 集合。
+        List&lt;String&gt; addresses = tagRouterRuleCopy.getAddresses();
+        if (CollectionUtils.isNotEmpty(addresses)) {
+            // 如果 address 集合不为空，则过滤出不在 address 集合中的 Invoker 并添加到结果集合中。
+            result = filterInvoker(invokers, invoker -&gt; addressNotMatches(invoker.getUrl(), addresses));
+            if (CollectionUtils.isEmpty(result)) {
+                return result;
+            }
+        }
+
+        // 如果不存在符合条件的 Invoker 或是 address 集合为空，则会将请求携带的 tag 与 Provider URL 中的 tag 参数值进行比较，得到最终的 Invoker 集合。
+        return filterInvoker(result, invoker -&gt; {
+            String localTag = invoker.getUrl().getParameter(TAG_KEY);
+            return StringUtils.isEmpty(localTag) || !tagRouterRuleCopy.getTagNames().contains(localTag);
+        });
+    }
+}
+</code></pre>
+<h3 id="2-6-servicerouterfactory">2.6 ServiceRouterFactory</h3>
+<p>除了前文介绍的 TagRouterFactory 继承了 CacheableRouterFactory 之外，<strong>ServiceRouterFactory 也继承 CachabelRouterFactory，具有了缓存的能力</strong>，具体继承关系如下图所示：</p>
+<p><center><br/> <img src="./img/20211127175726761.png" style="zoom:60%"/><br/></center></p>
+<pre><code class="lang-JAVA">// ServiceRouterFactory.java
+
+@Activate(order = 300)
+public class ServiceRouterFactory extends CacheableRouterFactory {
+
+    public static final String NAME = "service";
+
+    @Override
+    protected Router createRouter(URL url) {
+        return new ServiceRouter(url);
+    }
+}
+</code></pre>
+<p>ServiceRouterFactory 创建的是 ServiceRouter，与 ServiceRouter 类似的是 AppRouter，<strong>两者都继承了 ListenableRouter 抽象类</strong>（虽然 ListenableRouter 是个抽象类，但是没有抽象方法留给子类实现），继承关系如下图所示：</p>
+<p><center><br/> <img src="./img/20211127175743929.png" style="zoom:60%"/><br/></center></p>
+<h4 id="listenablerouter">ListenableRouter</h4>
+<p><strong>ListenableRouter 在 ConditionRouter 基础上添加了动态配置的能力</strong>，ListenableRouter 的 process() 方法与 TagRouter 中的 process() 方法类似：</p>
+<ul>
+<li><p>对于 <code>ConfigChangedEvent.DELETE</code> 事件，直接清空 ListenableRouter 中维护的 ConditionRouterRule 和 ConditionRouter 集合的引用；</p>
+</li>
+<li><p>对于 <code>ADDED</code>、<code>UPDATED</code> 事件，则通过 ConditionRuleParser 解析事件内容，得到相应的 ConditionRouterRule 对象和 ConditionRouter 集合。</p>
+</li>
+</ul>
+<p>这里的 ConditionRuleParser 同样是以 yaml 文件的格式解析 ConditionRouterRule 的相关配置。ConditionRouterRule 中维护了一个 conditions 集合（List<code>&lt;String&gt;</code> 类型），记录了多个 Condition 路由规则，对应生成多个 ConditionRouter 对象。</p>
+<blockquote>
+<p>整个解析 ConditionRouterRule 的过程，与前文介绍的解析 TagRouterRule 的流程类似，这里不再赘述。</p>
+</blockquote>
+<p>在 ListenableRouter 的 route() 方法中，会遍历全部 ConditionRouter 过滤出符合全部路由条件的 Invoker 集合，具体实现如下：</p>
+<pre><code class="lang-JAVA">// ListenableRouter.java
+
+public &lt;T&gt; List&lt;Invoker&lt;T&gt;&gt; route(List&lt;Invoker&lt;T&gt;&gt; invokers, URL url, Invocation invocation) throws RpcException {
+    if (CollectionUtils.isEmpty(invokers) || conditionRouters.size() == 0) {
+        return invokers; // 检查边界条件，直接返回invokers集合
+    } 
+
+    for (Router router : conditionRouters) { // 路由规则进行过滤
+        invokers = router.route(invokers, url, invocation);
+    }
+    return invokers;
+}
+</code></pre>
+<p>ServiceRouter 和 AppRouter 都是简单地继承了 ListenableRouter 抽象类，且没有覆盖 ListenableRouter 的任何方法，两者只有以下两点区别。</p>
+<ul>
+<li><strong>一个是 priority 字段值不同</strong>。ServiceRouter 为 140，AppRouter 为 150，也就是说 ServiceRouter 要先于 AppRouter 执行。</li>
+<li><strong>另一个是获取 ConditionRouterRule 配置的 Key 不同</strong>。ServiceRouter 使用的 RuleKey 是由 {interface}:[version]:[group] 三部分构成，获取的是一个服务对应的 ConditionRouterRule。AppRouter 使用的 RuleKey 是 URL 中的 application 参数值，获取的是一个服务实例对应的 ConditionRouterRule。</li>
+</ul>
+<h2 id="-">三、总结</h2>
+<p>本章，我重点介绍了 Router 接口的相关内容。首先我介绍了 RouterChain 的核心实现以及构建过程，然后讲解了 RouterFactory 接口和 Router 接口中核心方法的功能。最后，我对RouterFactory的所有默认实现进行了分析。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

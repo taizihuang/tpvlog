@@ -1,0 +1,110 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式消息中间件（六）——RocketMQ持久化原理</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式消息中间件（六）——RocketMQ持久化原理</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>通过前面的章节，我们已经知道了数据在RocketMQ中是分布式存储的。生产者发送消息时，先从NameServer获取到路由信息，然后根据一定算法将消息发送到某个Master-Broker中。但是，<strong>Topic是一个逻辑概念</strong>，对于某个Topic来说，属于它的消息分布在不同的Broker上，那如何决定消息到底分布在哪个Broker上呢？</p>
+<h2 id="-messagequeue">一、MessageQueue</h2>
+<p>我们在创建Topic时，需要指定一个很关键的参数——MessageQueue，比如下图，我们可以在RocketMQ的可视化工作台里去创建一个名为<code>order_topic</code>的Topic，指定包含4个MessageQueue：</p>
+<center><br/> <img src="./img/20200223174056377.png"><br/></img></center>
+<p><strong><em>那么Topic、MessageQueue、Broker之间到底是什么关系？</em></strong></p>
+<p>可以先简单的认为：<strong>Topic是消息的逻辑分类，消息保存在MessageQueue中，MessageQueue分布在Master-Broker上，Slave-Broker从Master-Broker同步数据。</strong></p>
+<p>事实上，MessageQueue本质就是一个数据分片的机制。比如order_topic一共有1万条消息，那么可以大致认为每个MessageQueue保存2500条消息。但是，这不是绝对的，需要根据Producer写入消息的策略来定，可能有的MessageQueue中消息多些，有的少些。我们先暂且认为消息是在MessageQueue上平均分配的，然后MessageQueue也可能平均分布在Master-Broker上，如下图：</p>
+<center><br/> <img src="./img/20200223174136431.png" style="zoom:50%"/><br/></center>
+<h2 id="-">二、消息发送</h2>
+<h3 id="2-1-">2.1 消息发送策略</h3>
+<p>我们之前说过，Producer会从NameServer拉取路由信息，那么Producer就知道了Broker集群的情况：每个Master-Broker分布着哪些Topic？每个Topic有多少MessageQueue？这些MessageQueue分布在哪些Master-Broker上？</p>
+<p>这样的话，Producer就可以按照一定策略将消息写入到Master-Broker中，比如对于<code>order_topic</code>，Producer现在知道了它有4个MessageQueue，均匀分布在两个Master-Broker上，那么Producer就可能采取<em>Round Robin</em>策略均匀的order_topic类型的消息写入到各个MessageQueue中。</p>
+<center><br/> <img src="./img/20200223174144989.png" style="zoom:100%"/><br/></center>
+<h3 id="2-2-">2.2 消息发送容错</h3>
+<p>那如果某个Master-Broker故障了怎么办？RocketMQ虽然有Dledger机制可以实现故障自动转移，但是主从切换需要时间，在故障的这段时间里Producer访问那个故障的Master-Broker都会失败：</p>
+<center><br/> <img src="./img/20200223174158862.png" style="zoom:100%"/><br/></center>
+<p>RocketMQ的Producer中有个开关，叫做<code>sendLatencyFaultEnable</code>，一旦打开了这个开关，就会开启生产者的自动容错机制，比如Producer访问一个Master-Broker发现网络延迟有500ms，之后一直延迟，那么就会自动回避访问这个Broker一段时间，比如接下来3000ms内，就不会访问这个Broker了。</p>
+<p>这样就可以避免一个Master-Broker故障后，短时间内Producer频繁的发送消息到这个故障的Broker上去，出现大量写入异常。</p>
+<h2 id="-">三、消息存储</h2>
+<p>RocketMQ中最核心的一个环节就是Broker中的消息数据存储，也就是所谓的<em>消息持久化</em>。</p>
+<h3 id="3-1-commitlog">3.1 CommitLog</h3>
+<p>生产者发送消息到Broker后，Master-Broker会将消息写入磁盘上的一个日志文件——CommitLog，按照顺序写入文件末尾，CommitLog中包含了各种各样不通类型的Topic对应的消息内容，如下图：</p>
+<center><br/> <img src="./img/20200223174421753.png" style="zoom:60%"/><br/></center>
+<p>CommitLog文件每个限定最大1GB，Master-Broker收到消息之后就将内容直接追加到文件末尾，如果一个CommitLog写满了1GB，就会创建一个新的CommitLog文件。</p>
+<blockquote>
+<p>Broker以顺序的方式将消息写入CommitLog磁盘文件，也就是每次写入就是在文件末尾追加一条数据就可以了，对文件进行顺序写的性能要比随机写的性能高很多。</p>
+</blockquote>
+<h3 id="3-2-consumequeue">3.2 ConsumeQueue</h3>
+<p>我们之前说过，消息是保存在MessageQueue中的，那这个CommitLog和MessageQueue是什么关系呢？事实上，对于每一个Topic，它在某个Broker所在的机器上都会有一些MessageQueue，每一个MessageQueue又会有很多<strong><em>ConsumeQueue</em></strong>文件，这些ConsumeQueue文件里存储的是一条消息对应在CommitLog文件中的<strong><em>offset</em></strong>偏移量。</p>
+<p>举个例子，假设对于order_topic这个Topic，它在Broker集群中一共有4个MessageQueue：queue1、queue2、queue3、queue3，均匀分布在两个Master-Broker中，Producer选择queue1这个MessageQueue发送了一条“消息A”。那么：</p>
+<ol>
+<li>首先Master-Broker接收到消息A后，将其内容顺序写入自己机器上的CommitLog文件末尾；</li>
+<li>然后，这个Master-Broker会将消息A在CommitLog文件中的物理位置——offset，写入queue1对应的ConsumeQueue文件末尾；</li>
+</ol>
+<p>整个过程如下图所示：</p>
+<center><br/> <img src="./img/20200223174429667.png" style="zoom:70%"/><br/></center>
+<p>实际上，ConsumeQueue中存储的不仅仅只是消息在CommitLog中的offset偏移量，还包含了消息长度、tag hashcode等信息，一条数据是20个字节，每个ConsumeQueue文件能保存30万条数据，所以每个ConsumeQueue文件的大小约为5.72MB。</p>
+<p>我们可以在Master-Broker所在机器的如下目录中找到ConsumeQueue文件：</p>
+<pre><code class="lang-JAVA">$HOME/store/consumequeue/{topic}/{queueId}/{fileName}
+</code></pre>
+<p>上述示例中，我们的Tpoic是<code>order_topic</code>，queueId是queue1，comsumequeue的名称是comsumequeue1，所以可以在如下路径找到ConsumeQueue文件：</p>
+<pre><code class="lang-JAVA">$HOME/store/consumequeue/order_topic/queue1/comsumequeue1
+</code></pre>
+<h2 id="-">四、存储性能优化</h2>
+<h3 id="4-1-pagecache">4.1 PageCache</h3>
+<p>我们知道，Broker在将消息写入CommitLog时，采用了“顺序写”的方式，这样可以大大提升性能。但是，光这样做还是不够的，因为毕竟仍然是磁盘IO操作，要想进一步提升性能，必须利用内存。</p>
+<p>所以，Broker将数据写入CommitLog文件的时候，其实不是直接写入底层的物理磁盘文件，而是先进入OS的<strong><em>PageCache</em></strong>内存缓存中，后续由OS后台线程异步化的将OS PageCache中的数据刷入底层的磁盘文件中：</p>
+<center><br/> <img src="./img/20200223174437291.png" style="zoom:70%"/><br/></center>
+<p>所以，RocketMQ正式通过<strong><em>磁盘文件顺序写+OS PageCache写入+OS异步刷盘</em></strong>的策略来保证消息写入的性能。</p>
+<p>在上述这种异步刷盘的模式下，Producer将消息发送给Broker，Broker将消息写入OS PageCache中，就会直接返回ACK给生产者，生产者收到ACK消息就认为写入成功了。</p>
+<p>有异步刷盘就有同步刷盘，同步刷盘主要的不同点就是，只有Broker强制把这条消息刷入底层的磁盘文件后，才会返回ACK给生产者。</p>
+<blockquote>
+<p>在异步刷盘的模式下，如果Broker将消息写入PageCahe并响应给生产者后突然宕机，此时消息在缓存中没有写入底层的磁盘文件，就会造成消息丢失——生产者认为发送成功，实际上消息写入失败。我会在后续章节对MQ中的消息丢失问题专门讲解。</p>
+</blockquote>
+<h3 id="4-2-mmap">4.2 mmap</h3>
+<p>RocketMQ除了利用PageCache和异步刷盘来提升性能外，还使用了一种叫做<strong><em>mmap</em></strong>的技术。</p>
+<h4 id="-">多次拷贝问题</h4>
+<p>传统的磁盘IO操作，当我们的程序需要将数据写入操作系统的磁盘上时（或从磁盘上读取文件内容到程序中），涉及用户空间和内核空间的转换，我们的程序进程有自己独立的内存空间，而操作系统也有自己的内核缓存区，所以一次数据写入或读取过程是像下面这样的：</p>
+<center><br/> <img src="./img/20200223174445011.png" style="zoom:50%"/><br/></center>
+<p>可以看到，无论是写入还是读取，都涉及两次数据拷贝，这就是传统IO的数据多次拷贝问题。</p>
+<h4 id="-">内存映射</h4>
+<p>RocketMQ底层对CommitLog、ConsumeQueue之类的磁盘文件的读写操作，基本上都会采用mmap技术配合pagecache进行文件读写优化。</p>
+<p>mmap技术会先将一个磁盘文件的物理地址（比如CommitLog文件或ConsumeQueue文件）映射到程序进程自己的私有内存里来，所谓映射并不是直接将磁盘文件中的数据读取到内存，而是<strong>把磁盘文件的一些物理地址和用户进程私有空间的一些虚拟内存地址进行映射，这个过程并没有任何的数据拷贝操作</strong>，如下图：</p>
+<center><br/> <img src="./img/20200223174452584.png" style="zoom:50%"/><br/></center>
+<p>mmap技术在进行文件映射时，对文件大小一般限制，在1.5GB~2GB之间，所以RocketMQ才让CommitLog单个文件在不超过1GB，ConsumeQueue文件是5.72MB。</p>
+<p>上述这个<strong>地址映射</strong>的过程，具体到代码层面，RocketMQ是利用JDK NIO包下的<code>MappedByteBuffer.map()</code>来实现的，其底层就是基于mmap技术。</p>
+<p>所以，假设现在要写入消息内容到CommitLog文件中，那么过程是这样的：</p>
+<ol>
+<li>首先，Broker会将一个CommitLog文件的物理地址通过<code>MappedByteBuffer.map()</code>映射到Broker进程自己的虚拟内存中；</li>
+<li>接着，写入消息时，消息内容会先进入PageCache（PageCahe就对应虚拟内存）；</li>
+<li>OS的线程异步将PageCache中的内容刷入CommitLog磁盘中（顺序写入）。</li>
+</ol>
+<center><br/> <img src="./img/20200223174459843.png" style="zoom:50%"/><br/></center>
+<p>上述整个过程没有“内核IO缓存区”参与，只有一次数据拷贝过程，就是从PageCache里拷贝到磁盘文件里而已！这个就是使用mmap技术之后，相比于传统磁盘IO的一个性能优化。</p>
+<blockquote>
+<p>Broker会针对磁盘上的各种CommitLog、ConsumeQueue文件预先分配好MappedFile，也就是提前对一些可能接下来要读写的磁盘文件进行内存映射，这样后续读写文件时，就可以直接执行了。</p>
+</blockquote>
+<h3 id="4-3-">4.3 文件预热</h3>
+<p>上述我们讲了mmap技术对消息写入的优化，事实上，对于消息读取，整个过程也只有一次数据拷贝而已，其过程如下：</p>
+<ol>
+<li>读取消息时，首先判断要读取的数据是否在PageCache里？如果在的话，直接从PageCache里读取；</li>
+<li>如果PageCache里没有，就会从磁盘文件里加载数据到PageCache中（这个过程利用mmap技术只需一次拷贝）；</li>
+<li>PageCache在加载数据时，会将被加载数据的临近其它数据块也一起加载，提升命中率。</li>
+</ol>
+<blockquote>
+<p>RocketMQ在提前进行内存映射后，还会提前将后面可能频繁读取的一些数据（比如CommitLog、ConsumeQueue文件），尽可能多的加载到PageCache中，这就是所谓的<strong>文件预热</strong>。</p>
+</blockquote>
+<h2 id="-">五、总结</h2>
+<p>本章，我们深入讲解RocketMQ的持久化机制，其核心就是：CommitLog保存消息内容，ConsumeQueue保存消息地址——offset。</p>
+<p>RocketMQ为了提升消息持久化的性能，采用了如下手段：</p>
+<ol>
+<li>顺序写入消息内容至磁盘文件尾；</li>
+<li>将消息先写入PageCache，然后异步刷盘；</li>
+<li>利用mmap技术进行内存映射，以减少数据拷贝次数；</li>
+<li>提前加载磁盘文件内容到PageCache中，进行文件预热，提升读取效率。</li>
+</ol>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

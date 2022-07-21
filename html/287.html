@@ -1,0 +1,51 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Kafka（九）——Consumer：协调器</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Kafka（九）——Consumer：协调器</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>每个消费者组都会选择一个Broker作为自己的Coordinator，这个GroupCoordinator协调器负责监控这个消费组里的各个消费者的心跳，判断它们是否宕机，如果宕机则进行Rebalance。</p>
+<p>那么，这里就要思考几个问题：</p>
+<ol>
+<li>消费者组应该选择哪一个Broker作为GroupCoordinator？</li>
+<li>GroupCoordinator是如何为它的消费者组进行Rebalance的？</li>
+</ol>
+<h2 id="-groupcoordinator">一、GroupCoordinator</h2>
+<h3 id="1-1-groupcoordinator">1.1 选择GroupCoordinator</h3>
+<p>我们先来看下消费者组是如何选择GroupCoordinator的。</p>
+<p>我之前说过，每个Consumer在提交offset时，会将offset提交到<code>__consumer_offsets</code>这个内部Topic的某个分区上，默认分区数是50，事实上，<strong>Consumer提交offset的那个Leader分区所在的Broker就是GroupCoordinator</strong>。</p>
+<p>举个例子，假设有一个消费者组，<code>groupId = membership-consumer-group</code>：</p>
+<ol>
+<li>Consumer启动的时候，会对groupId进行hash运算，然后与<code>__consumer_offsets</code>的分区数取模，得到一个数值；</li>
+<li>消费者组下的所有Consumer在提交offset时，会提交到这个数值对应的<code>__consumer_offsets</code>的那个分区；</li>
+<li>最终，上述Leader分区所在的Broker就是这个消费者组的GroupCoordinator，组里的消费者会维护Socket连接与这个Broker进行通信。</li>
+</ol>
+<h3 id="1-2-">1.2 分区分配</h3>
+<p>确认GroupCoordinator后，我们再来看下分区分配是如何进行的。</p>
+<ol>
+<li>初始时，消费者组内的每个Consumer都会发送<code>JoinGroup</code>请求到GroupCoordinator；</li>
+<li>GroupCoordinator会从消费组内选择一个Consumer作为Leader，然后把消费者组的情况发送给这个Leader；</li>
+<li>消费者Leader会负责制定分区方案，并通过<code>SyncGroup</code>请求告知GroupCoordinator；</li>
+<li>最后，GroupCoordinator会把分区方案下发给所有Consumer，各个Consumer就会跟指定Leader分区所在的Broker建立Socket连接，开始消费消息。</li>
+</ol>
+<h2 id="-reblance-">二、Reblance策略</h2>
+<p>当消费者组中的某个Consumer宕机或者增减分区时，GroupCoordinator会负责分区重分配，也就是所谓的<strong>reblance</strong>。在reblance期间，消费者组会变得<strong>不可用</strong>。另外，reblance可能会引发“重复消费”的问题，比如Consumer消费完某个分区中的一部分消息后还没有来得及提交offset，此时发生了reblance，然后这个分区被分配给了消费组内的另一个Consumer，这样原来被消费完的那部分消息又会被新的Consumer重新消费一遍，即发生了重复消费。</p>
+<p>Kafka一共提供了三种Rebalance的策略：<strong><em>Range</em></strong>、<strong><em>Round-Robin</em></strong>、<strong><em>Sticky</em></strong>。</p>
+<h3 id="2-1-range-">2.1 Range策略</h3>
+<p>Range策略就是按照Partition的序号范围进行分配，也是<strong>默认策略</strong>。</p>
+<p>举个例子，某个主题有8个分区：partition0-partition7。那么分区partition0-2分配给Consumer1，partition3-5给一个Consumer2，partition6-7给一个consumer3。</p>
+<h3 id="2-2-round-robin-">2.2 Round-Robin策略</h3>
+<p>Round-Robin策略，就是轮询分配。</p>
+<p>举个例子，某个主题有8个分区：partition0-partition7。那么partiton0给Consumer1，partiton1给另一个Consumer2，依此类推……最后Consumer1分配到partiton0、3、6，Consumer2分配到partition1、4、7，Consumer3分配到partition2、5。</p>
+<h3 id="2-3-sticky-">2.3 Sticky策略</h3>
+<p>Range策略和Round-Robin策略都存在一个问题，就是发生Rebalance的时候会导致分区被频繁重新分配。</p>
+<p>举个例子，比如Consumer2挂掉了，那么会导致原本分配给Consumer1和Consumer3的分区也要被重新分配，这种分配很多时候是没必要的。</p>
+<p>所以，Kafka又新增了一种<strong>Sticky策略</strong>，就是说在发生Rebalance时，尽量让原本属于这个Consumer的分区不变动，再把多余的分区均匀分配出去，这样就能尽可能维持原来的分区分配策略。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

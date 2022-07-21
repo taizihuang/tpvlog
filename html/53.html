@@ -1,0 +1,362 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（三七）—— J.U.C之collections框架：LinkedBlockingDeque</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（三七）—— J.U.C之collections框架：LinkedBlockingDeque</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-linkedblockingdeque-">一、LinkedBlockingDeque简介</h2>
+<p><code>LinkedBlockingDeque</code>和<a href="https://segmentfault.com/a/1190000016284649">ConcurrentLinkedDeque</a>类似，都是一种<strong>双端队列</strong>的结构，只不过LinkedBlockingDeque同时也是一种阻塞队列，它是在JDK1.5时随着J.U.C包引入的，实现了<code>BlockingDueue</code>接口，底层基于<strong>双链表</strong>实现：</p>
+<p><img alt="img" src="./img/20191101191845187.png"/></p>
+<blockquote>
+<p><strong>注意：</strong>LinkedBlockingDeque底层利用ReentrantLock实现同步，并不像ConcurrentLinkedDeque那样采用无锁算法。</p>
+</blockquote>
+<p>另外，LinkedBlockingDeque是一种<strong>近似有界阻塞队列</strong>，为什么说近似？因为LinkedBlockingDeque既可以在初始构造时就指定队列的容量，也可以不指定，如果不指定，那么它的容量大小默认为<code>Integer.MAX_VALUE</code>。</p>
+<h3 id="blockingdeque-">BlockingDeque接口</h3>
+<p>截止目前为止，我们介绍的阻塞队列都是实现了<a href="https://segmentfault.com/a/1190000016296278">BlockingQueue</a>接口。和普通双端队列接口——<a href="https://segmentfault.com/a/1190000016284649">Deque</a>一样，J.U.C中也有一种阻塞的双端队列接口——<code>BlockingDeque</code>。BlockingDeque是JDK1.6时，J.U.C包新增的一个接口：<br/><img alt="img" src="./img/20191101191851770.png"/></p>
+<p><strong><em>BlockingDeque的类继承关系图：</em></strong><br/><img alt="img" src="./img/20191101191857810.png"/></p>
+<p>我们知道，BlockingQueue中阻塞方法一共有4个：<code>put(e)</code>、<code>take()</code>；<code>offer(e, time, unit)</code>、<code>poll(time, unit)</code>，忽略限时等待的阻塞方法，一共就两个：<br/>队尾入队：put(e)<br/>队首出队：take()</p>
+<p>BlockingDeque相对于BlockingQueue，最大的特点就是增加了在<strong>队首入队</strong>/<strong>队尾出队</strong>的阻塞方法。下面是两个接口的比较：</p>
+<table>
+<thead>
+<tr>
+<th>阻塞方法</th>
+<th>BlockingQueue</th>
+<th>BlockingDeque</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>队首入队</td>
+<td>/</td>
+<td>putFirst(e)</td>
+</tr>
+<tr>
+<td>队首出队</td>
+<td>take()</td>
+<td>takeFirst()</td>
+</tr>
+<tr>
+<td>队尾入队</td>
+<td>put(e)</td>
+<td>putLast(e)</td>
+</tr>
+<tr>
+<td>队尾出队</td>
+<td>/</td>
+<td>takeLast()</td>
+</tr>
+</tbody>
+</table>
+<h2 id="-linkedblockingdeque-">二、LinkedBlockingDeque原理</h2>
+<h3 id="2-1-">2.1 构造</h3>
+<p><strong>LinkedBlockingDeque</strong>一共三种构造器，不指定容量时，默认为<code>Integer.MAX_VALUE</code>：</p>
+<pre><code class="lang-java">/**
+ * 默认构造器.
+ */
+public LinkedBlockingDeque() {
+    this(Integer.MAX_VALUE);
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 指定容量的构造器.
+ */
+public LinkedBlockingDeque(int capacity) {
+    if (capacity &lt;= 0) throw new IllegalArgumentException();
+    this.capacity = capacity;
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 从已有集合构造队列.
+ */
+public LinkedBlockingDeque(Collection&lt;? extends E&gt; c) {
+    this(Integer.MAX_VALUE);
+    final ReentrantLock lock = this.lock;
+    lock.lock(); // Never contended, but necessary for visibility
+    try {
+        for (E e : c) {
+            if (e == null)
+                throw new NullPointerException();
+            if (!linkLast(new Node&lt;E&gt;(e)))
+                throw new IllegalStateException("Deque full");
+        }
+    } finally {
+        lock.unlock();
+    }
+}
+</code></pre>
+<hr/>
+<h3 id="2-2-">2.2 内部结构</h3>
+<p>LinkedBlockingDeque内部是<strong>双链表</strong>的结构，结点<code>Node</code>的定义如下：</p>
+<pre><code class="lang-JAVA">/**
+ * 双链表结点定义
+ */
+static final class Node&lt;E&gt; {
+    /**
+     * 结点值, null表示该结点已被移除.
+     */
+    E item;
+
+    /**
+     * 前驱结点指针.
+     */
+    Node&lt;E&gt; prev;
+
+    /**
+     * 后驱结点指针.
+     */
+    Node&lt;E&gt; next;
+
+    Node(E x) {
+        item = x;
+    }
+}
+</code></pre>
+<p>字段<code>first</code>指向队首结点，字段last指向队尾结点。另外LinkedBlockingDeque利用<strong>ReentrantLock</strong>来保证线程安全，所有对队列的修改操作都需要先获取这把全局锁：</p>
+<pre><code class="lang-JAVA">public class LinkedBlockingDeque&lt;E&gt; extends AbstractQueue&lt;E&gt;
+    implements BlockingDeque&lt;E&gt;, java.io.Serializable {
+
+    /**
+     * 队首结点指针.
+     */
+    transient Node&lt;E&gt; first;
+
+    /**
+     * 队尾结点指针.
+     */
+    transient Node&lt;E&gt; last;
+
+    /**
+     * 队列元素个数.
+     */
+    private transient int count;
+
+    /**
+     * 队列容量.
+     */
+    private final int capacity;
+
+    /**
+     * 全局锁
+     */
+    final ReentrantLock lock = new ReentrantLock();
+
+    /**
+     * 出队线程条件队列（队列为空时，出队线程在此等待）
+     */
+    private final Condition notEmpty = lock.newCondition();
+
+    /**
+     * 入队线程条件队列（队列为满时，入队线程在此等待）
+     */
+    private final Condition notFull = lock.newCondition();
+
+    //...
+}
+</code></pre>
+<hr/>
+<h3 id="2-3-put">2.3 队尾入队——put</h3>
+<p>先来看下，LinkedBlockingDeque是如何实现正常的从队尾入队的：</p>
+<pre><code class="lang-JAVA">/**
+ * 在队尾入队元素e.
+ * 如果队列已满, 则阻塞线程.
+ */
+public void put(E e) throws InterruptedException {
+    putLast(e);
+}
+
+public void putLast(E e) throws InterruptedException {
+    if (e == null) throw new NullPointerException();    // 队列不能包含null元素
+    Node&lt;E&gt; node = new Node&lt;E&gt;(e);                      // 创建入队结点
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        while (!linkLast(node))                         // 队列已满, 则阻塞线程
+            notFull.await();
+    } finally {
+        lock.unlock();
+    }
+}
+</code></pre>
+<p>put方法内部调用了putLast方法，这是Deque接口独有的方法。上述入队操作的关键是<strong>linkLast</strong>方法：</p>
+<pre><code class="lang-JAVA">/**
+ * 将结点node链接到队尾, 如果失败, 则返回false.
+ */
+private boolean linkLast(Node&lt;E&gt; node) {
+    // assert lock.isHeldByCurrentThread();
+    if (count &gt;= capacity)  // 队列已满, 直接返回
+        return false;
+
+    // 以下是双链表的"尾插"操作
+    Node&lt;E&gt; l = last;
+    node.prev = l;
+    last = node;
+    if (first == null)
+        first = node;
+    else
+        l.next = node;
+
+    ++count;            // 队列元素加1
+    notEmpty.signal();  // 唤醒一个等待的出队线程
+    return true;
+}
+</code></pre>
+<p><strong>linkLast</strong>方法在队尾插入一个结点，插入失败（队列已满的情况）则返回false。插入成功，则唤醒一个正在等待的出队线程：</p>
+<p><strong><em>初始：</em></strong><br/><img alt="img" src="./img/20191101191903357.png"/></p>
+<p><strong><em>队尾插入结点node：</em></strong><br/><img alt="img" src="./img/20191101191911255.png"/></p>
+<hr/>
+<h3 id="2-4-putfirst">2.4 队首入队——putFirst</h3>
+<p>队首入队就是双链表的<strong>“头插法”</strong>插入一个结点，如果队列已满，则阻塞调用线程：</p>
+<pre><code class="lang-JAVA">/**
+ * 在队首入队元素e.
+ * 如果队列已满, 则阻塞线程.
+ */
+public void putFirst(E e) throws InterruptedException {
+    if (e == null) throw new NullPointerException();
+    Node&lt;E&gt; node = new Node&lt;E&gt;(e);
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        while (!linkFirst(node))        // 队列已满, 则阻塞线程
+            notFull.await();
+    } finally {
+        lock.unlock();
+    }
+}
+</code></pre>
+<pre><code class="lang-java">/**
+ * 在队首插入一个结点, 插入失败则返回null.
+ */
+private boolean linkFirst(Node&lt;E&gt; node) {
+    // assert lock.isHeldByCurrentThread();
+    if (count &gt;= capacity)      // 队列已满
+        return false;
+
+    // 以下是双链表的“头插”操作
+    Node&lt;E&gt; f = first;
+    node.next = f;
+    first = node;
+    if (last == null)
+        last = node;
+    else
+        f.prev = node;
+
+    ++count;                    // 队列元素数量加1
+    notEmpty.signal();          // 唤醒一个等待的出队线程
+    return true;
+}
+</code></pre>
+<p><strong><em>初始：</em></strong><br/><img alt="img" src="./img/20191101191917089.png"/></p>
+<p><strong><em>队首插入结点node：</em></strong><br/><img alt="img" src="./img/20191101191922353.png"/></p>
+<hr/>
+<h3 id="2-5-take">2.5 队首出队——take</h3>
+<p>队首出队的逻辑很简单，如果队列为空，则阻塞调用线程：</p>
+<pre><code class="lang-JAVA">/**
+ * 从队首出队一个元素, 如果队列为空, 则阻塞线程.
+ */
+public E take() throws InterruptedException {
+    return takeFirst();
+}
+
+public E takeFirst() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        E x;
+        while ((x = unlinkFirst()) == null)     // 队列为空, 则阻塞线程
+            notEmpty.await();
+        return x;
+    } finally {
+        lock.unlock();
+    }
+}
+</code></pre>
+<p>实际的出队由<strong>unlinkFirst</strong>方法执行：</p>
+<pre><code class="lang-JAVA">/**
+ * 从队首删除一个元素, 失败则返回null.
+ */
+private E unlinkFirst() {
+    // assert lock.isHeldByCurrentThread();
+    Node&lt;E&gt; f = first;
+    if (f == null)          // 队列为空
+        return null;
+
+    // 以下是双链表的头部删除过程
+    Node&lt;E&gt; n = f.next;
+    E item = f.item;
+    f.item = null;
+    f.next = f;             // help GC
+    first = n;
+    if (n == null)
+        last = null;
+    else
+        n.prev = null;
+
+    --count;                // 队列元素个数减1
+    notFull.signal();       // 唤醒一个等待的入队线程
+    return item;
+}
+</code></pre>
+<p><strong><em>初始：</em></strong><br/><img alt="img" src="./img/20191101191928068.png"/></p>
+<p><strong><em>删除队首结点：</em></strong><br/><img alt="img" src="./img/20191101191934233.png"/></p>
+<hr/>
+<h3 id="2-6-takelast">2.6 队尾出队——takeLast</h3>
+<p>队尾出队的逻辑很简单，如果队列为空，则阻塞调用线程：</p>
+<pre><code class="lang-JAVA">/**
+ * 从队尾出队一个元素, 如果队列为空, 则阻塞线程.
+ */
+public E takeLast() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        E x;
+        while ((x = unlinkLast()) == null)  // 队列为空, 阻塞线程
+            notEmpty.await();
+        return x;
+    } finally {
+        lock.unlock();
+    }
+}
+</code></pre>
+<p>实际的出队由<strong>unlinkLast</strong>方法执行：</p>
+<pre><code class="lang-JAVA">/**
+ * 删除队尾元素, 如果失败, 则返回null.
+ */
+private E unlinkLast() {
+    // assert lock.isHeldByCurrentThread();
+    Node&lt;E&gt; l = last;
+    if (l == null)          // 队列为空
+        return null;
+
+    // 以下为双链表的尾部删除过程
+    Node&lt;E&gt; p = l.prev;
+    E item = l.item;
+    l.item = null;
+    l.prev = l;             // help GC
+    last = p;
+    if (p == null)
+        first = null;
+    else
+        p.next = null;
+
+    --count;                // 队列元素个数减1
+    notFull.signal();       // 唤醒一个等待的入队线程
+    return item;
+}
+</code></pre>
+<p><strong><em>初始：</em></strong><br/><img alt="img" src="./img/20191101191940054.png"/></p>
+<p><strong><em>删除队尾结点：</em></strong><br/><img alt="img" src="./img/20191101191945370.png"/></p>
+<h2 id="-">三、总结</h2>
+<p>LinkedBlockingDeque作为一种阻塞双端队列，提供了队尾删除元素和队首插入元素的阻塞方法。该类在构造时一般需要指定容量，如果不指定，则最大容量为<code>Integer.MAX_VALUE</code>。另外，由于内部通过ReentrantLock来保证线程安全，所以LinkedBlockingDeque的整体实现时比较简单的。</p>
+<p>另外，双端队列相比普通队列，主要是多了【队尾出队元素】/【队首入队元素】的功能。<br/>阻塞队列我们知道一般用于“生产者-消费者”模式，而双端阻塞队列在“生产者-消费者”就可以利用“双端”的特性，从队尾出队元素。</p>
+<p>考虑下面这样一种场景：</p>
+<blockquote>
+<p>有多个消费者，每个消费者有自己的一个消息队列，生产者不断的生产数据扔到队列中，消费者消费数据有快又慢。为了提升效率，速度快的消费者可以从其它消费者队列的<strong>队尾</strong>出队元素放到自己的消息队列中，由于是从其它队列的队尾出队，这样可以减少并发冲突（其它消费者从队首出队元素），又能提升整个系统的吞吐量。这其实是一种“<strong>工作窃取算法</strong>”的思路。</p>
+</blockquote>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

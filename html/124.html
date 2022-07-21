@@ -1,0 +1,36 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式进阶（六）——分布式框架之高性能：消息积压</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式进阶（六）——分布式框架之高性能：消息积压</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、消息积压</h2>
+<p>消息积压，就是说消息队列里面积压了大量消息，一般是由于生产者投递消息的速率远远大于消息者消费消息的速率。比如消费者端程序挂掉，或者吞吐量变得极小，此时，MQ集群的磁盘可能会很快被写满。</p>
+<p>消息积压问题本身很容易理解，解决这个问题的根本思路是<strong><em>如何在出现消息积压时快速将积压的消息处理掉</em></strong>。比如下图中的情况：<br/>一个消费者1秒消费1000条消息，那3个消费者1s就消费3000条，所以如果你积压了几百万甚至上千万的消息，即使消费者恢复了，也需要大概1小时的时间才能消费完。</p>
+<center><br/><img src="./img/20200212225208526.png" style="zoom:100%"><br/></img></center>
+<p>所以，要让积压的消息能被快速消费掉，仅仅靠原来的几个消费者去消费是不够的，我们必须提升消费速率。</p>
+<h2 id="-">二、解决方案</h2>
+<p>如果生产上出现上述的情况，即MQ里积压了成百上千万的消息，那基本上只能<strong>临时紧急扩容</strong>了，具体操作步骤和思路如下：</p>
+<ol>
+<li><p>先修复消息者端的程序问题，然后将现有consumer全部停掉；</p>
+</li>
+<li><p>新建一个Topic，partition是原来的10倍（如果是使用RabbitMQ，则临时建立原先10倍/20倍的queue数量）；</p>
+</li>
+<li><p>写一个临时分发数据的consumer程序，将这个程序部署上去消费积压的数据，消费之后不做任何处理而是直接轮询写入上述临时建立好的queue；</p>
+</li>
+<li><p>临时征用10倍的机器来部署原来步骤1中停掉的consumer，每一批consumer消费一个临时queue的数据；</p>
+</li>
+</ol>
+<p>这种解决方案相当于临时将queue资源和consumer资源扩大10倍，以10倍于正常的速度去消费数据，等快速消费完积压消息之后，再恢复原先的部署。</p>
+<h3 id="2-1-">2.1 磁盘问题</h3>
+<p>还有一个问题：<em>如果消息大量积压在MQ里，导致磁盘快写满了咋办？</em></p>
+<p>这种情况很可能是系统规划时没有合理分配磁盘资源，没考虑到消息积压的异常场景，并没有很好的解决办法，为了保证正常业务不受影响，可以采用以下方案：</p>
+<p>临时写个程序，不断去消费积压的消息，<strong>消费一个丢弃一个，都不要了</strong>，目的是快速消费掉所有的消息，避免磁盘撑爆导致系统没法正常运行，然后走上述的临时紧急扩容方案，等系统正常后晚上再进行数据重发，补数据。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

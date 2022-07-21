@@ -1,0 +1,57 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（32）——内存溢出之堆外内存</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（32）——内存溢出之堆外内存</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>本章，我们将讲解一个使用Jetty作为Web容器的应用的内存溢出问题，该内存溢出问题发生的区域是堆外内存，主要原因是JVM内存区域划分不合理，我们先来看下系统的背景。</p>
+<h3 id="1-1-">1.1 系统背景</h3>
+<p>生产环境的一个系统发生告警，拿到生产日志后出现如下字样：</p>
+<pre><code class="lang-java">nio handle failed java.lang.OutOfMemoryError: Direct buffer memory
+    at org.eclipse.jetty.io.nio.xxxx
+    at org.eclipse.jetty.io.nio.xxxx
+    at org.eclipse.jetty.io.nio.xxxx
+</code></pre>
+<p>通过日志，我们可以知道是<code>Direct buffer memory</code>这块区域发生了内存溢出异常，而且下面还有一大堆Jetty相关的调用栈。</p>
+<p><strong><em>Direct buffer memory是什么？</em></strong>我们先来了解下这块区域。</p>
+<h3 id="1-2-">1.2 堆外内存</h3>
+<p>Direct buffer memory——堆外内存，顾名思义是Java堆内存以外的一块内存区域，<strong>这块区域不受JVM管理，而由操作系统管理</strong>。我们的程序里并没有直接使用堆外内存，而且通过日志中的调用栈看到，是由Jetty引起的。也就是说，Jetty服务器可能在不停的使用堆外内存，然后堆外空间不足了，此时就抛出了内存溢出异常：<br/><img src="./img/20200204210531395.png" style="zoom: 67%;"/></p>
+<p>Jetty是采Java编写的Web容器，它的一些底层机制要求它需要使用到堆外内存。在Java中，要使用堆外内存，必须要用到<code>DirectByteBuffer</code>这个类，构建DirectByteBuffer对象的同时（DirectByteBuffer对象的引用本身在Java堆分配空间），就会在Java堆以外的内存空间划出一块区域，然后跟DirectByteBuffer对象关联起来：<br/><img src="./img/20200204210539796.png" style="zoom: 67%;"/></p>
+<p>当DirectByteBuffer对象失去所有引用，被垃圾回收器判定为垃圾对象时，就会在Young GC或Full GC时被回收掉，回收时也会将与它关联的那块堆外内存释放：<br/><img src="./img/20200204210549752.png" style="zoom: 75%;"/></p>
+<h2 id="-">二、问题分析</h2>
+<p>了解了系统的大致情况以及堆外内存的基本原理，我们大致可以推测出正是因为DirectByteBuffer对象长期没有被回收，导致堆外内存被大量占用，从而引发内存溢出。</p>
+<p>那么，<strong>什么情况下会出现大量的DirectByteBuffer对象一直存活，导致大量的堆外内存也无法被释放呢？</strong>根据我们之前的学习经验，有三种可能：</p>
+<ol>
+<li>系统承载着超高并发，瞬间大量请求过来，创建了过多的DirectByteBuffer对象，来不及回收掉下一次请求又过来的，导致内存溢出。</li>
+<li>处理请求速度过慢或超时。</li>
+<li>JVM中某些区域划分不合理，导致对象大量存活。</li>
+</ol>
+<p>根据监控系统的分析，系统的并发度并不高，程序日志显示也没有很多超时，所以很可能是因为JVM内存区域划分不合理或处理请求速度过慢导致的。</p>
+<h3 id="2-1-jstat-">2.1 jstat分析</h3>
+<p>我们通过jstat分析发现，Jetty会不断的创建DirectByteBuffer对象，直到新生代Eden区满了，就会触发Young GC。但是，往往垃圾回收的一瞬间，很多请求还没处理完，所以只有部分DirectByteBuffer对象被回收，存活下来的DirectByteBuffer对象需要转移到Survivor区，但是Survivor区的大小只有10MB！所以，只能将DirectByteBuffer对象转移到老年代：<br/><img src="./img/20200204210558601.png" style="zoom: 75%;"/></p>
+<p>按道理说，即使因为程序处理过慢，导致Young GC不能回收掉DirectByteBuffer对象，那么DirectByteBuffer对象进入到老年代后，等程序处理完了，下次Full GC时也会被回收掉。但问题就出在了JVM内存空间划分不合理，我们发现系统上线时的JVM配置是这样的：新生代一共200MB左右的空间，其中每个Survivor区就10MB，老年代反而有800MB左右。</p>
+<p>Survivor区的空间不足，导致DirectByteBuffer对象进入老年代，随着老年代中的DirectByteBuffer对象越来越多，这些DirectByteBuffer对象关联的堆外内存占用也会越来越多，此时很多老年代中的DirectByteBuffer对象已经是垃圾对象了，但是由于一直没达到触发老年代回收的阈值，所以也就没法Full GC，堆外内存也就是没法释放，最终导致堆外内存溢出。</p>
+<h3 id="2-2-systemgc">2.2 SystemGC</h3>
+<p>Java NIO其实已经考虑到了上述DirectByteBuffer垃圾对象一直无法被回收的问题，它在每次分配堆外内存时，都会调用下<code>System.gc()</code>方法，提醒JVM主动去回收那些没人引用的DirectByteBuffer对象，从而释放其关联的堆外内存。</p>
+<p>但是，我们的系统上线时设置了参数<code>-XX:+DisableExplictGC</code>，也就是屏蔽了程序中的<code>System.gc()</code>方法，最终导致了堆外内存溢出的发生。</p>
+<h2 id="-">三、系统优化</h2>
+<p>分析清楚了原因，主要从两方面进行优化：</p>
+<ol>
+<li>根据系统运行模型，重新合理分配JVM内存，给新生代更多内存，特别是Survivor区，保证能够容纳每次Young GC后的存活对象；</li>
+<li>去掉参数<code>-XX:+DisableExplictGC</code>，让System.gc()生效。</li>
+</ol>
+<blockquote>
+<p>生产环境原则上是要开启<code>-XX:+DisableExplictGC</code>的，但是如果能够保证自己程序里不出现<code>System.gc()</code>，则可以关闭。</p>
+</blockquote>
+<h2 id="-">四、总结</h2>
+<p>本章中，我们的案例之所以发生堆外内存溢出，其实是很多因素综合的结果。包括JVM内存划分不合理、处理请求速度较慢、屏蔽了System.gc()。</p>
+<p>所以，生产环境一旦发生OOM异常，除去一些程序bug等很明显的原因，往往是比较难排查的，可能是很多因素综合在一起导致了内存异常，我们要做的就是抓住主要矛盾，先按照最基本的优化思路去分析。另外，从这个案例和之前的tomcat案例也可以看出，我们平时还是要多去了解一些开源框架的底层原理，这样才能在出现问题时直击要点并解决问题。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

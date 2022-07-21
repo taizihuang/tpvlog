@@ -1,0 +1,53 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解RocketMQ系列</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解RocketMQ系列</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>从本专栏开始，我将详细讲解分布式系统中常用的一种组件——分布式消息中间件。目前工业环境常用的消息中间件主要有ActiveMQ、RabbitMQ、Kafka、RocketMQ。这四种消息中间件的优劣和使用场景，我会在专栏中进行对比，读者也可以先参照我的另一个专栏——<a href="https://www.tpvlog.com/article/62">《分布式系统从理论到实战系列》</a>，对消息中间件进行一个初步了解。</p>
+<p>本专栏只会讲解RocketMQ和Kafka，对于这两种消息中间件，都包括两部分：<strong>基础篇</strong>和<strong>进阶篇</strong>。</p>
+<p>基础篇不会讲解如何使用消息中间件（读者可参考官方文档和本章给出的参考书籍），而是主要讲解消息中间件的基本架构，高可用、高性能、可扩展的原理，以及涉及消息中间件问题的一些解决方案。</p>
+<p>进阶篇主要针对消息中间件的源码进行分析，帮助读者更深入的了解其底层原理。</p>
+<p>本专栏的主要参考资料如下：</p>
+<ul>
+<li><a href="">《  从零开始带你成为消息中间件实战高手  》</a></li>
+<li><a href="https://book.douban.com/subject/30417623/">《RocketMQ技术内幕》 丁威 / 周继锋</a></li>
+<li><a href="https://book.douban.com/subject/30246992/">《RocketMQ实战与原理解析》 杨开元</a></li>
+</ul>
+<h2 id="-">基础篇</h2>
+<p>基础篇分为RocketMQ和Kafka两部分，包含以下文章：</p>
+<ul>
+<li><a href="https://www.tpvlog.com/article/126">分布式消息中间件（1）——概述</a></li>
+<li><a href="https://www.tpvlog.com/article/127">分布式消息中间件（2）——RocketMQ架构</a></li>
+<li><a href="https://www.tpvlog.com/article/128">分布式消息中间件（3）——RocketMQ生产部署</a></li>
+<li><a href="https://www.tpvlog.com/article/129">分布式消息中间件（4）——RocketMQ性能压测</a></li>
+<li><a href="https://www.tpvlog.com/article/130">分布式消息中间件（5）——系统改造：异步、解耦、削峰</a></li>
+<li><a href="https://www.tpvlog.com/article/131">分布式消息中间件（6）——RocketMQ持久化原理</a></li>
+<li><a href="https://www.tpvlog.com/article/132">分布式消息中间件（7）——RocketMQ高可用原理</a></li>
+<li><a href="https://www.tpvlog.com/article/133">分布式消息中间件（8）——RocketMQ消费者原理</a></li>
+<li><a href="https://www.tpvlog.com/article/134">分布式消息中间件（9）——RocketMQ通信原理</a></li>
+<li><a href="https://www.tpvlog.com/article/136">分布式消息中间件（10）——RocketMQ消息丢失</a></li>
+<li><a href="https://www.tpvlog.com/article/137">分布式消息中间件（11）——RocketMQ重复消费</a></li>
+<li><a href="https://www.tpvlog.com/article/138">分布式消息中间件（12）——RocketMQ顺序消息</a></li>
+<li><a href="https://www.tpvlog.com/article/139">分布式消息中间件（13）——RocketMQ延时消息</a></li>
+</ul>
+<h2 id="-">进阶篇</h2>
+<p>进阶篇主要通过分析消息中间件的源码，帮助读者更好的理解RocketMQ和Kafka的底层原理，同时掌握分析开源框架源码的一些思路和基本方法。</p>
+<p>很多童鞋听到“源码分析”就会有畏惧感，事实上，读源码这种事情，对于大多数人来说确实有些难度，但是只要掌握了一定技巧，就能够分析出一个开源框架的基本原理。</p>
+<p>而阅读源码，最不可取、也是最低效的方式就是陷入到细节里面的去。我们首先要搞清楚一个事情，<strong>读源码的目的不是为了应付面试</strong>，而是为了在运用某个开源框架出现问题时，能从底层了解出现问题的根本原因，进而解决问题。除此之外，读源码也是为了学习框架设计的思想和其中的设计模式的实际运用。</p>
+<p>现在互联网这块的风气很差，动不动一篇很浅显的文章后面贴个公众号，说白了这些人写文章不是为了分享知识，就是为了圈些流量而已。目前互联网上大量充斥着这种文章和公众号，大部分东西都零碎而不成系统，订阅和阅读这些文章，不如直接去看相关技术书籍。此时，如果你永远带着面试的潜意识去学习一样东西，那你永远只能是在最底层的苦力。</p>
+<p>本部分包含以下文章：</p>
+<ul>
+<li><a href="">RocketMQ源码分析（1）——环境搭建</a></li>
+<li><a href="">RocketMQ源码分析（2）——NameServer启动流程</a></li>
+<li><a href="">RocketMQ源码分析（3）——Broker启动流程</a></li>
+</ul>
+<p><strong><em>TO BE CONTINUED</em></strong></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

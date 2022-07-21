@@ -1,0 +1,308 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（十八）——访问者模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（十八）——访问者模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>访问者模式（Visitor Design Pattern ）</strong>，是一种行为型模式。 它是 23 种经典设计模式中最难理解的几个之一。因为它难理解、难实现，应用它会导致代码的可读性、可维护性变差，所以访问者模式在实际的软件开发中很少被用到，在没有特别必要的情况下，建议你不要使用访问者模式。 </p>
+<h2 id="-">一、基本原理</h2>
+<p>我通过一个示例来还原访问者模式诞生的思维过程。假设我们从网站上爬取了很多资源文件，它们的格式有三种：PDF、PPT、Word。我们现在要开发一个工具来处理这批资源文件。这个工具的其中一个功能是，把这些文件中的文本内容抽取出来放到 txt 文件中。 </p>
+<h3 id="1-1-">1.1 演化思路</h3>
+<p>最基本的思路是定义一个 ResourceFile 抽象类，包含一个抽象函数 extract2txt()。然后定义PdfFile、PPTFile、WordFile 继承 ResourceFile 类，并重写 extract2txt() 函数：</p>
+<pre><code class="lang-JAVA">public abstract class ResourceFile {
+  protected String filePath;
+
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+
+  public abstract void extract2txt();
+}
+
+public class PPTFile extends ResourceFile {
+  public PPTFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void extract2txt() {
+    //...省略一大坨从PPT中抽取文本的代码...
+    //...将抽取出来的文本保存在跟filePath同名的.txt文件中...
+    System.out.println("Extract PPT.");
+  }
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void extract2txt() {
+    //...
+    System.out.println("Extract PDF.");
+  }
+}
+
+public class WordFile extends ResourceFile {
+  public WordFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void extract2txt() {
+    //...
+    System.out.println("Extract WORD.");
+  }
+}
+</code></pre>
+<p>如果工具的功能不停地扩展，还要支持压缩、提取文件元信息、构建索引等一系列的功能，那如果我们继续按照上面的实现思路，就会存在这样几个问题： </p>
+<ul>
+<li>违背开闭原则，添加一个新的功能，所有类的代码都要修改；</li>
+<li>每个类的代码不断膨胀，可读性和可维护性都变差了；</li>
+<li>PdfFile、PPTFile、WordFile 类的职责不够单一。 </li>
+</ul>
+<p>针对上面的问题，我们常用的解决方法就是拆分解耦，把业务操作跟具体的数据结构解耦，设计成独立的类：</p>
+<pre><code class="lang-JAVA">public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+  //...
+}
+
+//...PPTFile、WordFile代码省略...
+
+public class Extractor {
+  public void extract2txt(PPTFile pptFile) {
+    //...
+    System.out.println("Extract PPT.");
+  }
+
+  public void extract2txt(PdfFile pdfFile) {
+    //...
+    System.out.println("Extract PDF.");
+  }
+
+  public void extract2txt(WordFile wordFile) {
+    //...
+    System.out.println("Extract WORD.");
+  }
+}
+</code></pre>
+<p>这其中最关键的一点设计是，我们把抽取文本内容的操作，设计成了三个重载函数。但是，对于客户端来说，必须写死文件类型才能使用Extractor：</p>
+<pre><code class="lang-JAVA">public class ToolApplication {
+  public static void main(String[] args) {
+    Extractor extractor = new Extractor();
+    extractor.extract2txt(new PPTFile("c.ppt"));
+  }
+}
+</code></pre>
+<p>访问者模式的解决思路如下，增加一个抽象方法，将资源处理器作为方法的入参传进来：</p>
+<pre><code class="lang-JAVA">public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+  abstract public void accept(Extractor extractor);
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void accept(Extractor extractor) {
+    extractor.extract2txt(this);
+  }
+}
+
+//...
+
+public class ToolApplication {
+  public static void main(String[] args) {
+    Extractor extractor = new Extractor();
+
+    List&lt;ResourceFile&gt; resourceFiles = new ArrayList&lt;&gt;();
+    resourceFiles.add(new PdfFile("a.pdf"));
+    resourceFiles.add(new WordFile("b.word"));
+    resourceFiles.add(new PPTFile("c.ppt"));
+
+    for (ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(extractor);
+    }
+  }
+}
+</code></pre>
+<p>现在，如果要继续添加新的功能，比如前面提到的压缩功能，根据不同的文件类型，使用不同的压缩算法来压缩资源文件，那我们该如何实现呢？我们需要实现一个类似 Extractor 类的新类 Compressor 类，在其中定义三个重载函数，实现对不同类型资源文件的压缩。除此之外，我们还要在每个资源文件类中定义新的 accept 重载函数。具体的代码如下所示： </p>
+<pre><code class="lang-JAVA">public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+  abstract public void accept(Extractor extractor);
+  abstract public void accept(Compressor compressor);
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void accept(Extractor extractor) {
+    extractor.extract2txt(this);
+  }
+
+  @Override
+  public void accept(Compressor compressor) {
+    compressor.compress(this);
+  }
+}
+}
+//...
+
+public class ToolApplication {
+  public static void main(String[] args) {
+    Extractor extractor = new Extractor();
+    List&lt;ResourceFile&gt; resourceFiles = listAllResourceFiles(args[0]);
+    for (ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(extractor);
+    }
+
+    Compressor compressor = new Compressor();
+    for(ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(compressor);
+    }
+  }
+
+  private static List&lt;ResourceFile&gt; listAllResourceFiles(String resourceDirectory) {
+    List&lt;ResourceFile&gt; resourceFiles = new ArrayList&lt;&gt;();
+    //...根据后缀(pdf/ppt/word)由工厂方法创建不同的类对象(PdfFile/PPTFile/WordFile)
+    resourceFiles.add(new PdfFile("a.pdf"));
+    resourceFiles.add(new WordFile("b.word"));
+    resourceFiles.add(new PPTFile("c.ppt"));
+    return resourceFiles;
+  }
+}
+</code></pre>
+<p>上面代码还存在一些问题，添加一个新的业务，还是需要修改每个资源文件类，违反了开闭原则。针对这个问题，我们抽象出来一个 Visitor 接口，包含是三个命名非常通用的 visit() 重载函数，分别处理三种不同类型的资源文件。具体做什么业务处理，由实现这个 Visitor 接口的具体的类来决定，比如 Extractor 负责抽取文本内容，Compressor 负责压缩。当我们新添加一个业务功能的时候，资源文件类不需要做任何修改，只需要修改 ToolApplication 的代码就可以了：</p>
+<pre><code class="lang-JAVA">public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+  abstract public void accept(Visitor vistor);
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void accept(Visitor visitor) {
+    visitor.visit(this);
+  }
+}
+//...
+
+public interface Visitor {
+  void visit(PdfFile pdfFile);
+  void visit(PPTFile pdfFile);
+  void visit(WordFile pdfFile);
+}
+
+public class Extractor implements Visitor {
+  @Override
+  public void visit(PPTFile pptFile) {
+    //...
+    System.out.println("Extract PPT.");
+  }
+
+  @Override
+  public void visit(PdfFile pdfFile) {
+    //...
+    System.out.println("Extract PDF.");
+  }
+
+  @Override
+  public void visit(WordFile wordFile) {
+    //...
+    System.out.println("Extract WORD.");
+  }
+}
+
+public class Compressor implements Visitor {
+  @Override
+  public void visit(PPTFile pptFile) {
+    //...
+    System.out.println("Compress PPT.");
+  }
+
+  @Override
+  public void visit(PdfFile pdfFile) {
+    //...
+    System.out.println("Compress PDF.");
+  }
+
+  @Override
+  public void visit(WordFile wordFile) {
+    //...
+    System.out.println("Compress WORD.");
+  }
+
+}
+</code></pre>
+<p>使用方式如下：</p>
+<pre><code class="lang-JAVA">public class ToolApplication {
+  public static void main(String[] args) {
+    Extractor extractor = new Extractor();
+    List&lt;ResourceFile&gt; resourceFiles = listAllResourceFiles(args[0]);
+    for (ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(extractor);
+    }
+
+    Compressor compressor = new Compressor();
+    for(ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(compressor);
+    }
+  }
+
+  private static List&lt;ResourceFile&gt; listAllResourceFiles(String resourceDirectory) {
+    List&lt;ResourceFile&gt; resourceFiles = new ArrayList&lt;&gt;();
+    //...根据后缀(pdf/ppt/word)由工厂方法创建不同的类对象(PdfFile/PPTFile/WordFile)
+    resourceFiles.add(new PdfFile("a.pdf"));
+    resourceFiles.add(new WordFile("b.word"));
+    resourceFiles.add(new PPTFile("c.ppt"));
+    return resourceFiles;
+  }
+}
+</code></pre>
+<h3 id="1-2-">1.2 模式定义</h3>
+<p>上面我们通过一个示例，一步一步还原了访问者模式诞生的思维过程，现在，我们回过头来总结一下，这个模式的原理和代码实现。 </p>
+<p>GOF对访问者模式的定义是： <strong>允许一个或者多个操作应用到一组对象上，解耦操作和对象本身</strong>。 下面是访问者模式的标准类图，大家可以对照着前面的例子代码一块儿来看一下：</p>
+<center><br/> <img src="./img/20200420212539287.png" style="zoom:55%"><br/></img></center>
+<h2 id="-">二、应用场景</h2>
+<p>了解了访问者模式的基本原理，我们再来看下它的应用场景。</p>
+<p>一般来说，访问者模式针对的是一组类型不同的对象（如PdfFile、PPTFile、WordFile）。不过，尽管这组对象的类型是不同的，但是，它们继承相同的父类（ResourceFile）或者实现相同的接口。在不同的应用场景下，我们需要对这组对象进行一系列不相关的业务操作（抽取文本、压缩等），但为了避免不断添加功能导致类（PdfFile、PPTFile、WordFile）不断膨胀，职责越来越不单一，以及避免频繁地添加功能导致的频繁代码修改，我们使用访问者模式，<strong>将对象与操作解耦</strong>，将这些业务操作抽离出来，定义在独立细分的访问者类（Extractor、Compressor）中。 </p>
+<p>另外， 支持双分派（Double Dispatch）的语言其实压根不需要访问者模式。 所谓 Double Dispatch，指的是执行哪个对象的方法，根据对象的运行时类型来决定；执行对象的哪个方法，根据方法参数的运行时类型来决定。 </p>
+<p>Java 支持多态特性，代码可以在运行时获得对象的实际类型（也就是前面提到的运行时类型），然后根据实际类型决定调用哪个方法。尽管 Java 支持函数重载，但 Java 设计的函数重载的语法规则是，并不是在运行时，根据传递进函数的参数的实际类型，来决定调用哪个重载函数，而是在编译时，根据传递进函数的参数的声明类型（也就是前面提到的编译时类型），来决定调用哪个重载函数。也就是说，具体执行哪个对象的哪个方法，只跟对象的运行时类型有关，跟参数的运行时类型无关。所以，Java 语言只支持 Single Dispatch。 </p>
+<h2 id="-">三、总结</h2>
+<p>对于访问者模式，学习的主要难点在代码实现。而代码实现比较复杂的主要原因是，函数重载在大部分面向对象编程语言中是静态绑定的。也就是说，调用类的哪个重载函数，是在编译期间，由参数的声明类型决定的，而非运行时，根据参数的实际类型决定的。 </p>
+<p>正是因为代码实现难理解，所以，在项目中应用这种模式，会导致代码的可读性比较差。如果你的同事不了解这种设计模式，可能就会读不懂、维护不了你写的代码。所以，除非不得已，不要使用这种模式。 </p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,52 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch进阶（五）——生产部署：OS参数调优</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch进阶（五）——生产部署：OS参数调优</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我们看下如何对部署Elasticsearch进程的机器进行调优。因为生产环境下，为了提升Elasticsearch性能，很多OS的默认配置是不能满足要求的，我们需要做些调整。</p>
+<h2 id="-swapping">一、禁止swapping</h2>
+<p>大多数操作系统都会使用尽量多的内存来进行file system cache，并且尽量将不经常使用的java应用内存swap到磁盘中去。这会导致jvm heap的部分内存，甚至是用来执行代码的内存页被swap到磁盘中去。</p>
+<p>swapping对于非常影响应用性能，为了Elasticsearch节点的稳定性考虑，应该尽量避免这种swapping。因为swapping会导致GC过程从毫秒级变成分钟级，在GC的时候需要将内存从磁盘swapping到内存里，特别耗时，这会导致es节点响应请求变得很慢，甚至导致ES node跟cluster失联。</p>
+<p>有三种方法可以disable swapping。推荐彻底禁用swap，如果做不到的话，也得尽量最小化swappiness的影响，比如通过lock memory的方法。</p>
+<h3 id="1-1-swapping">1.1 禁用swapping</h3>
+<p>通常来说，Elasticsearch进程会在一个节点上单独运行，那么es进程的内存使用是由jvm option控制的。所以可以使用下面的命令临时禁止swapping：</p>
+<pre><code class="lang-JAVA">swapoff -a
+</code></pre>
+<p>要永久性的禁止swap，需要修改<code>/etc/fstab</code>文件，将所有包含swap的行都注释掉。</p>
+<h3 id="1-2-swappiness">1.2 配置swappiness</h3>
+<p>另外一个方法就是通过<code>sysctl</code>，将<code>vm.swappiness</code>设置为1，这可以尽量减少Linux内核swap的倾向，在正常情况下，就不会进行swap，但是在紧急情况下，还是会进行swap操作：</p>
+<pre><code class="lang-JAVA">sysctl -w vm.swappiness=1
+</code></pre>
+<h3 id="1-3-bootstrap-memory_lock">1.3 启用bootstrap.memory_lock</h3>
+<p>最后一个选项，就是用<code>mlockall</code>，将es jvm进程的address space锁定在内存中，阻止es内存被swap out到磁盘上去。在<code>config/elasticsearch.yml</code>中，可以配置：</p>
+<pre><code class="lang-JAVA">bootstrap.memory_lock: true
+</code></pre>
+<p>我们通过这下面的请求检查mlockall是否开启了：</p>
+<pre><code class="lang-JAVA">GET _nodes?filter_path=**.mlockall，
+</code></pre>
+<p>如果发现mlockall是false，那么意味着mlockall请求失败了，会看到一行日志，unable to lock jvm memory。最可能的原因，就是在linux系统中，启动es进程的用户没有权限去lock memory，需要通过以下方式进行授权：</p>
+<pre><code class="lang-JAVA">ulimit -l unlimited
+</code></pre>
+<p>另外一个原因可能是临时目录使用<code>noexec option</code>来<code>mount</code>了。可以通过指定一个新的临时目录来解决：</p>
+<pre><code class="lang-JAVA">export ES_JAVA_OPTS="$ES_JAVA_OPTS -Djava.io.tmpdir=/path/to/temp/dir"
+</code></pre>
+<h2 id="-">二、使用虚拟内存</h2>
+<p>Elasticsearch使用<code>hybrid mmapfs / niofs</code>目录来存储index数据，操作系统的默认mmap count限制是很低的，可能会导致内存耗尽的异常。所以需要提升mmap count的限制：</p>
+<pre><code class="lang-JAVA">sysctl -w vm.max_map_count=262144
+</code></pre>
+<p>如果要永久性的设置这个值，要修改<code>/etc/sysctl.conf</code>，将<code>vm.max_map_count</code>的值修改一下，重启过后，用<code>sysctl vm.max_map_count</code>命令来验证一下数值是否修改成功。</p>
+<p>Elasticsearch同时会用NioFS和MMapFS来处理不同的文件，我们需要有足够的虚拟内存来给mmapped文件使用，可以用sysctl来设置：<code>sysctl -w vm.max_map_count=262144</code>。还可以在<code>/etc/sysctl.conf</code>中，通过<code>vm.max_map_count</code>来设置。</p>
+<h2 id="-">三、设置线程数</h2>
+<p>Elasticsearch用了很多线程池来应对不同类型的操作，在需要的时候创建新的线程是很重要的。要确保Elasticsearch用户能创建的最大线程数量至少在2048以上。</p>
+<p>可以通过<code>ulimit -u 2048</code>来临时设置，也可以在<code>/etc/security/limits.conf</code>中设置nproc为2048来永久性设置。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我介绍了针对操作系统的一些核心参数的调优。需要特别关注的是swapping机制，swapping对于性能影响是非常严重的，为了ES节点的稳定性考虑，应该尽量避免swapping。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

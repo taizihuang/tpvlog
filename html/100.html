@@ -1,0 +1,109 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（16）——模拟Young GC</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（16）——模拟Young GC</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>本章，我们将通过示例代码演示Young GC是如何发生的。同时，我们会讲解如何通过JVM参数去配置打印GC日日，然后通过GC日志分析JVM中的GC到底是如何运行的。</p>
+<h3 id="1-1-jvm-">1.1 JVM内存参数</h3>
+<p>我们的示例程序基于JDK1.8，JVM参数如下：<br/><code>-XX:NewSize=5242880 -XX:MaxNewSize=5242880 -XX:InitialHeapSize=10485760 -XX:MaxHeapSize=10485760 -XX:SurvivorRatio=8 -XX:PretenureSizeThreshold=10485760 -XX:+UseParNewGC -XX:+UseConcMarkSweepGC</code></p>
+<p>上述参数中：</p>
+<ul>
+<li>-XX:NewSize=5242880 -XX:MaxNewSize=5242880：新生代大小5MB</li>
+<li>-XX:InitialHeapSize=10485760 -XX:MaxHeapSize=10485760：Java堆内存10MB</li>
+<li>-XX:SurvivorRatio=8：Eden区占4MB，Survivor各占0.5MB</li>
+<li>-XX:PretenureSizeThreshold=10485760：大对象阈值10MB</li>
+<li>-XX:+UseParNewGC -XX:+UseConcMarkSweepGC：新生代使用ParNew，老年代使用CMS</li>
+</ul>
+<p><img src="./img/20200204201021488.png" style="zoom: 67%;"/></p>
+<h3 id="1-2-gc-">1.2 GC日志参数</h3>
+<p>我们需要在系统的JVM参数中加入GC日志的打印选型：</p>
+<ul>
+<li>-XX:+PrintGCDetails：打印详细的GC日志</li>
+<li>-XX:+PrintGCTimeStamps：打印每次GC发生的时间</li>
+<li>-Xloggc:gc.log：设置将GC日志写入一个磁盘文件</li>
+</ul>
+<p>加入日志参数后，JVM的参数如下：</p>
+<p><code>-XX:NewSize=5242880 -XX:MaxNewSize=5242880 -XX:InitialHeapSize=10485760 -XX:MaxHeapSize=10485760 -XX:SurvivorRatio=8 -XX:PretenureSizeThreshold=10485760 -XX:+UseParNewGC -XX:+UseConcMarkSweepGC -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -Xloggc:gc.log</code></p>
+<h2 id="-">二、示例程序</h2>
+<h3 id="2-1-">2.1 程序源码</h3>
+<p>示例程序代码如下：</p>
+<pre><code class="lang-JAVA">public class Demo1 {
+    public static void main(String[] args) {
+        byte[] array1 = new byte[1024 * 1024];
+        array1 = new byte[1024 * 1024];
+        array1 = new byte[1024 * 1024];
+        array1 = null;
+
+        byte[] array2 = new byte[2 * 1024 * 1024];
+    }
+}
+</code></pre>
+<h3 id="2-2-jvm-">2.2 JVM内存模型</h3>
+<p>我们根据上述代码来分析下对象是如何在Eden区分配的。</p>
+<p>首先，main方法里的第一行代码会为Eden区创建一个1MB的byte数组，第2-3行代码array1局部变量重新赋值引用：</p>
+<p><img src="./img/20200204201029025.png" style="zoom: 65%;"/></p>
+<p>第4行代码<code>array1=null</code>，这时之前的3个数组对象都失去了引用：</p>
+<p><img src="./img/20200204201036539.png" style="zoom: 67%;"/></p>
+<p>第5行代码<code>byte[] array2 = new byte[2 * 1024 * 1024]</code>，尝试创建一个2MB的对象放入Eden区，但是Eden区已经空间不足了，所以这时就会触发新生代的Young GC。</p>
+<h3 id="2-3-">2.3 程序执行</h3>
+<p>当使用IDE执行程序时，我们先要进行JVM参数配置，以IDEA为例，配置如下：<br/><img src="./img/20200204201043519.png" style="zoom: 67%;"/></p>
+<p>运行完成后，工程目录下会出现GC日志文件：gc.log，内容如下：</p>
+<pre><code class="lang-java">Java HotSpot(TM) 64-Bit Server VM (25.111-b14) for windows-amd64 JRE (1.8.0_111-b14), built on Sep 22 2016 19:24:05 by "java_re" with MS VC++ 10.0 (VS2010)
+Memory: 4k page, physical 12470176k(6211924k free), swap 14370720k(6127712k free)
+CommandLine flags: -XX:InitialHeapSize=10485760 -XX:MaxHeapSize=10485760 -XX:MaxNewSize=5242880 -XX:NewSize=5242880 -XX:OldPLABSize=16 -XX:PretenureSizeThreshold=10485760 -XX:+PrintGC -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:SurvivorRatio=8 -XX:+UseCompressedClassPointers -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:-UseLargePagesIndividualAllocation -XX:+UseParNewGC 
+0.242: [GC (Allocation Failure) 0.242: [ParNew: 4094K-&gt;512K(4608K), 0.0018168 secs] 4094K-&gt;1696K(9728K), 0.0020491 secs] [Times: user=0.05 sys=0.02, real=0.00 secs] 
+Heap
+ par new generation   total 4608K, used 3702K [0x00000000ff600000, 0x00000000ffb00000, 0x00000000ffb00000)
+  eden space 4096K,  77% used [0x00000000ff600000, 0x00000000ff91d978, 0x00000000ffa00000)
+  from space 512K, 100% used [0x00000000ffa80000, 0x00000000ffb00000, 0x00000000ffb00000)
+  to   space 512K,   0% used [0x00000000ffa00000, 0x00000000ffa00000, 0x00000000ffa80000)
+ concurrent mark-sweep generation total 5120K, used 1184K [0x00000000ffb00000, 0x0000000100000000, 0x0000000100000000)
+ Metaspace       used 3484K, capacity 4498K, committed 4864K, reserved 1056768K
+  class space    used 387K, capacity 390K, committed 512K, reserved 1048576K
+</code></pre>
+<h2 id="-">三、日志分析</h2>
+<p>本节，我们来分析下上述的gc.log日志。</p>
+<h3 id="3-1-gc-">3.1 GC情况概览</h3>
+<p>我们先来看下日志中的如下行，这是本次GC情况的概要说明：</p>
+<pre><code class="lang-java">0.242: [GC (Allocation Failure) 0.242: [ParNew: 4094K-&gt;512K(4608K), 0.0018168 secs] 4094K-&gt;1696K(9728K), 0.0020491 secs] [Times: user=0.05 sys=0.02, real=0.00 secs]
+</code></pre>
+<p><strong>GC (Allocation Failure) ：</strong>说明了为啥发生GC，因为对象分配失败，也就是上述的Eden区空间不足了；</p>
+<p><strong>0.242：</strong>系统运行了0.242秒以后，发生了本次GC；</p>
+<p><strong>ParNew: 4094K-&gt;512K(4608K), 0.0018168 secs：</strong>使用ParNew进行新生代的GC，GC前新生代使用了4094K，GC完成后新生代使用了512K，4608K表示年轻代的总空间（Eden+1个Survivor），本次GC耗时0.0018168秒；</p>
+<p><strong>4094K-&gt;1696K(9728K), 0.0020491 secs：</strong>Java堆内存的总空间为8728K，GC前使用了4094K，GC后使用了1696K；</p>
+<p><strong>Times: user=0.05 sys=0.02, real=0.00 secs：</strong>本次GC消耗的时间，与元数据区有关，后续讲解。</p>
+<p>根据GC日志可以看出，本轮Young GC有512K对象存活下来了，从Eden区转移到了Survivor区：</p>
+<p><img src="./img/20200204201052495.png" style="zoom: 67%;"/></p>
+<h3 id="3-2-jvm-">3.2 JVM退出时堆内存</h3>
+<p>我们接着看下面的GC日志，这是<strong>JVM退出时当前Java堆内存的使用情况</strong>：</p>
+<pre><code class="lang-java">Heap
+ par new generation   total 4608K, used 3702K [0x00000000ff600000, 0x00000000ffb00000, 0x00000000ffb00000)
+  eden space 4096K,  77% used [0x00000000ff600000, 0x00000000ff91d978, 0x00000000ffa00000)
+  from space 512K, 100% used [0x00000000ffa80000, 0x00000000ffb00000, 0x00000000ffb00000)
+  to   space 512K,   0% used [0x00000000ffa00000, 0x00000000ffa00000, 0x00000000ffa80000)
+</code></pre>
+<p><strong>par new generation   total 4608K, used 3702K：</strong>ParNew负责的新生代总共有4608K内存，目前使用了3702K；</p>
+<p><strong>eden space 4096K,  77% used：</strong>Eden总共使用了4096K</p>
+<p><strong>from space 512K, 100% used： </strong>From Survivor区使用了100%（存放转移过来的未知存活对象） </p>
+<p><strong>to   space 512K,   0% used：</strong>To Survivor区未使用</p>
+<p>我们接着看：</p>
+<pre><code class="lang-java">concurrent mark-sweep generation total 5120K, used 1184K [0x00000000ffb00000, 0x0000000100000000, 0x0000000100000000)
+Metaspace       used 3484K, capacity 4498K, committed 4864K, reserved 1056768K
+class space    used 387K, capacity 390K, committed 512K, reserved 1048576K
+</code></pre>
+<p><strong>concurrent mark-sweep generation total 5120K, used 1184K：</strong>使用CMS管理的老年代总空间为5210K，已使用1184K</p>
+<p><strong>Metaspace       used 3484K, capacity 4498K, committed 4864K, reserved 1056768K：</strong>元数据区的空间信息</p>
+<p><strong>class space    used 387K, capacity 390K, committed 512K, reserved 1048576K：</strong>Class空间信息</p>
+<blockquote>
+<p>JDK1.8开始，取消了方法区，取而代之的是Metaspace。Metaspace直接使用本地内存。默认情况下，其大小会根据使用情况动态调整，也可以使用<code>-XX:MaxMetaspaceSize</code>来控制最大内存。</p>
+</blockquote>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

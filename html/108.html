@@ -1,0 +1,62 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>JVM实战（24）——大对象优化</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>JVM实战（24）——大对象优化</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、案例背景</h2>
+<p>本章将介绍一个因为大对象而导致的频繁GC问题，其本质也是开发童鞋在写程序代码时存在bug，进而导致出现JVM性能问题。</p>
+<p>首先，这个系统上线之后发现一天的Full GC次数多达几十次，通常来说，我们建议的一个比较良好的JVM性能，应该是Full GC几天才发生一次，或者最多一天发生几次而已。</p>
+<p>生产环境这个系统部署在2核4G的机器上，JVM参数如下：<br/><code>-Xms=1536M -Xmx=1536M -Xmn=512M -Xss=256K -XX:SurvivorRatio=5 -XX:+UseParNewGC -XX:+UseConcMarkSweepGC -XX:CMSInitiatingOccupancyFraction=68 -XX:CMSParallelRemarkEnable -XX:UseCMSInitiatingOccupancyOnly -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:PrintHeapAtGC -Xloggc:gc.log</code></p>
+<p>比较关键的几个设置是：</p>
+<ul>
+<li>-XX:SurvivorRatio=5：表示Eden:Survivor:Survivor=5:1:1</li>
+<li>-XX:CMSInitiatingOccupancyFraction=68：表示一旦老年代内存使用达到68%，就会触发Full GC</li>
+</ul>
+<p>此时，整个系统对应的JVM内存模型如下：</p>
+<p><img src="./img/20200204205148423.png" style="zoom: 40%;"/></p>
+<h3 id="1-1-">1.1 存在问题</h3>
+<p>我们通过jstat进行分析，统计出的JVM性能如下：</p>
+<ul>
+<li>系统运行时间：6天</li>
+<li>6天内的Full GC次数和总耗时：250次，70秒</li>
+<li>6天内的Young GC次数和总耗时：26000次，1400秒</li>
+</ul>
+<p>也就是说，平均每20s触发一次Young GC，每30分钟触发一次Full GC。根据Eden区和老年代的空间可以估算，系统每秒钟会产生约20MB对象进入Eden，每30分钟会有约600MB对象进入老年代：</p>
+<p><img src="./img/20200204205158181.png" style="zoom: 65%;"/></p>
+<p>根据参数<code>-XX:CMSInitiatingOccupancyFraction=68</code>，老年代内存使用达到68%，就会触发Full GC，一次Full GC时间约300ms。</p>
+<h2 id="-">二、大对象</h2>
+<h3 id="2-1-">2.1 优化前</h3>
+<p>通过上述的案例背景介绍，我们首先想到的是会不会因为Survivor区太小，导致Young GC后的存活对象太多，放不下Survivor了，所以就一直有对象流入老年代，进而导致30分钟后触发Full GC？</p>
+<p>但这只是推论，因为对象进入老年代也可能是因为动态年龄判断规则，所以我们就需要通过工具在高峰期观察JVM的内存使用情况。</p>
+<p>事实上，我们观察到每次 Young GC后进入老年代的对象非常少，而且一次Young GC的存活对象也就是几十MB，Survior区可以容纳，偶尔触发动态年龄判断规则时，才有几十MB对象进入老年代：</p>
+<p><img src="./img/20200204205207355.png" style="zoom: 65%;"/></p>
+<p>因此，分析到这里就很奇怪了，因为通过jstat追踪，并不是每次Young GC后都有几十MB对象进入老年代，而是偶尔才有对象进入老年代，记住，是偶尔。</p>
+<p><em>那么老年代里面到底为什么会有那么多对象呢？</em></p>
+<p>我们观察发现，<strong>系统运行一段时间后，突然间老年代中的对象就会增加五六百MB</strong>。</p>
+<p>答案已经很明显了——<strong>大对象</strong>！一定是系统运行时，每隔一段时间就会产生几百兆的大对象，直接进入老年代，不会走年轻代的Eden区，然后配合年轻代还偶尔会有几十MB对象进入老年代，所以才30分钟触发一次Full GC：</p>
+<p><img src="./img/20200204205217306.png" style="zoom: 100%;"/></p>
+<h3 id="2-2-">2.2 优化后</h3>
+<p>了解了问题的所在，我们就开始针对这个案例进行优化。首先，就是要确定这个大对象到底是什么？</p>
+<p>我们采用jmap工具导出一份JVM内存快照，然后通过jhat或者Visual VM之类的可视化工具进行分析，发现那几百兆大对象就是从数据库中查出的记录，然后对SQL进行排查，发现某个SQL在一种特殊场景下会执行类似<code>SELECT * FROM</code>的语句，导致一次性从数据库中查出几十万条数据。</p>
+<p>针对该问题，主要做以下几点优化：</p>
+<ol>
+<li>解决程序bug，不允许全表查询，这样就避免了大对象直接进入老年代的问题；</li>
+<li>Survivor区明显不够，70MB的空间很容易触发动态年龄判断，所以为其分配更多空间。</li>
+</ol>
+<p>优化后的JVM参数如下：</p>
+<p><code>-Xms=1536M -Xmx=1536M -Xmn=1024M -Xss=256K -XX:SurvivorRatio=5 -XX:PermSize=256M -XX:MaxPermSize=256M -XX:+UseParNewGC -XX:+UseConcMarkSweepGC -XX:CMSInitiatingOccupancyFraction=92 -XX:CMSParallelRemarkEnable -XX:UseCMSInitiatingOccupancyOnly -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:PrintHeapAtGC -Xloggc:gc.log</code></p>
+<p>可以看到，新生代直接分配1G空间，其中Survivor各占150MB左右，此时Young GC过后的几十MB存活对象一般就不会进入老年代了。</p>
+<p>同时，调整参数<code>-XX:CMSInitiatingOccupancyFraction=92</code>，将比例提高至92%，避免老年代仅占62%就触发Full GC。</p>
+<p>最后，还设置永久代大小为256MB，因为默认永久代就几十MB，如果程序使用了反射等机制，很容<br/>易被占满。</p>
+<p>经过上述优化，系统基本上每分钟一次Young GC，几天才会发生一个Full GC。</p>
+<h2 id="-">三、总结</h2>
+<p>本章，我们通过示例分析了大对象导致的频繁Full GC问题，并一步一步展现了发现问题、分析问题、解决问题的思路。当我们发现Young GC过后并不是每次都有很多存活对象进入老年代的时候，就要从别的角度考虑下到底为什么会有那么多存活对象进入老年代。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看JVM分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/23">JVM</a></div>
+</div></body>
+        </html>
+        

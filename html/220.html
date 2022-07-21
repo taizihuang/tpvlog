@@ -1,0 +1,260 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>设计模式基础（十一）——享元模式</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>设计模式基础（十一）——享元模式</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p><strong>享元模式（Flyweight Design Pattern）</strong>，是一种结构型模式。所谓“享元”，就是被共享的单元。享元模式的意图是<strong>复用对象，节省内存，前提是享元对象是不可变对象</strong>。</p>
+<p>具体来讲，当一个系统中存在大量重复对象的时候，如果这些重复的对象是不可变对象，我们就可以利用享元模式将对象设计成享元，在内存中只保留一份实例，供多处代码引用。这样可以减少内存中对象的数量，起到节省内存的目的。</p>
+<p>实际上，不仅仅相同对象可以设计成享元，对于相似对象，我们也可以将这些对象中相同的部分（字段）提取出来，设计成享元，让这些大量相似对象引用这些享元。</p>
+<h2 id="-">一、基本原理</h2>
+<p>我们通过两个简单的示例来讲解下享元模式。</p>
+<h3 id="1-1-">1.1 示例一：象棋</h3>
+<p>假设我们在开发一个棋牌游戏（比如象棋）。一个游戏厅中有成千上万个“房间”，每个房间对应一个棋局。棋局要保存每个棋子的数据，比如：棋子类型（将、相、士、炮等）、棋子颜色（红方、黑方）、棋子在棋局中的位置。利用这些数据，我们就能显示一个完整的棋盘给玩家。具体的代码如下所示：</p>
+<pre><code class="lang-JAVA">//棋子
+public class ChessPiece {
+  private int id;
+  private String text;
+  private Color color;
+  private int positionX;
+  private int positionY;
+
+  public ChessPiece(int id, String text, Color color, int positionX, int positionY) {
+    this.id = id;
+    this.text = text;
+    this.color = color;
+    this.positionX = positionX;
+    this.positionY = positionX;
+  }
+
+  public static enum Color {
+    RED, BLACK
+  }
+
+  //...
+}
+</code></pre>
+<pre><code class="lang-java">//棋局，里面保存了象棋中 30 个棋子的信息
+public class ChessBoard {
+  private Map&lt;Integer, ChessPiece&gt; chessPieces = new HashMap&lt;&gt;();
+
+  public ChessBoard() {
+    init();
+  }
+
+  private void init() {
+    chessPieces.put(1, new ChessPiece(1, "車", ChessPiece.Color.BLACK, 0, 0));
+    chessPieces.put(2, new ChessPiece(2,"馬", ChessPiece.Color.BLACK, 0, 1));
+    //...
+  }
+
+  public void move(int chessPieceId, int toPositionX, int toPositionY) {
+    //...
+  }
+}
+</code></pre>
+<p>为了记录每个房间当前的棋局情况，我们需要给每个房间都创建一个 ChessBoard 棋局对象。因为游戏大厅中有成千上万的房间（实际上，百万人同时在线的游戏大厅也有很多），那保存这么多棋局对象就会消耗大量的内存。有没有什么办法来节省内存呢？</p>
+<p>这个时候，享元模式就可以派上用场了。像刚刚的实现方式，在内存中会有大量的相似对象，这些对象的 id、text、color 都是相同的，唯独 positionX、positionY 不同。实际上，我们可以将棋子的 id、text、color 属性拆分出来，设计成独立的类，并且作为享元供多个棋盘复用。这样，棋盘只需要记录每个棋子的位置信息就可以了：</p>
+<pre><code class="lang-JAVA">// 享元类
+public class ChessPieceUnit {
+  private int id;
+  private String text;
+  private Color color;
+
+  public ChessPieceUnit(int id, String text, Color color) {
+    this.id = id;
+    this.text = text;
+    this.color = color;
+  }
+
+  public static enum Color {
+    RED, BLACK
+  }
+}
+
+public class ChessPieceUnitFactory {
+  private static final Map&lt;Integer, ChessPieceUnit&gt; pieces = new HashMap&lt;&gt;();
+
+  static {
+    pieces.put(1, new ChessPieceUnit(1, "車", ChessPieceUnit.Color.BLACK));
+    pieces.put(2, new ChessPieceUnit(2,"馬", ChessPieceUnit.Color.BLACK));
+    //...省略摆放其他棋子的代码...
+  }
+
+  public static ChessPieceUnit getChessPiece(int chessPieceId) {
+    return pieces.get(chessPieceId);
+  }
+}
+
+public class ChessPiece {
+  private ChessPieceUnit chessPieceUnit;
+  private int positionX;
+  private int positionY;
+
+  public ChessPiece(ChessPieceUnit unit, int positionX, int positionY) {
+    this.chessPieceUnit = unit;
+    this.positionX = positionX;
+    this.positionY = positionY;
+  }
+}
+
+public class ChessBoard {
+  private Map&lt;Integer, ChessPiece&gt; chessPieces = new HashMap&lt;&gt;();
+
+  public ChessBoard() {
+    init();
+  }
+
+  private void init() {
+    chessPieces.put(1, new ChessPiece(
+            ChessPieceUnitFactory.getChessPiece(1), 0,0));
+    chessPieces.put(1, new ChessPiece(
+            ChessPieceUnitFactory.getChessPiece(2), 1,0));
+    //...省略摆放其他棋子的代码...
+  }
+
+  public void move(int chessPieceId, int toPositionX, int toPositionY) {
+    //...
+  }
+}
+</code></pre>
+<p>在上面的代码实现中，我们利用工厂类来缓存 ChessPieceUnit 信息（也就是 id、text、color）。通过工厂类获取到的 ChessPieceUnit 就是享元。所有的 ChessBoard 对象共享这 30 个 ChessPieceUnit 对象（因为象棋中只有 30 个棋子）。在使用享元模式之前，记录 1 万个棋局，我们要创建 30 万（30*1 万）个棋子的 ChessPieceUnit 对象。利用享元模式，我们只需要创建 30 个享元对象供所有棋局共享使用即可，大大节省了内存。</p>
+<h3 id="1-2-">1.2 示例二：文本编辑器</h3>
+<p>假设我们有一个文本编辑器，简化起见，假设这个文本编辑器只实现了文字编辑功能，不包含图片、表格等复杂的编辑功能。我们要在内存中表示一个文本文件，记录文字和格式两部分信息，格式包括文字的字体、大小、颜色等信息。</p>
+<p>理论上，我们可以给文本文件中的每个文字都设置不同的格式。为了实现如此灵活的格式设置，并且代码实现又不过于太复杂，我们把每个文字都当作一个独立的对象来看待，并且在其中包含它的格式信息。</p>
+<pre><code class="lang-JAVA">//文字
+public class Character {
+  private char c;
+
+  private Font font;
+  private int size;
+  private int colorRGB;
+
+  public Character(char c, Font font, int size, int colorRGB) {
+    this.c = c;
+    this.font = font;
+    this.size = size;
+    this.colorRGB = colorRGB;
+  }
+}
+</code></pre>
+<p>在文本编辑器中，我们每敲一个文字，都会调用 Editor 类中的 appendCharacter() 方法，创建一个新的 Character 对象，保存到 chars 数组中：</p>
+<pre><code class="lang-JAVA">public class Editor {
+  private List&lt;Character&gt; chars = new ArrayList&lt;&gt;();
+
+  public void appendCharacter(char c, Font font, int size, int colorRGB) {
+    Character character = new Character(c, font, size, colorRGB);
+    chars.add(character);
+  }
+}
+</code></pre>
+<p>如果一个文本文件中，有上万、十几万、几十万的文字，那我们就要在内存中存储这么多 Character 对象。那有没有办法可以节省一点内存呢？</p>
+<p>实际上，在一个文本文件中，用到的字体格式不会太多，毕竟不大可能有人把每个文字都设置成不同的格式。所以，对于字体格式，我们可以将它设计成享元，让不同的文字共享使用。按照这个设计思路，我们对上面的代码进行重构。重构后的代码如下所示：</p>
+<pre><code class="lang-JAVA">public class CharacterStyle {
+  private Font font;
+  private int size;
+  private int colorRGB;
+
+  public CharacterStyle(Font font, int size, int colorRGB) {
+    this.font = font;
+    this.size = size;
+    this.colorRGB = colorRGB;
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    CharacterStyle otherStyle = (CharacterStyle) o;
+    return font.equals(otherStyle.font)
+            &amp;&amp; size == otherStyle.size
+            &amp;&amp; colorRGB == otherStyle.colorRGB;
+  }
+}
+
+public class CharacterStyleFactory {
+  private static final List&lt;CharacterStyle&gt; styles = new ArrayList&lt;&gt;();
+
+  public static CharacterStyle getStyle(Font font, int size, int colorRGB) {
+    CharacterStyle newStyle = new CharacterStyle(font, size, colorRGB);
+    for (CharacterStyle style : styles) {
+      if (style.equals(newStyle)) {
+        return style;
+      }
+    }
+    styles.add(newStyle);
+    return newStyle;
+  }
+}
+
+public class Character {
+  private char c;
+  private CharacterStyle style;
+
+  public Character(char c, CharacterStyle style) {
+    this.c = c;
+    this.style = style;
+  }
+}
+
+public class Editor {
+  private List&lt;Character&gt; chars = new ArrayList&lt;&gt;();
+
+  public void appendCharacter(char c, Font font, int size, int colorRGB) {
+    Character character = new Character(c, CharacterStyleFactory.getStyle(font, size, colorRGB));
+    chars.add(character);
+  }
+}
+</code></pre>
+<h2 id="-">二、应用场景</h2>
+<p>通过上面的这两个例子，可以看出，在享元模式的实现中，我们通过工厂类来“缓存”已经创建好的对象。这里的“缓存”实际上是“存储”的意思，跟我们平时所说的“数据库缓存”“CPU 缓存”“MemCache 缓存”是两回事。我们平时所讲的缓存，主要是为了提高访问效率，而非复用。<strong>应用享元模式是为了对象复用，节省内存。</strong></p>
+<p>享元模式在 Java Integer、String 中有所应用。</p>
+<h3 id="2-1-java-integer">2.1 Java Integer</h3>
+<p>我们先来看下面这样一段代码，可以先思考下，这段代码会输出什么样的结果？</p>
+<pre><code class="lang-JAVA">Integer i1 = 56;
+Integer i2 = 56;
+Integer i3 = 129;
+Integer i4 = 129;
+System.out.println(i1 == i2);        // 正确答案：true
+System.out.println(i3 == i4);        // 正确答案：false
+</code></pre>
+<p>Java 为基本数据类型提供了对应的包装器类型，当我们像下面这样赋值时，会自动进行拆装箱：</p>
+<pre><code class="lang-JAVA">Integer i = 56; //自动装箱，底层执行了 Integer i = Integer.valueOf(59);
+int j = i; //自动拆箱，底层执行了 int j = i.intValue();
+</code></pre>
+<p>当我们通过“==”来判定两个对象是否相等的时候，实际上是在判断两个局部变量存储的地址是否相同，换句话说，是在判断两个局部变量是否指向相同的对象。</p>
+<p>我们最初的代码，前 4 行赋值语句都会触发自动装箱操作，也就是会创建 Integer 对象并且赋值给 i1、i2、i3、i4 这四个变量。根据刚刚的讲解，i1、i2 尽管存储的数值相同，但是指向不同的内存对象，所以通过<code>==</code>来判定是否相同的时候，应该会返回 false。同理，<code>i3==i4</code>判定语句也会返回 false。</p>
+<p>但是 <strong>Integer 用到了享元模式来复用对象</strong>，当我们通过自动装箱，也就是调用 valueOf() 来创建 Integer 对象的时候，如果要创建的 Integer 对象的值在 -128 到 127 之间，会从 IntegerCache 类中直接返回，否则才调用 new 方法创建：</p>
+<pre><code class="lang-JAVA">public static Integer valueOf(int i) {
+    if (i &gt;= IntegerCache.low &amp;&amp; i &lt;= IntegerCache.high)
+        return IntegerCache.cache[i + (-IntegerCache.low)];
+    return new Integer(i);
+}
+</code></pre>
+<blockquote>
+<p>这里的 IntegerCache ，相当于我们上一节两个示例中用于生成享元对象的工厂类。</p>
+</blockquote>
+<p>所以，真相大白了，因为 56 处于 -128 和 127 之间，i1 和 i2 会指向相同的享元对象，所以 <code>i1==i2</code> 返回 true；而 129 大于 127，并不会被缓存，每次都会创建一个全新的对象，也就是说，i3 和 i4 指向不同的 Integer 对象，所以<code>i3==i4</code> 返回 false。</p>
+<p>实际上，除了 Integer 类型之外，其他包装器类型，比如 Long、Short、Byte 等，也都利用了享元模式来缓存 -128 到 127 之间的数据。</p>
+<h3 id="2-2-java-string">2.2 Java String</h3>
+<p>我们再来看下，享元模式在 Java String 类中的应用。同样，还是先来看一段代码，这段代码会输出什么样的结果？</p>
+<pre><code class="lang-JAVA">String s1 = "dog";
+String s2 = "dog";
+String s3 = new String("dog");
+
+System.out.println(s1 == s2);    // 正确答案：true
+System.out.println(s1 == s3);    // 正确答案：false
+</code></pre>
+<p>跟 Integer 类的设计思路相似，String 类利用享元模式来复用相同的字符串常量。JVM 会专门开辟一块存储区来存储字符串常量，这块存储区叫作“字符串常量池”。上面代码对应的内存存储结构如下所示：</p>
+<center><br/> <img src="./img/20200419220944133.png" style="zoom:37%"><br/></img></center>
+<p>不过，String 类的享元模式的设计，跟 Integer 类稍微有些不同。Integer 类中要共享的对象，是在类加载的时候，就集中一次性创建好的。但是，对于字符串来说，我们没法事先知道要共享哪些字符串常量，所以没办法事先创建好，只能在某个字符串常量第一次被用到的时候，存储到常量池中，当之后再用到的时候，直接引用常量池中已经存在的即可，就不需要再重新创建了。</p>
+<h2 id="-">三、总结</h2>
+<p>享元模式的代码实现非常简单，主要是<strong>通过工厂模式，在工厂类中，通过一个 Map 或者 List 来缓存已经创建好的享元对象，以达到复用的目的</strong>。我们就可以利用享元模式，将对象设计成享元，在内存中只保留一份实例，供多处代码引用，这样可以减少内存中对象的数量，以起到节省内存的目的。</p>
+<p>但是，我们必须清楚享元模式对 JVM 的垃圾回收并不友好。因为享元工厂类一直保存了对享元对象的引用，这就导致享元对象在没有任何代码使用的情况下，也并不会被 JVM 垃圾回收机制自动回收掉（当前我们也可以使用weak reference持有享元对象，这样在JVM内存不足时，对象就会被回收）。</p>
+<p>如果对象的生命周期很短，也不会被密集使用，利用享元模式反倒可能会浪费更多的内存。所以，除非经过线上验证，利用享元模式真的可以大大节省内存，否则，就不要过度使用这个模式，为了一点点内存的节省而引入一个复杂的设计模式，得不偿失。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看设计模式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/51">设计模式</a></div>
+</div></body>
+        </html>
+        

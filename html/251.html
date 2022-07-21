@@ -1,0 +1,679 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Spring Cloud系列（十三）——服务注册发现：全量拉取注册表及多级缓存</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Spring Cloud系列（十三）——服务注册发现：全量拉取注册表及多级缓存</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>Eureka-Client完成自身的注册之后，接着我们就要来看Eureka-Client拉取注册表的逻辑了。Eureka-Client拉取注册表分为两种模式：<strong>全量拉取</strong>和<strong>增量拉取</strong>。</p>
+<p>默认配置下，Eureka-Client 启动时，首先执行一次<strong>全量拉取</strong>注册表信息，然后在<strong>本地缓存</strong>，之后每 30 秒<strong>增量拉取</strong>，并跟本地缓存进行合并。</p>
+<p>本章，我将讲解<strong>全量拉取</strong>注册表的逻辑，整体流程我用下面这张时序图表示。本章，读者应当重点掌握Eureka-Server端的<strong>注册表多级缓存机制</strong>。</p>
+<p><img alt="" src="./img/20210121222847923.png"/></p>
+<h2 id="-eureka-client-">一、Eureka-Client拉取流程</h2>
+<h3 id="1-1-discoveryclient-">1.1 DiscoveryClient初始化</h3>
+<p>DiscoveryClient在初始化时，会自动执行注册表的<strong>全量拉取</strong>：</p>
+<pre><code class="lang-JAVA">/**
+* DiscoveryClient.java
+*/
+
+// 注册表本地缓存
+private final AtomicReference&lt;Applications&gt; localRegionApps = new AtomicReference&lt;Applications&gt;();
+
+DiscoveryClient(ApplicationInfoManager applicationInfoManager, EurekaClientConfig config, AbstractDiscoveryClientOptionalArgs args, Provider&lt;BackupRegistry&gt; backupRegistryProvider) {                    //... 
+
+    // 初始化注册表在本地的缓存
+    localRegionApps.set(new Applications());
+
+    //...   
+
+    // 从 Eureka-Server 拉取注册表
+    if (clientConfig.shouldFetchRegistry() &amp;&amp; !fetchRegistry(false)) {
+        fetchRegistryFromBackup();
+    }
+
+     //...     
+}
+</code></pre>
+<p>可以看到，保存在Eureka-Client本地的其实是一个Applications对象。</p>
+<h3 id="1-2-applications">1.2 Applications</h3>
+<p>Applications是什么东西？其实就是<strong>注册的应用集合</strong>，它就是注册表在Eureka-Client侧的保存形式：</p>
+<p><img alt="" src="./img/20210121222911010.png"/></p>
+<pre><code class="lang-JAVA">public class Applications {
+    //...
+
+    // 应用集合信息 hashcode，该变量用于校验增量获取的注册信息和 Eureka-Server 全量的注册信息是否一致
+    private String appsHashCode;
+
+    // 应用信息队列
+    private final AbstractQueue&lt;Application&gt; applications;
+
+    // 应用映射，key为应用名称
+    private final Map&lt;String, Application&gt; appNameApplicationMap;
+
+    public Applications() {
+        this(null, -1L, Collections.emptyList());
+    }
+
+    public void addApplication(Application app) {
+        appNameApplicationMap.put(app.getName().toUpperCase(Locale.ROOT), app);
+        addInstancesToVIPMaps(app, this.virtualHostNameAppMap, this.secureVirtualHostNameAppMap);
+        applications.add(app);
+    }
+
+    public List&lt;Application&gt; getRegisteredApplications() {
+        return new ArrayList&lt;Application&gt;(this.applications);
+    }
+
+    public Application getRegisteredApplications(String appName) {
+        return appNameApplicationMap.get(appName.toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * Gets the list of &lt;em&gt;instances&lt;/em&gt; associated to a virtual host name.
+     */
+    public List&lt;InstanceInfo&gt; getInstancesByVirtualHostName(String virtualHostName) {
+        return Optional.ofNullable(this.virtualHostNameAppMap.get(virtualHostName.toUpperCase(Locale.ROOT)))
+            .map(VipIndexSupport::getVipList)
+            .map(AtomicReference::get)
+            .orElseGet(Collections::emptyList); 
+    }
+
+    public String getReconcileHashCode() {
+        TreeMap&lt;String, AtomicInteger&gt; instanceCountMap = new TreeMap&lt;String, AtomicInteger&gt;();
+        populateInstanceCountMap(instanceCountMap);
+        return getReconcileHashCode(instanceCountMap);
+    }
+
+    /**
+     * Populates the provided instance count map.  The instance count map is used as part of the general
+     * app list synchronization mechanism.
+     */
+    public void populateInstanceCountMap(TreeMap&lt;String, AtomicInteger&gt; instanceCountMap) {
+        for (Application app : this.getRegisteredApplications()) {
+            for (InstanceInfo info : app.getInstancesAsIsFromEureka()) {
+                AtomicInteger instanceCount = instanceCountMap.get(info.getStatus().name());
+                if (instanceCount == null) {
+                    instanceCount = new AtomicInteger(0);
+                    instanceCountMap.put(info.getStatus().name(), instanceCount);
+                }
+                instanceCount.incrementAndGet();
+            }
+        }
+    }
+
+    public static String getReconcileHashCode(TreeMap&lt;String, AtomicInteger&gt; instanceCountMap) {
+        String reconcileHashCode = "";
+        for (Map.Entry&lt;String, AtomicInteger&gt; mapEntry : instanceCountMap.entrySet()) {
+            reconcileHashCode = reconcileHashCode + mapEntry.getKey()
+                + STATUS_DELIMITER + mapEntry.getValue().get()
+                + STATUS_DELIMITER;
+        }
+        return reconcileHashCode;
+    }
+    //...
+}
+</code></pre>
+<h3 id="1-3-fetchregistry">1.3 fetchRegistry</h3>
+<p>接着， 调用 <code>DiscoveryClient#fetchRegistry(false)</code> 方法，从 Eureka-Server 获取注册信息，因为<code>applications.getRegisteredApplications().size() == 0</code>，所以这里肯定是走<strong>全量拉取</strong>，实现代码如下：</p>
+<pre><code class="lang-JAVA">/**
+* DiscoveryClient.java
+*/
+
+private boolean fetchRegistry(boolean forceFullRegistryFetch) {
+    Stopwatch tracer = FETCH_REGISTRY_TIMER.start();
+
+    try {
+        // 1.获取本地缓存的注册表
+        Applications applications = getApplications();
+
+        if (clientConfig.shouldDisableDelta()    // 禁用增量拉取注册表
+            || (!Strings.isNullOrEmpty(clientConfig.getRegistryRefreshSingleVipAddress()))
+            || forceFullRegistryFetch
+            || (applications == null)
+            || (applications.getRegisteredApplications().size() == 0)
+            || (applications.getVersion() == -1)) 
+        {
+            logger.info("Disable delta property : {}", clientConfig.shouldDisableDelta());
+            logger.info("Single vip registry refresh property : {}", clientConfig.getRegistryRefreshSingleVipAddress());
+            logger.info("Force full registry fetch : {}", forceFullRegistryFetch);
+            logger.info("Application is null : {}", (applications == null));
+            logger.info("Registered Applications size is zero : {}",
+                        (applications.getRegisteredApplications().size() == 0));
+            logger.info("Application version is -1: {}", (applications.getVersion() == -1));
+
+            // 2.执行全量拉取并缓存
+            getAndStoreFullRegistry();
+        } else {
+            // 3.执行增量拉取
+            getAndUpdateDelta(applications);
+        }
+
+        // 4.设置应用集合hashcode
+        applications.setAppsHashCode(applications.getReconcileHashCode());
+        // 打印本地缓存的注册应用实例数量
+        logTotalInstances();
+    } catch (Throwable e) {
+        logger.error(PREFIX + appPathIdentifier + " - was unable to refresh its cache! status = " + e.getMessage(), e);
+        return false;
+    } finally {
+        if (tracer != null) {
+            tracer.stop();
+        }
+    }
+
+    // ...
+
+    // 5.以拉取到的注册表为准，更新本地缓存中当前应用实例的状态（只更新缓存）
+    updateInstanceRemoteStatus();
+
+    return true;
+}
+</code></pre>
+<p>上述<code>updateInstanceRemoteStatus</code>方法，其实就是设置<code>lastRemoteInstanceStatus</code>这个属性值：</p>
+<pre><code class="lang-JAVA">private volatile InstanceInfo.InstanceStatus lastRemoteInstanceStatus = InstanceInfo.InstanceStatus.UNKNOWN;
+
+private synchronized void updateInstanceRemoteStatus() {
+    // currentRemoteInstanceStatus用来暂存Server端该实例的状态
+    InstanceInfo.InstanceStatus currentRemoteInstanceStatus = null;
+    if (instanceInfo.getAppName() != null) {
+        Application app = getApplication(instanceInfo.getAppName());
+        if (app != null) {
+            InstanceInfo remoteInstanceInfo = app.getByInstanceId(instanceInfo.getId());
+            if (remoteInstanceInfo != null) {
+                currentRemoteInstanceStatus = remoteInstanceInfo.getStatus();
+            }
+        }
+    }
+    if (currentRemoteInstanceStatus == null) {
+        currentRemoteInstanceStatus = InstanceInfo.InstanceStatus.UNKNOWN;
+    }
+
+    // 如果状态发生了变化
+    if (lastRemoteInstanceStatus != currentRemoteInstanceStatus) {
+        // 触发 StatusChangeEvent 事件, 目前 Eureka 未提供默认的该事件监听器
+        onRemoteStatusChanged(lastRemoteInstanceStatus, currentRemoteInstanceStatus);
+        // 更新lastRemoteInstanceStatus
+        lastRemoteInstanceStatus = currentRemoteInstanceStatus;
+    }
+}
+</code></pre>
+<h3 id="1-4-getandstorefullregistry">1.4 getAndStoreFullRegistry</h3>
+<p>最后，我们来看下真正的全量拉取注册表的逻辑——<code>DiscoveryClient#getAndStoreFullRegistry(false)</code> ：</p>
+<pre><code class="lang-JAVA">private void getAndStoreFullRegistry() throws Throwable {
+    // 拉取次数
+    long currentUpdateGeneration = fetchRegistryGeneration.get();
+
+    logger.info("Getting all instance registry info from the eureka server");
+
+    // 1.利用网络通信组件EurekaTransport拉取注册表
+    Applications apps = null;
+    EurekaHttpResponse&lt;Applications&gt; httpResponse = clientConfig.getRegistryRefreshSingleVipAddress() == null
+        ? eurekaTransport.queryClient.getApplications(remoteRegionsRef.get())
+        : eurekaTransport.queryClient.getVip(clientConfig.getRegistryRefreshSingleVipAddress(), remoteRegionsRef.get());
+    if (httpResponse.getStatusCode() == Status.OK.getStatusCode()) {
+        apps = httpResponse.getEntity();
+    }
+    logger.info("The response status is {}", httpResponse.getStatusCode());
+
+    if (apps == null) {
+        logger.error("The application is null for some reason. Not storing this information");
+    } else if (fetchRegistryGeneration.compareAndSet(currentUpdateGeneration, currentUpdateGeneration + 1)) {
+        // 2.更新本地缓存，filterAndShuffle用来打乱顺序
+        localRegionApps.set(this.filterAndShuffle(apps));
+        logger.debug("Got full registry with apps hashcode {}", apps.getAppsHashCode());
+    } else {
+        logger.warn("Not updating applications as another thread is updating it already");
+    }
+}
+</code></pre>
+<p>上述操作在底层利用jersey client，发送HTTP/GET请求（比如<a href="http://localhost:8080/v2/apps），调用eureka">http://localhost:8080/v2/apps），调用eureka</a> server的getApplications restful接口，获取全量注册表，缓存在自己的本地。</p>
+<pre><code class="lang-JAVA">/**
+* AbstractJerseyEurekaHttpClient.java
+*/
+
+public EurekaHttpResponse&lt;Applications&gt; getApplications(String... regions) {
+    return getApplicationsInternal("apps/", regions);
+}
+
+private EurekaHttpResponse&lt;Applications&gt; getApplicationsInternal(String urlPath, String[] regions) {
+   ClientResponse response = null;
+   String regionsParamValue = null;
+   try {
+       WebResource webResource = jerseyClient.resource(serviceUrl).path(urlPath);
+       if (regions != null &amp;&amp; regions.length &gt; 0) {
+           regionsParamValue = StringUtil.join(regions);
+           webResource = webResource.queryParam("regions", regionsParamValue);
+       }
+       Builder requestBuilder = webResource.getRequestBuilder();
+       addExtraHeaders(requestBuilder);
+       response = requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE).get(ClientResponse.class); // JSON
+
+       // 这里的Applications就是注册表
+       Applications applications = null;
+       if (response.getStatus() == Status.OK.getStatusCode() &amp;&amp; response.hasEntity()) {
+           applications = response.getEntity(Applications.class);
+       }
+       return anEurekaHttpResponse(response.getStatus(), Applications.class)
+               .headers(headersOf(response))
+               .entity(applications)
+               .build();
+   } finally {
+       if (logger.isDebugEnabled()) {
+           logger.debug("Jersey HTTP GET {}/{}?{}; statusCode={}",
+                   serviceUrl, urlPath,
+                   regionsParamValue == null ? "" : "regions=" + regionsParamValue,
+                   response == null ? "N/A" : response.getStatus()
+           );
+       }
+       if (response != null) {
+           response.close();
+       }
+   }
+}
+</code></pre>
+<h2 id="-eureka-server-">二、Eureka-Server处理流程</h2>
+<p>接着，我们来看下Eureka-Server接受并处理全量拉取的流程。Eureka-Client发送的拉取注册表的HTTP/GET请求是类似这样的：<a href="http://localhost:8080/v2/apps/。">http://localhost:8080/v2/apps/。</a></p>
+<h3 id="2-1-">2.1 整体流程</h3>
+<p>在Eureka-Server端，由<code>ApplicationsResource#getContainers()</code>负责处理注册表拉取请求，可以看到注册表是从一个<code>ResponseCache</code>对象中获取的，所以整个Server端的处理流程核心就是ResponseCache：</p>
+<pre><code class="lang-JAVA">/**
+* ApplicationsResource.java
+*/
+
+private final ResponseCache responseCache;
+
+public Response getContainers(@PathParam("version") String version,
+                              @HeaderParam(HEADER_ACCEPT) String acceptHeader,
+                              @HeaderParam(HEADER_ACCEPT_ENCODING) String acceptEncoding,
+                              @HeaderParam(EurekaAccept.HTTP_X_EUREKA_ACCEPT) String eurekaAccept,
+                              @Context UriInfo uriInfo,
+                              @Nullable @QueryParam("regions") String regionsStr) {
+
+    // ...忽略Region相关
+
+    // Eureka-Server 启动完成，但是未处于就绪( Ready )状态，不接受全量拉取注册表的请求
+    if (!registry.shouldAllowAccess(isRemoteRegionRequested)) {
+        return Response.status(Status.FORBIDDEN).build();
+    }
+
+    // 1.设置响应报文格式
+    CurrentRequestVersion.set(Version.toEnum(version));
+    KeyType keyType = Key.KeyType.JSON;
+    String returnMediaType = MediaType.APPLICATION_JSON;
+    if (acceptHeader == null || !acceptHeader.contains(HEADER_JSON_VALUE)) {
+        keyType = Key.KeyType.XML;
+        returnMediaType = MediaType.APPLICATION_XML;
+    }
+
+    // 2.创建响应缓存(ResponseCache) 的键
+    Key cacheKey = new Key(Key.EntityType.Application,
+                           ResponseCacheImpl.ALL_APPS,
+                           keyType, CurrentRequestVersion.get(), EurekaAccept.fromString(eurekaAccept), regions
+                          );
+
+    // 2.从响应缓存(ResponseCache)读取全量注册信息
+    Response response;
+    if (acceptEncoding != null &amp;&amp; acceptEncoding.contains(HEADER_GZIP_VALUE)) {
+
+        // 关键是responseCache.getGZIP(cacheKey)
+        response = Response.ok(responseCache.getGZIP(cacheKey))
+            .header(HEADER_CONTENT_ENCODING, HEADER_GZIP_VALUE)
+            .header(HEADER_CONTENT_TYPE, returnMediaType)
+            .build();
+    } else {
+        response = Response.ok(responseCache.get(cacheKey))
+            .build();
+    }
+    return response;
+}
+</code></pre>
+<p>下面我们就来看看ResponseCache这个二级缓存的基本代码。</p>
+<h3 id="2-2-responsecache">2.2 ResponseCache</h3>
+<p> <code>com.netflix.eureka.registry.ResponseCache</code>，响应缓存<strong>接口</strong>，接口代码如下 ：</p>
+<pre><code class="lang-JAVA">public interface ResponseCache {
+    // 获取缓存
+    String get(Key key);
+
+    // 获取压缩后的缓存
+    byte[] getGZIP(Key key);
+
+    // 过期缓存
+    void invalidate(String appName, @Nullable String vipAddress, @Nullable String secureVipAddress);
+
+    AtomicLong getVersionDelta();
+
+    AtomicLong getVersionDeltaWithRegions();
+}
+</code></pre>
+<p>其中， <code>com.netflix.eureka.registry.Key</code>，缓存键的实现代码如下：</p>
+<pre><code class="lang-JAVA">public class Key {
+    public enum KeyType {
+        JSON, XML
+    }
+    public enum EntityType {
+        Application, VIP, SVIP
+    }
+    private final String entityName;
+    private final String[] regions;
+
+    // 请求参数类型
+    private final KeyType requestType;   
+    // 请求 API 版本号
+    private final Version requestVersion;
+    // hashKey
+    private final String hashKey;
+    // 实体类型
+    private final EntityType entityType;
+    private final EurekaAccept eurekaAccept;
+
+    //...
+}
+</code></pre>
+<h2 id="-">三、多级缓存读取机制</h2>
+<p>ResponseCache接口的实现类是<code>ResponseCacheImpl</code>，它的核心是一套<strong>多级缓存机制</strong>，ResponseCacheImpl将缓存拆分成两层 ：</p>
+<ul>
+<li><strong>只读缓存</strong>( <code>readOnlyCacheMap</code> )；</li>
+<li><strong>固定过期</strong> + <strong>固定大小</strong>的<strong>可读写缓存</strong>( <code>readWriteCacheMap</code> )。</li>
+</ul>
+<p>默认配置下，当Eureka-Client发送请求过来读取全量注册表时，<strong>缓存读取策略</strong>如下：</p>
+<p><img alt="" src="./img/20210121222924907.png"/></p>
+<h3 id="3-1-responsecacheimpl">3.1 ResponseCacheImpl</h3>
+<p>Eureka-Server响应Client的多级缓存，实际上内部是调用了<code>ResponseCacheImpl#get(...)</code> 。可以看到，只读缓存<code>readOnlyCacheMap</code>本质就是个ConcurrentHashMap，而可读写缓存是一个<code>LoadingCache</code>封装对象：</p>
+<pre><code class="lang-JAVA">/**
+* ResponseCacheImpl.java
+*/
+
+// 原始注册表
+private final AbstractInstanceRegistry registry;
+// 只读注册表
+private final ConcurrentMap&lt;Key, Value&gt; readOnlyCacheMap = new ConcurrentHashMap&lt;Key, Value&gt;();
+// 可读写注册表
+private final LoadingCache&lt;Key, Value&gt; readWriteCacheMap;
+
+public String get(final Key key) {
+    // 是否开启只读缓存：通过参数`eureka.shouldUseReadOnlyResponseCache`配置，默认为true
+    return get(key, shouldUseReadOnlyResponseCache);
+}
+
+String get(final Key key, boolean useReadOnlyCache) {
+    // Vaule就是实际缓存的值
+    Value payload = getValue(key, useReadOnlyCache);
+    if (payload == null || payload.getPayload().equals(EMPTY_PAYLOAD)) {
+        return null;
+    } else {
+        return payload.getPayload();
+    }
+}
+
+Value getValue(final Key key, boolean useReadOnlyCache) {
+    Value payload = null;
+    try {
+        // 1.若开启只读缓存，则优先从readOnlyCacheMap读
+        if (useReadOnlyCache) {
+            final Value currentPayload = readOnlyCacheMap.get(key);
+            if (currentPayload != null) {
+                payload = currentPayload;
+            } else {
+                // 读不到则从readWriteCacheMap读
+                payload = readWriteCacheMap.get(key);
+                // 重新更新readOnlyCacheMap
+                readOnlyCacheMap.put(key, payload);
+            }
+        } 
+        // 2.未开启只读缓存，直接从readWriteCacheMap读
+        else {
+            payload = readWriteCacheMap.get(key);
+        }
+    } catch (Throwable t) {
+        logger.error("Cannot get value for key :" + key, t);
+    }
+    return payload;
+}
+
+
+public class Value {
+    private final String payload;
+    private byte[] gzipped;
+
+    public Value(String payload) {
+        this.payload = payload;
+        if (!EMPTY_PAYLOAD.equals(payload)) {
+            // ...
+            try {
+                // ...省略GZIP压缩代码
+                gzipped = bos.toByteArray();
+            } catch (IOException e) {
+                gzipped = null;
+            } finally {
+                if (tracer != null) {
+                    tracer.stop();
+                }
+            }
+        } else {
+            gzipped = null;
+        }
+    }
+
+    //...省略get方法
+}
+</code></pre>
+<blockquote>
+<p><code>ResponseCacheImpl#getGzip(...)</code> 方法类似，只是对结果进行了压缩，这里就不赘述了。</p>
+</blockquote>
+<h3 id="3-2-loadingcache">3.2 可读写缓存LoadingCache</h3>
+<p>我们关键来看下readWriteCacheMap可读写缓存，也就是<code>LoadingCache</code>，它是随着ResponseCacheImpl一起构造的：</p>
+<pre><code class="lang-JAVA">/**
+* ResponseCacheImpl.java
+*/
+
+ResponseCacheImpl(EurekaServerConfig serverConfig, ServerCodecs serverCodecs, AbstractInstanceRegistry registry) {
+    //...
+
+    this.readWriteCacheMap =
+        CacheBuilder.newBuilder().initialCapacity(1000)    //最大容量1000
+        .expireAfterWrite(serverConfig.getResponseCacheAutoExpirationInSeconds(), TimeUnit.SECONDS)
+        .removalListener(new RemovalListener&lt;Key, Value&gt;() {
+            @Override
+            public void onRemoval(RemovalNotification&lt;Key, Value&gt; notification) {
+                Key removedKey = notification.getKey();
+                if (removedKey.hasRegions()) {
+                    Key cloneWithNoRegions = removedKey.cloneWithoutRegions();
+                    regionSpecificKeys.remove(cloneWithNoRegions, removedKey);
+                }
+            }
+        })
+        .build(new CacheLoader&lt;Key, Value&gt;() {
+            @Override
+            public Value load(Key key) throws Exception {
+                if (key.hasRegions()) {
+                    Key cloneWithNoRegions = key.cloneWithoutRegions();
+                    regionSpecificKeys.put(cloneWithNoRegions, key);
+                }
+                // 这里根据Key生成Value
+                Value value = generatePayload(key);
+                return value;
+            }
+        });
+    //...
+}
+</code></pre>
+<p>可以看到，readWriteCacheMap是基于<em>Google Guava</em>的<code>CacheBuilder</code>构建的，它的最大容量是1000。它保存的Value是通过方法<code>generatePayload</code>生成的，最终就是通过从registry这个原始注册表（PeerAwareInstanceRegistryImpl）中获取Applications，然后编码转化放到Value里：</p>
+<pre><code class="lang-JAVA">/**
+* ResponseCacheImpl.java
+*/
+
+private Value generatePayload(Key key) {
+    //...
+    try {
+        String payload;
+        switch (key.getEntityType()) {
+            case Application:
+                boolean isRemoteRegionRequested = key.hasRegions();
+
+                if (ALL_APPS.equals(key.getName())) {    //全量拉取
+                    //...
+                    //registry.getApplications()获取的就是全量的注册应用信息
+                    payload = getPayLoad(key, registry.getApplications());
+                } else if (ALL_APPS_DELTA.equals(key.getName())) {    //增量拉取
+                    //...
+                    payload = getPayLoad(key, registry.getApplicationDeltas());
+                } else {
+                    //..
+                    payload = getPayLoad(key, registry.getApplication(key.getName()));
+                }
+                break;
+            //...
+        }
+        return new Value(payload);
+    } finally {
+        //...
+    }
+}
+
+// 将Applications转换成缓存值
+private String getPayLoad(Key key, Applications apps) {
+    EncoderWrapper encoderWrapper = serverCodecs.getEncoder(key.getType(), key.getEurekaAccept());
+    String result;
+    try {
+        // 将Applications对象编码
+        result = encoderWrapper.encode(apps);
+    } catch (Exception e) {
+        logger.error("Failed to encode the payload for all apps", e);
+        return "";
+    }
+    //...
+    return result;
+}
+</code></pre>
+<h2 id="-">四、多级缓存过期机制</h2>
+<p>Eureka-Server的ResponseCache存在<strong>过期机制</strong>，具体的过期策略一共有三种：<strong>主动过期</strong>、<strong>定时过期</strong>、<strong>被动过期</strong>：</p>
+<p><img alt="" src="./img/20210121222939384.png"/></p>
+<h3 id="4-1-">4.1 主动过期</h3>
+<p>当Eureka-Server端发生实例<em>注册（Register）</em>、<em>下线（Cancel）</em>、<em>剔除（Eviction）</em>时，会立即主动过期 <code>readWriteCacheMap</code>（默认延迟30s后再重新刷入） 。</p>
+<blockquote>
+<p>举个例子，现在有一个应用A（ServiceA），部署了一个新的应用实例（Instance010）。接着发起服务注册，注册成功后，Eureka-Server就必须刷新<code>readWriteCacheMap</code>这个缓存。它具体会调用<code>ResponseCache.invalidate()</code>，将之前缓存好的<code>ALL_APPS</code>这个Key对应的缓存过期掉。</p>
+</blockquote>
+<p> 我们之前讲解服务注册的Eureka-Server端处理流程时，注册完成后，<code>AbstractInstanceRegistry.invalidateCache</code>会执行，内部其实是调用了ResponseCache的<code>invalidate</code>方法：</p>
+<pre><code class="lang-JAVA">private void invalidateCache(String appName, @Nullable String vipAddress, @Nullable String secureVipAddress) {
+    // invalidate cache
+    responseCache.invalidate(appName, vipAddress, secureVipAddress);
+}
+</code></pre>
+<pre><code class="lang-JAVA">/**
+* ResponseCacheImpl.java
+*/
+
+public void invalidate(String appName, @Nullable String vipAddress, @Nullable String secureVipAddress) {
+    // 遍历所有类型的缓存键，逐个过期
+    for (Key.KeyType type : Key.KeyType.values()) {
+        for (Version v : Version.values()) {
+            invalidate(
+                new Key(Key.EntityType.Application, appName, type, v, EurekaAccept.full),
+                new Key(Key.EntityType.Application, appName, type, v, EurekaAccept.compact),
+                new Key(Key.EntityType.Application, ALL_APPS, type, v, EurekaAccept.full),
+                new Key(Key.EntityType.Application, ALL_APPS, type, v, EurekaAccept.compact),
+                new Key(Key.EntityType.Application, ALL_APPS_DELTA, type, v, EurekaAccept.full),
+                new Key(Key.EntityType.Application, ALL_APPS_DELTA, type, v, EurekaAccept.compact)
+            );
+            if (null != vipAddress) {
+                invalidate(new Key(Key.EntityType.VIP, vipAddress, type, v, EurekaAccept.full));
+            }
+            if (null != secureVipAddress) {
+                invalidate(new Key(Key.EntityType.SVIP, secureVipAddress, type, v, EurekaAccept.full));
+            }
+        }
+    }
+}
+
+public void invalidate(Key... keys) {
+    for (Key key : keys) {
+        logger.debug("Invalidating the response cache key : {} {} {} {}, {}",
+                     key.getEntityType(), key.getName(), key.getVersion(), key.getType(), key.getEurekaAccept());
+
+        // 最终调用了readWriteCacheMap（LoadingCache）的invalidate方法，底层基于Guava过期Key
+        readWriteCacheMap.invalidate(key);
+        //...
+    }
+}
+</code></pre>
+<h3 id="4-2-">4.2 定时过期</h3>
+<p><code>readWriteCacheMap</code>在构建的时候，指定了一个自动过期的时间（默认值180秒），所以你往readWriteCacheMap中放入一个数据，180秒后就会自动过期掉：</p>
+<pre><code class="lang-JAVA">this.readWriteCacheMap =
+    CacheBuilder.newBuilder().initialCapacity(1000)
+            // 配置eureka.responseCacheAutoExpirationInSeconds，设置写入过期时长。默认值：180 秒
+            .expireAfterWrite(serverConfig.getResponseCacheAutoExpirationInSeconds(), TimeUnit.SECONDS)
+            .removalListener(new RemovalListener&lt;Key, Value&gt;() {
+                @Override
+                public void onRemoval(RemovalNotification&lt;Key, Value&gt; notification) {
+                    Key removedKey = notification.getKey();
+                    if (removedKey.hasRegions()) {
+                        Key cloneWithNoRegions = removedKey.cloneWithoutRegions();
+                        regionSpecificKeys.remove(cloneWithNoRegions, removedKey);
+                    }
+                }
+            })
+            .build(new CacheLoader&lt;Key, Value&gt;() {
+                @Override
+                public Value load(Key key) throws Exception {
+                    if (key.hasRegions()) {
+                        Key cloneWithNoRegions = key.cloneWithoutRegions();
+                        regionSpecificKeys.put(cloneWithNoRegions, key);
+                    }
+                    Value value = generatePayload(key);
+                    return value;
+                }
+            });
+</code></pre>
+<h3 id="4-3-">4.3 被动过期</h3>
+<p>ResponseCacheImpl内部有个定时任务，默认每隔30秒对<code>readOnlyCacheMap</code>和<code>readWriteCacheMap</code>中的数据进行一次比对，如果数据不一致，那么就将readWriteCacheMap中的数据覆盖到readOnlyCacheMap中去。</p>
+<pre><code class="lang-JAVA">ResponseCacheImpl(EurekaServerConfig serverConfig, ServerCodecs serverCodecs, AbstractInstanceRegistry registry) {   
+    //...
+
+    //配置 eureka.responseCacheUpdateIntervalMs，设置任务执行频率，默认值：30秒
+    long responseCacheUpdateIntervalMs = serverConfig.getResponseCacheUpdateIntervalMs();
+
+    if (shouldUseReadOnlyResponseCache) {
+        // 开启一个定时调度任务
+        timer.schedule(getCacheUpdateTask(),
+                       new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
+                                + responseCacheUpdateIntervalMs),
+                       responseCacheUpdateIntervalMs);
+    }
+    //...
+}
+</code></pre>
+<pre><code class="lang-JAVA">// ResponseCacheImpl.java
+private TimerTask getCacheUpdateTask() {
+    return new TimerTask() {
+        @Override
+        public void run() {
+            // 循环readOnlyCacheMap的缓存键
+            for (Key key : readOnlyCacheMap.keySet()) {
+                //...
+                try {
+                    CurrentRequestVersion.set(key.getVersion());
+
+                    // 判断一、二级缓存至是否一致
+                    Value cacheValue = readWriteCacheMap.get(key);
+                    Value currentCacheValue = readOnlyCacheMap.get(key);
+                    if (cacheValue != currentCacheValue) {
+                        // 不一致则覆盖只读缓存
+                        readOnlyCacheMap.put(key, cacheValue);
+                    }
+                } catch (Throwable th) {
+                    logger.error("Error while updating the client cache from response cache", th);
+                }
+            }
+        }
+    };
+}
+</code></pre>
+<h2 id="-">五、总结</h2>
+<p>本章，我讲解了Eureka的全量拉取注册表流程，以及Eureka-Server端的注册表多级缓存机制，核心是缓存注册表的多级读取与三种过期策略，读者可以结合源码加深理解。</p>
+<p>下一章，我将讲解Eureka-Client增量拉取注册表流程，以及该过程中核心的一致性Hash比对原理。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Spring Cloud分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/25">Spring Cloud</a></div>
+</div></body>
+        </html>
+        

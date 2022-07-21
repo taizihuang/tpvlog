@@ -1,0 +1,81 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（十三）——分布式理论之分布式事务：TCC</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（十三）——分布式理论之分布式事务：TCC</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、简介</h2>
+<p>2007年，Pat Helland发表了一篇名为<a href="http://adrianmarriott.net/logosroot/papers/LifeBeyondTxns.pdf">《Life beyond Distributed Transactions: an Apostate’s Opinion》</a>的论文，提出了<strong>TCC（Try-Confirm-Cancel）</strong> 的概念。</p>
+<p><a href="https://www.tpvlog.com/article/67">两阶段提交（2PC）</a>和<a href="https://www.tpvlog.com/article/68">三阶段提交（3PC）</a>并不适用于并发量大的业务场景。TCC事务机制相比于2PC、3PC，不会锁定整个资源，而是通过引入<strong>补偿机制</strong>，将资源转换为业务逻辑形式，锁的粒度变小。</p>
+<p>TCC的核心思想是：<strong>针对每个操作，都要注册一个与其对应的确认和补偿（撤销）操作</strong>，分为三个阶段：</p>
+<ul>
+<li><p><strong>Try：</strong>这个阶段对各个服务的资源做检测以及对资源进行锁定或者预留；</p>
+</li>
+<li><p><strong>Confirm ：</strong>执行真正的业务操作，不作任何业务检查，只使用Try阶段预留的业务资源，Confirm操作要求具备幂等设计，Confirm失败后需要进行重试；</p>
+</li>
+<li><p><strong>Cancel：</strong>如果任何一个服务的业务方法执行出错，那么这里就需要进行补偿，即执行回滚操作，释放Try阶段预留的业务资源 ，Cancel操作要求具备幂等设计，Cancel失败后需要进行重试。</p>
+</li>
+</ul>
+<center><br/><img src="./img/20200208160256738.png" style="zoom: 70%;"><br/></img></center>
+<p>举个例子，电商系统中有两个服务：订单服务A、库存服务B：<br/>对外提供服务时，必须接受一些不确定性，即对服务A/B的一次调用仅是一个临时性操作，服务消费方保留了后续的取消权。<br/>如果消费方认为全局事务应该rollback，它会要求取消之前的临时性操作；如果消费方认为全局事务应该commit时，它会进行的一个确认操作。</p>
+<h2 id="-tcc-">二、TCC的执行</h2>
+<p>TCC将一次事务操作分为三个阶段：Try、Confirm、Cancel，我们通过一个订单/库存的示例来理解。假设我们的分布式系统一共包含4个服务：订单服务、库存服务、积分服务、仓储服务，每个服务有自己的数据库，如下图：</p>
+<center><br/><img src="./img/20200208160312277.png" style="zoom: 50%;"/><br/></center>
+<h3 id="2-1-try">2.1 Try</h3>
+<p>Try阶段一般用于锁定某个资源，设置一个预备状态或冻结部分数据。对于示例中的每一个服务，Try阶段所做的工作如下：</p>
+<ul>
+<li>订单服务：先置一个中间状态“UPDATING”，而不是直接设置“支付成功”状态；</li>
+<li>库存服务：先用一个冻结库存字段保存冻结库存数，而不是直接扣掉库存；</li>
+<li>积分服务：预增加会员积分；</li>
+<li>仓储服务：创建销售出库单，但状态是UNKONWN。</li>
+</ul>
+<center><br/><img src="./img/20200208160321294.png" style="zoom: 50%;"/><br/></center>
+<h3 id="2-2-confirm">2.2 Confirm</h3>
+<p>根据Try阶段的执行情况，Confirm分为两种情况：</p>
+<ol>
+<li>理想情况下，所有Try全部执行成功，则执行各个服务的Confirm逻辑；</li>
+<li>部分服务Try执行失败，则执行第三阶段——Cancel。</li>
+</ol>
+<p>Confirm阶段一般需要各个服务自己实现Confirm逻辑：</p>
+<ul>
+<li>订单服务：confirm逻辑可以是将订单的中间状态变更为PAYED-支付成功；</li>
+<li>库存服务：将冻结库存数清零，同时扣减掉真正的库存；</li>
+<li>积分服务：将预增加积分清零，同时增加真实会员积分；</li>
+<li>仓储服务：修改销售出库单的状态为已创建-CREATED。</li>
+</ul>
+<center><br/><img src="./img/20200208160329579.png" style="zoom: 50%;"/><br/></center>
+<blockquote>
+<p>Confirm阶段的各个服务本身可能出现问题，这时候一般就需要TCC框架了（比如ByteTCC，tcc-transaction，himly），TCC事务框架一般会记录一些分布式事务的活动日志，保存事务运行的各个阶段和状态，从而保证整个分布式事务的最终一致性。</p>
+</blockquote>
+<h3 id="2-3-cancel">2.3 Cancel</h3>
+<p>如果Try阶段执行异常，就会执行Cancel阶段。比如：对于订单服务，可以实现的一种Cancel逻辑就是：将订单的状态设置为“CANCELED”；对于库存服务，Cancel逻辑就是：将冻结库存扣减掉，加回到可销售库存里去。</p>
+<center><br/><img src="./img/20200208160338045.png" style="zoom: 50%;"/><br/></center>
+<blockquote>
+<p>许多公司为了简化TCC的使用，通常会将一个服务的某个核心接口拆成两个，比如库存服务的扣减库存接口，拆成两个子接口：①扣减接口 ②回滚扣减库存接口，由TCC框架来保证当某个接口执行失败后去执行对应的rollback接口。</p>
+</blockquote>
+<h2 id="-">三、总结</h2>
+<p>从正常的流程上讲，TCC仍然是一个两阶段提交协议。但是，在执行出现问题的时候，有一定的自我修复能力，如果任何一个事务参与者出现了问题，协调者可以通过执行逆操作来取消之前的操作，达到最终的一致状态（比如冲正交易、查询交易）。</p>
+<p>从TCC的执行流程也可以看出，服务提供方需要提供额外的<strong>补偿逻辑</strong>，那么原来一个服务接口，引入TCC后可能要改造成3种逻辑：</p>
+<ul>
+<li>Try：先是服务调用链路依次执行Try逻辑；</li>
+<li>Confirm：如果都正常的话，TCC分布式事务框架推进执行Confirm逻辑，完成整个事务；</li>
+<li>Cancel：如果某个服务的Try逻辑有问题，TCC分布式事务框架感知到之后就会推进执行各个服务的Cancel逻辑，撤销之前执行的各种操作。</li>
+</ul>
+<blockquote>
+<p>注意：在设计TCC事务时，接口的Cancel和Confirm操作都必须满足幂等设计。</p>
+</blockquote>
+<h3 id="3-1-">3.1 框架选型</h3>
+<p>TCC框架的可供选择余地比较少，目前相对比较成熟的是阿里开源的<a href="https://github.com/seata/seata">分布式事务框架seata</a>(Seata并不完全是一个TCC事务框架)，这个框架是经历过阿里生产环境的大量考验，同时也支持dubbo、spring cloud。</p>
+<h3 id="3-2-">3.2 优点</h3>
+<p>跟2PC比起来，实现以及流程相对简单了一些，但数据的一致性比2PC也要差一些，当然性能也可以得到提升。</p>
+<h3 id="3-3-">3.3 缺点</h3>
+<p>TCC模型对业务的侵入性太强，事务回滚实际上就是自己写业务代码来进行回滚和补偿，改造的难度大。一般来说支付、交易等核心业务场景，可能会用TCC来严格保证分布式事务的一致性，要么全部成功，要么全部自动回滚。这些业务场景都是整个公司的核心业务有，比如银行核心主机的账务系统，不容半点差池。</p>
+<p>但是，在一般的业务场景下，尽量别没事就用TCC作为分布式事务的解决方案，因为自己手写回滚/补偿逻辑，会造成业务代码臃肿且很难维护。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        

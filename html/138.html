@@ -1,0 +1,55 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式消息中间件（十二）——RocketMQ顺序消息</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式消息中间件（十二）——RocketMQ顺序消息</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>我在<a href="https://www.tpvlog.com/article/123">《分布式框架之高性能：消息有序性》</a>中，曾经介绍过RabbitMQ和Kafka实现消息有序性的基本思路。在RocketMQ中，提供了一种顺序消息类型。所谓顺序消息（FIFO 消息），是一种严格按照顺序来发布和消费的消息。顺序发布和顺序消费是指对于指定的一个Topic：<strong>生产者按照一定的先后顺序发布消息；消费者按照既定的先后顺序订阅消息，即先发布的消息一定会先被客户端接收到</strong>。</p>
+<h2 id="-">一、大数据传输问题</h2>
+<p>还记得第一章<a href="https://www.tpvlog.com/article/126#menu_4">系统背景</a>中的“大数据传输问题”吗？我们今天就以这个问题为引子，来讲讲MQ中的消息有序性。先来回顾下系统存在的问题：</p>
+<center><br/><img src="./img/20200218211437124.png" style="zoom:50%"><br/></img></center>
+<p>“大数据系统”需要从订单数据库里查询订单数据，由于数据库中每日的订单数据通常是比较多的，频繁让外部系统直接通过数据库查数会影响订单系统本身的性能。试想以下，在高峰场景下，订单数据库本身去支撑正常业务流量就很吃力了，此时CPU和内存都比较吃紧，这时再来个“大数据系统”从我这里大量查数，简直是添乱。</p>
+<p>所以，我们肯定不能让外部系统直接来访问订单系统的数据库。通常来说，对于这种数据采集操作，我们一般会把整个库的数据都直接copy一份给外部系统。</p>
+<h3 id="1-1-">1.1 解决方案</h3>
+<p>怎么拷贝？对于MySQL，业界目前最常用的做法是采用开源数据库中间件<strong><em>Canal</em></strong>，让Canal去监听订单数据库的binlog，然后把这些binglog发送到MQ中去，接着大数据系统自己从MQ里获取binlog，落地到自己的大数据存储中去，然后对自己的存储中的数据进行计算得到数据报表即可：</p>
+<center><br/><img src="./img/20200226225559752.png" style="zoom:55%"/><br/></center>
+<p>那么问题来了，binlog记录的是数据库的操作，比如rinset、update、delete，假设订单系统针对某笔订单的数据操作是下面这样的：</p>
+<ol>
+<li>先插入一条订单；</li>
+<li>再更新这条订单记录的状态。</li>
+</ol>
+<p>那么binlog也会按照上述顺序记录日志，但是大数据系统订阅binlog记录时，可能先获取到更新操作记录，再获取到插入操作，那么本地还原时就会出现问题。如下图：</p>
+<center><br/><img src="./img/20200226225608435.png" style="zoom:55%"/><br/></center>
+<p>出现这种问题的根本原因就是发布/订阅消息时的顺序不一致造成的。所以，要解决这个问题，就必须做到以下两点：</p>
+<ol>
+<li>针对同一个订单的所有SQL操作进入同一个ConsumeQueue，这样首先可以保证只会有一个Consumer实例去顺序消费这个ConsumeQueue中的数据；</li>
+<li>Canal将消息发送到RokectMQ时，也必须有序，也就是先发送insert、后发送update，RockectMQ要保证先发送的消息先入队ConsumeQueue。</li>
+</ol>
+<h3 id="1-2-">1.2 失败重试问题</h3>
+<p>做到以上两点是否就一定能保证消息有序呢？不一定，如何Consumer实例中途消费失败导致消息重发，仍然可能出现消息乱序问题。</p>
+<p>我们之前在<a href="https://www.tpvlog.com/article/137#menu_2">《RocketMQ重复消费》</a>一章讲过，在Consumer实例处理消息时，可能会因为自身处理逻辑执行失败，返回<code>RECONSUME_LATER</code>状态，这种情况下，Broker过一会儿会自动给消费者重新发送这个消息。但是此时消费者实例会立即消费下一条消息，也就是这个订单的update binlog操作，此时万一执行成功了，等后面那条insert消息到达执行时，又会出现消息乱序的问题。</p>
+<p>所以对于有序消息方案，当Consumer实例遇到消息处理失败的场景，就必须返回<code>SUSPEND_CURRENT_QUEUE_A_MOMENT</code>这个状态，意思是“先不要把其它消息发给我，要等待重试“。</p>
+<h2 id="-rocketmq-">二、RocketMQ中的顺序消息</h2>
+<p>在RocketMQ中，有两种类型的顺序消息：<strong><em>全局顺序消息</em></strong>、<strong><em>分区顺序消息</em></strong>。</p>
+<h3 id="2-1-">2.1 全局顺序消息</h3>
+<p>对于指定的一个 Topic，所有消息按照严格的先入先出（FIFO）的顺序来发布和消费。</p>
+<p><strong>适用场景</strong><br/>适用于性能要求不高，所有的消息严格按照 FIFO 原则来发布和消费的场景。</p>
+<p><strong>示例</strong><br/>在证券处理中，以人民币兑换美元为 Topic，在价格相同的情况下，先出价者优先处理，则可以按照 FIFO 的方式发布和消费全局顺序消息。</p>
+<h3 id="2-2-">2.2 分区顺序消息</h3>
+<p>对于指定的一个 Topic，所有消息根据<code>Sharding Key</code>进行区块分区。同一个分区内的消息按照严格的 FIFO 顺序进行发布和消费。Sharding Key 是顺序消息中用来区分不同分区的关键字段，和普通消息的 Key 是完全不同的概念。</p>
+<p><strong>适用场景</strong><br/>适用于性能要求高，以 Sharding Key 作为分区字段，在同一个区块中严格地按照 FIFO 原则进行消息发布和消费的场景。</p>
+<p><strong>示例</strong></p>
+<ul>
+<li>用户注册需要发送发验证码，以用户 ID 作为 Sharding Key，那么同一个用户发送的消息都会按照发布的先后顺序来消费。</li>
+<li>电商的订单创建，以订单 ID 作为 Sharding Key，那么同一个订单相关的创建订单消息、订单支付消息、订单退款消息、订单物流消息都会按照发布的先后顺序来消费。</li>
+</ul>
+<h2 id="-">三、总结</h2>
+<p>本章，我们介绍了RockectMQ中的顺序消息，并以此解决了我们的背景案例中的一个遗留问题——大数据传输问题。在RocketMQ中，提供了两种类型的顺序消息：全局顺序消息、分区顺序消息。读者可以自行参考RocketMQ的官方文档进行学习。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

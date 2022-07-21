@@ -1,0 +1,495 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解Apache Dubbo（十六）——dubbo-rpc模块：Proxy</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解Apache Dubbo（十六）——dubbo-rpc模块：Proxy</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>前面章节介绍 Protocol 的相关实现时，我们已经知道Dubbo Protocol 层暴露出来的接口都是 Dubbo 内部的一些概念，业务层无法直接使用。为了让业务逻辑能够无缝使用 Dubbo，就需要将业务逻辑与 Dubbo 内部概念打通，这就用到了动态代理的功能。</p>
+<p>Proxy 动态代理层在 Dubbo 架构中的位置如下所示， Proxy 的具体代码实现位于 <code>dubbo-rpc-api</code> 模块中：</p>
+<center><br/> <img src="./img/20211127174335947.jpg" style="zoom:100%"><br/></img></center>
+<ul>
+<li>Consumer 在进行服务调用时，Dubbo 会通过<strong>动态代理</strong>将业务接口实现对象转化为相应的 Invoker 对象，然后在 Cluster 层、Protocol 层都会使用 Invoker；</li>
+<li>Provider 在暴露服务时，也会有 Invoker 对象与业务接口实现对象之间的转换，这同样也是通过<strong>动态代理</strong>实现的。</li>
+</ul>
+<p>实现动态代理的常见方案有：JDK 动态代理、CGLib 动态代理和 Javassist 动态代理。这些方案的应用都比较广泛，例如，Hibernate 底层使用了 Javassist 和 CGLib，Spring 使用了 CGLib 和 JDK 动态代理，MyBatis 底层使用了 JDK 动态代理和 Javassist。</p>
+<p>从性能看，Javassist 与 CGLib 的实现方式相差无几，两者都比 JDK 动态代理性能要高一些，Dubbo 提供了两种方式来实现代理，分别是 JDK 动态代理和 Javassist。本章，我就对Dubbo的动态代理实现进行讲解。</p>
+<center><br/> <img src="./img/20211127174347893.png" style="zoom:85%"/><br/></center>
+<h2 id="-proxyfactory">一、ProxyFactory</h2>
+<p>ProxyFactory 是一个 SPI 扩展接口，其中定义了两个核心方法：</p>
+<ul>
+<li>getProxy() 方法：为 Invoker 对象创建代理对象；</li>
+<li>getInvoker() 方法：将代理对象反向封装成 Invoker 对象。</li>
+</ul>
+<pre><code class="lang-JAVA">@SPI("javassist")
+public interface ProxyFactory {
+
+    @Adaptive({PROXY_KEY})
+    &lt;T&gt; T getProxy(Invoker&lt;T&gt; invoker) throws RpcException;
+
+    @Adaptive({PROXY_KEY})
+    &lt;T&gt; T getProxy(Invoker&lt;T&gt; invoker, boolean generic) throws RpcException;
+
+    @Adaptive({PROXY_KEY})
+    &lt;T&gt; Invoker&lt;T&gt; getInvoker(T proxy, Class&lt;T&gt; type, URL url) throws RpcException;
+}
+</code></pre>
+<h3 id="1-1-abstractproxyfactory">1.1 AbstractProxyFactory</h3>
+<p><strong>AbstractProxyFactory 是代理工厂的抽象类</strong>，继承关系如下图所示：</p>
+<center><br/> <img src="./img/20211127174400827.png" style="zoom:85%"/><br/></center>
+<p>AbstractProxyFactory 主要对需要代理的接口进行解析和预处理，真正的创建代理对象的动作由子类完成：</p>
+<pre><code class="lang-JAVA">// AbstractProxyFactory.java
+
+public abstract class AbstractProxyFactory implements ProxyFactory {
+
+    @Override
+    public &lt;T&gt; T getProxy(Invoker&lt;T&gt; invoker, boolean generic) throws RpcException {
+        // 记录要代理的接口
+        Set&lt;Class&lt;?&gt;&gt; interfaces = new HashSet&lt;&gt;();
+
+        // 获取URL中interfaces参数指定的接口
+        String config = invoker.getUrl().getParameter(INTERFACES);
+        if (config != null &amp;&amp; config.length() &gt; 0) {
+            // 按照逗号切分interfaces参数
+            String[] types = COMMA_SPLIT_PATTERN.split(config);
+            for (String type : types) {
+                interfaces.add(ReflectUtils.forName(type));
+            }
+        }
+
+        // 针对泛化接口的处理
+        if (generic) {
+            if (!GenericService.class.isAssignableFrom(invoker.getInterface())) {
+                interfaces.add(com.alibaba.dubbo.rpc.service.GenericService.class);
+            }
+
+            try {
+                // 从URL中获取interface参数指定的接口
+                String realInterface = invoker.getUrl().getParameter(Constants.INTERFACE);
+                interfaces.add(ReflectUtils.forName(realInterface));
+            } catch (Throwable e) {
+            }
+        }
+        // 获取Invoker中type字段指定的接口
+        interfaces.add(invoker.getInterface());
+        interfaces.addAll(Arrays.asList(INTERNAL_INTERFACES));
+
+        // 调用抽象的getProxy()重载方法
+        return getProxy(invoker, interfaces.toArray(new Class&lt;?&gt;[0]));
+    }
+
+    public abstract &lt;T&gt; T getProxy(Invoker&lt;T&gt; invoker, Class&lt;?&gt;[] types);
+}
+</code></pre>
+<p>JavassistProxyFactory 对 <code>getProxy()</code> 方法的实现比较简单，直接委托给了 <code>dubbo-common</code> 模块中的 <strong>Proxy</strong> 工具类来生成代理类。下面我就来深入分析 Proxy 生成代理类的全流程。</p>
+<h3 id="1-2-proxy">1.2 Proxy</h3>
+<p>在 <code>dubbo-common</code> 模块中，<code>Proxy.getProxy()</code> 方法提供了动态创建代理类的核心实现。这个创建代理类的流程比较长，我分几个部分来讲解。</p>
+<h4 id="-">查找缓存</h4>
+<p>首先，查找 <code>PROXY_CACHE_MAP</code> 缓存，查找的结果有三个：</p>
+<ul>
+<li>缓存中查找不到任务信息，则会在缓存中添加一个<code>PENDING_GENERATION_MARKER</code>占位符，当前线程后续创建生成代理类并最终替换占位符；</li>
+<li>缓存中查找到了<code>PENDING_GENERATION_MARKER</code> 占位符，说明其他线程已经在生成相应的代理类了，当前线程会阻塞等待；</li>
+<li>缓存中查找到完整代理类，则直接返回。</li>
+</ul>
+<pre><code class="lang-JAVA">// Proxy.java
+
+// 第一层Key是ClassLoader对象，Value是被缓存的代理类的WeakReference，第二层Key是代理接口
+private static final Map&lt;ClassLoader, Map&lt;String, Object&gt;&gt; PROXY_CACHE_MAP = new WeakHashMap&lt;ClassLoader, Map&lt;String, Object&gt;&gt;();
+
+public static Proxy getProxy(ClassLoader cl, Class&lt;?&gt;... ics) {
+
+    StringBuilder sb = new StringBuilder();
+
+    // 循环处理每个接口类
+    for (int i = 0; i &lt; ics.length; i++) {
+        String itf = ics[i].getName();
+        // 传入的必须是接口类，否则直接报错
+        if (!ics[i].isInterface()) {
+            throw new RuntimeException(itf + " is not a interface.");
+        }
+
+        // 加载接口类，加载失败则直接报错
+        Class&lt;?&gt; tmp = null;
+        try {
+            tmp = Class.forName(itf, false, cl);
+        } catch (ClassNotFoundException e) {
+        }
+
+        if (tmp != ics[i]) {
+            throw new IllegalArgumentException(ics[i] + " is not visible from class loader");
+        }
+        // 将接口类的完整名称用分号连接起来
+        sb.append(itf).append(';');
+    }
+
+    // 接口列表将会作为第二层集合的Key
+    String key = sb.toString();
+
+    final Map&lt;String, Object&gt; cache;
+    synchronized (PROXY_CACHE_MAP) {
+        cache = PROXY_CACHE_MAP.computeIfAbsent(cl, k -&gt; new HashMap&lt;&gt;());
+    }
+
+    Proxy proxy = null;
+    synchronized (cache) {
+        do {
+            Object value = cache.get(key);
+            if (value instanceof Reference&lt;?&gt;) {
+                proxy = (Proxy) ((Reference&lt;?&gt;) value).get();
+                // 查找到缓存的代理类
+                if (proxy != null) {
+                    return proxy;
+                }
+            }
+
+            // 获取到占位符
+            if (value == PENDING_GENERATION_MARKER) {
+                try {
+                    // 阻塞等待其他线程生成好代理类，并添加到缓存中
+                    cache.wait();
+                } catch (InterruptedException e) {
+                }
+            } 
+            // 设置占位符，由当前线程生成代理类
+            else {
+                cache.put(key, PENDING_GENERATION_MARKER);
+                break;
+            }
+        }
+        while (true);
+    }
+
+    //...动态生成代理类
+}
+</code></pre>
+<h4 id="-">生成代理类</h4>
+<p>我们再来看生成代理类的逻辑：</p>
+<ol>
+<li><p>首先，调用 <code>ClassGenerator.newInstance()</code> 方法创建 ClassLoader 对应的 ClassPool。ClassGenerator 中封装了 Javassist 的基本操作，还定义了很多字段用来暂存代理类的信息，在其 toClass() 方法中会用这些暂存的信息来动态生成代理类；</p>
+</li>
+<li><p>接着，从 <code>PROXY_CLASS_COUNTER</code> 字段（AtomicLong类型）中获取一个 id 值，作为代理类的后缀，避免类名重复发生冲突；</p>
+</li>
+<li><p>接着，遍历全部接口，获取每个接口中定义的方法，对每个方法进行如下处理：</p>
+<ul>
+<li><p>加入 <code>worked</code> 集合（<code>Set&lt;String&gt;</code> 类型）中，用来判重；</p>
+</li>
+<li><p>将方法对应的 Method 对象添加到 <code>methods</code> 集合（List<code>&lt;Method&gt;</code> 类型）中；</p>
+</li>
+<li><p>获取方法的参数类型以及返回类型，构建方法体以及 return 语句；</p>
+</li>
+<li><p>将构造好的方法添加到 ClassGenerator 中的 mMethods 集合中进行缓存。</p>
+</li>
+</ul>
+</li>
+<li><p>然后，开始创建代理实例类（ProxyInstance）和代理类。这里我们先创建代理实例类，需要向 ClassGenerator 中添加相应的信息，例如，类名、默认构造方法、字段、父类以及一个 newInstance() 方法；</p>
+</li>
+<li><p>最后，在 finally 代码块中，释放 ClassGenerator 的相关资源，将生成的代理类添加到 <code>PROXY_CACHE_MAP</code> 缓存中保存，同时会唤醒所有阻塞在 <code>PROXY_CACHE_MAP</code> 缓存上的线程，重新检测需要的代理类是否已经生成完毕。</p>
+</li>
+</ol>
+<pre><code class="lang-JAVA">// Proxy.java
+
+public static Proxy getProxy(ClassLoader cl, Class&lt;?&gt;... ics) {
+    //...省略查找缓存的逻辑
+
+    long id = PROXY_CLASS_COUNTER.getAndIncrement();
+    String pkg = null;
+    ClassGenerator ccp = null, ccm = null;
+    try {
+        ccp = ClassGenerator.newInstance(cl);
+
+        Set&lt;String&gt; worked = new HashSet&lt;&gt;();
+        List&lt;Method&gt; methods = new ArrayList&lt;&gt;();
+
+        for (int i = 0; i &lt; ics.length; i++) {
+            if (!Modifier.isPublic(ics[i].getModifiers())) {
+                String npkg = ics[i].getPackage().getName();
+                // 如果接口不是public的，则需要保证所有接口在一个包下
+                if (pkg == null) {
+                    pkg = npkg;
+                } else {
+                    if (!pkg.equals(npkg)) {
+                        throw new IllegalArgumentException("non-public interfaces from different packages");
+                    }
+                }
+            }
+            // 向ClassGenerator中添加接口
+            ccp.addInterface(ics[i]);
+
+            // 遍历接口中的每个方法
+            for (Method method : ics[i].getMethods()) {
+                String desc = ReflectUtils.getDesc(method);
+                // 跳过已经重复方法以及static方法
+                if (worked.contains(desc) || Modifier.isStatic(method.getModifiers())) {
+                    continue;
+                }
+                if (ics[i].isInterface() &amp;&amp; Modifier.isStatic(method.getModifiers())) {
+                    continue;
+                }
+                // 将方法描述添加到worked这个Set集合中，进行去重
+                worked.add(desc);
+
+                int ix = methods.size();
+                // 获取方法的返回值
+                Class&lt;?&gt; rt = method.getReturnType();
+                // 获取方法的参数列表
+                Class&lt;?&gt;[] pts = method.getParameterTypes();
+
+                // 创建方法体
+                StringBuilder code = new StringBuilder("Object[] args = new Object[").append(pts.length).append("];");
+                for (int j = 0; j &lt; pts.length; j++) {
+                    code.append(" args[").append(j).append("] = ($w)$").append(j + 1).append(";");
+                }
+                code.append(" Object ret = handler.invoke(this, methods[").append(ix).append("], args);");
+                // 生成return语句
+                if (!Void.TYPE.equals(rt)) {
+                    code.append(" return ").append(asArgument(rt, "ret")).append(";");
+                }
+
+                // 将生成好的方法添加到ClassGenerator中缓存
+                methods.add(method);
+                ccp.addMethod(method.getName(), method.getModifiers(), rt, pts, method.getExceptionTypes(), code.toString());
+            }
+        }
+
+        if (pkg == null) {
+            pkg = PACKAGE_NAME;
+        }
+
+        // 生成并设置代理类类名
+        String pcn = pkg + ".proxy" + id;
+        ccp.setClassName(pcn);
+
+        // 添加字段，一个是前面生成的methods集合，另一个是InvocationHandler对象
+        ccp.addField("public static java.lang.reflect.Method[] methods;");
+        ccp.addField("private " + InvocationHandler.class.getName() + " handler;");
+
+        // 添加构造方法
+        ccp.addConstructor(Modifier.PUBLIC, new Class&lt;?&gt;[]{InvocationHandler.class}, new Class&lt;?&gt;[0], "handler=$1;");    
+        ccp.addDefaultConstructor();    
+        Class&lt;?&gt; clazz = ccp.toClass();
+        clazz.getField("methods").set(null, methods.toArray(new Method[0]));
+
+        // 创建代理实例类的对象
+        String fcn = Proxy.class.getName() + id;
+        ccm = ClassGenerator.newInstance(cl);
+        ccm.setClassName(fcn);
+        ccm.addDefaultConstructor();
+        ccm.setSuperClass(Proxy.class);
+        ccm.addMethod("public Object newInstance(" + InvocationHandler.class.getName() + " h){ return new " + pcn + "($1); }");
+        Class&lt;?&gt; pc = ccm.toClass();
+        proxy = (Proxy) pc.newInstance();
+    } catch (RuntimeException e) {
+        throw e;
+    } catch (Exception e) {
+        throw new RuntimeException(e.getMessage(), e);
+    } finally {
+        // 释放ClassGenerator的相关资源
+        if (ccp != null) {
+            ccp.release();
+        }
+        if (ccm != null) {
+            ccm.release();
+        }
+        synchronized (cache) {
+            if (proxy == null) {
+                cache.remove(key);
+            } else {
+                // 填充PROXY_CACHE_MAP缓存
+                cache.put(key, new WeakReference&lt;Proxy&gt;(proxy));
+            }
+            // 唤醒所有阻塞在PROXY_CACHE_MAP上的线程
+            cache.notifyAll();
+        }
+    }
+    return proxy;
+
+}
+</code></pre>
+<h2 id="-invokerinvocationhandler">二、InvokerInvocationHandler</h2>
+<p>无论是 Javassist 还是 JDK 生成的代理类，都会将方法委托给 InvokerInvocationHandler 进行处理。InvokerInvocationHandler 中维护了一个 Invoker 对象，也是前面 getProxy() 方法传入的第一个参数，这个 Invoker 不是一个简单的 DubboInvoker 对象，而是在 DubboInvoker 之上经过一系列装饰器修饰的 Invoker 对象。</p>
+<p>在 InvokerInvocationHandler 的 invoke() 方法中，首先会针对特殊的方法进行处理，比如 toString()、$destroy() 等方法。之后，对于业务方法，会创建相应的 RpcInvocation 对象调用 Invoker.invoke() 方法发起 RPC 调用，具体实现如下：</p>
+<pre><code class="lang-JAVA">// InvokerInvocationHandler.java
+
+public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+
+    // 对于Object中定义的方法，直接调用Invoker对象的相应方法即可
+    if (method.getDeclaringClass() == Object.class) {
+        return method.invoke(invoker, args);
+    }
+
+    String methodName = method.getName();
+    Class&lt;?&gt;[] parameterTypes = method.getParameterTypes();
+
+    if (parameterTypes.length == 0) { // 对$destroy等方法的特殊处理
+        if ("$destroy".equals(methodName)) {
+            invoker.destroy();
+            return null;
+        }
+    }
+
+    //...
+
+    // 创建RpcInvocation对象，后面会作为远程RPC调用的参数
+    RpcInvocation rpcInvocation = new RpcInvocation(method, invoker.getInterface().getName(), args);
+    String serviceKey = invoker.getUrl().getServiceKey();
+    rpcInvocation.setTargetServiceUniqueName(serviceKey);
+
+    if (consumerModel != null) {
+        rpcInvocation.put(Constants.CONSUMER_MODEL, consumerModel);
+        rpcInvocation.put(Constants.METHOD_MODEL, consumerModel.getMethodModel(method));
+    }
+
+    // 调用invoke()方法发起远程调用，拿到AsyncRpcResult之后，调用recreate()方法获取响应结果(或是Future)
+    return invoker.invoke(rpcInvocation).recreate();
+}
+</code></pre>
+<h2 id="-wrapper">三、Wrapper</h2>
+<p>Invoker 是 Dubbo 的核心模型。在 Dubbo 中，Provider 的业务层实现会被包装成一个 ProxyInvoker，然后这个 ProxyInvoker 还会被 Filter、Listener 以及其他装饰器包装。ProxyFactory 的 getInvoker 方法就是将业务接口实现封装成 ProxyInvoker 入口。</p>
+<h3 id="3-1-jdkproxyfactory">3.1 JdkProxyFactory</h3>
+<p>我们先来看 JdkProxyFactory 中的实现。JdkProxyFactory 会创建一个匿名 AbstractProxyInvoker 的实现，其中的 doInvoke() 方法是通过 Java 原生的反射技术实现的，具体实现如下：</p>
+<pre><code class="lang-JAVA">// JdkProxyFactory.java
+
+public &lt;T&gt; Invoker&lt;T&gt; getInvoker(T proxy, Class&lt;T&gt; type, URL url) {
+    return new AbstractProxyInvoker&lt;T&gt;(proxy, type, url) {
+        @Override
+        protected Object doInvoke(T proxy, String methodName,
+                Class&lt;?&gt;[] parameterTypes, Object[] arguments) throws Throwable {
+            // 使用反射方式查找methodName对应的方法，并进行调用
+            Method method = proxy.getClass().getMethod(methodName, parameterTypes);
+            return method.invoke(proxy, arguments);
+        }
+    };
+}
+</code></pre>
+<p>在前面章节中，我已经介绍了 Invoker 接口的一个重要实现分支—— AbstractInvoker 以及它的一个实现 DubboInvoker。AbstractProxyInvoker 是 Invoker 接口的另一个实现分支，其实现类都是 ProxyFactory 实现中的匿名内部类。</p>
+<p>在 AbstractProxyInvoker 实现的 invoke() 方法中，会将 doInvoke() 方法返回的结果封装成 CompletableFuture 对象，然后再封装成 AsyncRpcResult 对象返回，具体实现如下：</p>
+<pre><code class="lang-JAVA">// AbstractProxyInvoker.java
+
+public Result invoke(Invocation invocation) throws RpcException {
+
+    // 执行doInvoke()方法，调用业务实现
+    Object value = doInvoke(proxy, invocation.getMethodName(), invocation.getParameterTypes(), invocation.getArguments());
+
+    // 将value值封装成CompletableFuture对象
+    CompletableFuture&lt;Object&gt; future = wrapWithFuture(value);
+
+    // 再次转换，转换为CompletableFuture&lt;AppResponse&gt;类型
+    CompletableFuture&lt;AppResponse&gt; appResponseFuture = future.handle((obj, t) -&gt; {
+        AppResponse result = new AppResponse();
+
+        if (t != null) {
+            if (t instanceof CompletionException) {
+                result.setException(t.getCause());
+            } else {
+                result.setException(t);
+            }
+        } else {
+            result.setValue(obj);
+        }
+        return result;
+    });
+
+    // 将CompletableFuture封装成AsyncRpcResult返回
+    return new AsyncRpcResult(appResponseFuture, invocation);
+}
+</code></pre>
+<h3 id="3-2-javassistproxyfactory">3.2 JavassistProxyFactory</h3>
+<p>了解了 AbstractProxyInvoker 以及 JdkProxyFactory 返回的实现之后，我们再来看 JavassistProxyFactory.getInvoker() 方法返回的实现。</p>
+<p>首先该方法会通过 Wrapper 创建一个包装类，然后创建一个实现了 AbstractProxyInvoker 的匿名内部类，其 doInvoker() 方法会直接委托给 Wrapper 对象的 InvokeMethod() 方法，具体实现如下：</p>
+<pre><code class="lang-JAVA">// JavassistProxyFactory.java
+
+public &lt;T&gt; Invoker&lt;T&gt; getInvoker(T proxy, Class&lt;T&gt; type, URL url) {
+
+    // 通过Wrapper创建一个包装类对象
+    final Wrapper wrapper = Wrapper.getWrapper(proxy.getClass().getName().indexOf('$') &lt; 0 ? proxy.getClass() : type);
+
+    // 创建一个实现了AbstractProxyInvoker的匿名内部类，其doInvoker()方法会直接委托给Wrapper对象的InvokeMethod()方法
+    return new AbstractProxyInvoker&lt;T&gt;(proxy, type, url) {
+        @Override
+        protected Object doInvoke(T proxy, String methodName,
+     Class&lt;?&gt;[] parameterTypes, Object[] arguments) throws Throwable {
+            return wrapper.invokeMethod(proxy, methodName, parameterTypes, arguments);
+        }
+    };
+}
+</code></pre>
+<p><strong>Wrapper 类本身是抽象类，是对 Java 类的一种包装</strong>。Wrapper 会从 Java 类中的字段和方法抽象出相应 propertyName 和 methodName，在需要调用一个字段或方法的时候，会根据传入的方法名和参数进行匹配，找到对应的字段和方法进行调用。</p>
+<p>Wrapper.getWrapper() 方法会根据不同的 Java 对象，使用 Javassist 生成一个相应的 Wrapper 实现对象。下面我们就来一起分析下 getWrapper() 方法实现：</p>
+<ul>
+<li>首先检测该 Java 类是否实现了 DC 这个标识接口，在前面介绍 Proxy 抽象类的时候，我们提到过这个接口；</li>
+<li>检测 <code>WRAPPER_MAP</code> 集合（<code>Map&lt;Class&lt;?&gt;, Wrapper&gt;</code> 类型）中是否缓存了对应的 Wrapper 对象，如果已缓存则直接返回，如果未缓存则调用 makeWrapper() 方法动态生成 Wrapper 实现类，以及相应的实例对象，并写入缓存中。</li>
+</ul>
+<p><code>Wrapper.makeWrapper()</code> 方法的实现非常长，但是逻辑并不复杂，该方法会遍历传入的 Class 对象的所有 public 字段和 public 方法，构建组装 Wrapper 实现类需要的 Java 代码。具体实现有如下三个步骤。</p>
+<p>第一步，public 字段会构造相应的 getPropertyValue() 方法和 setPropertyValue() 方法。例如，有一个名为“name”的 public 字段，则会生成如下的代码：</p>
+<pre><code class="lang-JAVA">// Wrapper.java
+
+public Object getPropertyValue(Object o, String n){
+
+    DemoServiceImpl w; 
+
+    try{ 
+        w = ((DemoServiceImpl)$1); 
+    }catch(Throwable e){ 
+        throw new IllegalArgumentException(e); 
+    }
+
+    if( $2.equals(" if( $2.equals("name") ){
+        return ($w)w.name; 
+    }
+}
+
+// 生成的setPropertyValue()方法
+public void setPropertyValue(Object o, String n, Object v){ 
+
+    DemoServiceImpl w; 
+
+    try{
+         w = ((DemoServiceImpl)$1); 
+    }catch(Throwable e){ 
+        throw new IllegalArgumentException(e); 
+    } 
+
+    if( $2.equals("name") ){ 
+        w.name=(java.lang.String)$3; return; 
+    }
+}
+</code></pre>
+<p>第二步，处理 public 方法，这些 public 方法会添加到 invokeMethod 方法中。以 Demo 示例（即 <code>dubbo-demo</code> 模块中的 demo ）中的 DemoServiceImpl 为例，生成的 invokeMethod() 方法实现如下：</p>
+<pre><code class="lang-JAVA">public Object invokeMethod(Object o, String n, Class[] p, Object[] v) throws java.lang.reflect.InvocationTargetException {
+
+    org.apache.dubbo.demo.provider.DemoServiceImpl w;
+    try {
+        w = ((org.apache.dubbo.demo.provider.DemoServiceImpl) $1);
+    } catch (Throwable e) {
+        throw new IllegalArgumentException(e);
+    }
+
+    try {
+        // 省略getter/setter方法
+        if ("sayHello".equals($2) &amp;&amp; $3.length == 1) {
+            return ($w) w.sayHello((java.lang.String) $4[0]);
+        }
+
+        if ("sayHelloAsync".equals($2) &amp;&amp; $3.length == 1) {
+            return ($w) w.sayHelloAsync((java.lang.String) $4[0]);
+        }
+    } catch (Throwable e) {
+        throw new java.lang.reflect.InvocationTargetException(e);
+    }
+
+    throw new NoSuchMethodException("Not found method");
+}
+</code></pre>
+<p>第三步，完成了上述 Wrapper 实现类相关信息的填充之后，makeWrapper() 方法会通过 ClassGenerator 创建 Wrapper 实现类，具体原理与前面 Proxy 创建代理类的流程类似，这里就不再赘述。</p>
+<p>下面这张简图很好地展示了 Dubbo 中 Proxy 和 Wrapper 的重要性：</p>
+<center><br/> <img src="./img/20211127174412840.png" style="zoom:70%"/><br/></center>
+<p>Consumer 端的 Proxy 底层屏蔽了复杂的网络交互、集群策略以及 Dubbo 内部的 Invoker 等概念，提供给上层使用的是业务接口。Provider 端的 Wrapper 是将个性化的业务接口实现，统一转换成 Dubbo 内部的 Invoker 接口实现。正是由于 Proxy 和 Wrapper 这两个组件的存在，Dubbo 才能实现内部接口和业务接口的无缝转换。</p>
+<h2 id="-">四、总结</h2>
+<p>本章，我主要介绍了 <code>dubbo-rpc-api</code> 模块中动态代理相关的内容。首先我从 ProxyFactory.getProxy() 方法入手，详细介绍了 JDK 方式和 Javassist 方式创建动态代理类的底层原理，以及其中使用的 InvokerInvocationHandler 的实现。接下来我又通过 ProxyFactory.getInvoker() 方法入手，重点讲解了 Wrapper 的生成过程和核心原理。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看dubbo分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/68">dubbo</a></div>
+</div></body>
+        </html>
+        

@@ -1,0 +1,186 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Kafka源码分析（十六）——Broker：网络层——RequestChannel和RequestHandler</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Kafka源码分析（十六）——Broker：网络层——RequestChannel和RequestHandler</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我将对网络层中的最后两个组件<strong>RequestChannel</strong>和<strong>RequestHandler</strong>进行讲解。严格来说，<strong>RequestChannel</strong>和<strong>RequestHandler</strong>并不属于网络层（Network Layer），当然，它们也不属于API层（API Layer）。</p>
+<p>我将RequestChannel和RequestHandler定位为Kafka Server端<strong>网络层与API层之间交互的中间件</strong>。本章，我会分析RequestChannel和RequestHandler的整体架构，以及它们对请求/响应的底层处理细节。</p>
+<h2 id="-requestchannel">一、RequestChannel</h2>
+<p>首先，我们来看RequestChannel。RequestChannel会缓存Processor线程发送过来的Request请求，同时也接受API层的Response响应。它的内部有两个重要的队列：</p>
+<ul>
+<li>一个请求缓存队列<em>requestQueue</em>；</li>
+<li>N个响应缓存队列<em>responseQueues</em>。</li>
+</ul>
+<p>requestQueue本质是一个ArrayBlockingQueue，<strong>所有Processor线程共享一个</strong>，每个Processor线程都会将请求封装成Request对象并入到这个队列里面。</p>
+<p>responseQueue本质是一个LinkedBlockingQueue，<strong>每个Processor线程独立拥有一个</strong>，API层会将响应封装成Response对象并入队。</p>
+<h3 id="1-1-">1.1 内部结构</h3>
+<p>整体结构大致如下图：</p>
+<center><br/> <img src="./img/20210612223905152.png" style="zoom:46%"><br/></img></center>
+<p>接受Processor线程发送过来的Request请求：</p>
+<pre><code class="lang-java">// RequestChannel.scala
+
+def sendRequest(request: RequestChannel.Request) {
+  requestQueue.put(request)
+}
+</code></pre>
+<p>获取Response对象，返回给Processor线程处理：</p>
+<pre><code class="lang-java">// RequestChannel.scala
+
+def receiveResponse(processor: Int): RequestChannel.Response = {
+  val response = responseQueues(processor).poll()
+  if (response != null)
+    response.request.responseDequeueTimeMs = Time.SYSTEM.milliseconds
+  response
+}
+</code></pre>
+<p>接受API层的响应结果，并添加到响应队列中：</p>
+<pre><code class="lang-java">// RequestChannel.scala
+
+def sendResponse(response: RequestChannel.Response) {
+  responseQueues(response.processor).put(response)
+  for(onResponse &lt;- responseListeners)
+    onResponse(response.processor)
+}
+</code></pre>
+<h2 id="-requesthandler">二、RequestHandler</h2>
+<p>我们再来看另一个组件——<strong>RequestHandler</strong>，它是在Kafka Server启动时创建的，内部委托了对API层的调用：</p>
+<pre><code class="lang-java">// KafkaServer.scala
+
+var apis: KafkaApis = null
+var requestHandlerPool: KafkaRequestHandlerPool = null
+def startup() {
+    try {
+        //...
+        if (canStartup) {
+            // 14.启动请求处理线程池
+            apis = new KafkaApis(socketServer.requestChannel, replicaManager, adminManager,
+                                 groupCoordinator,kafkaController, zkUtils, config.brokerId,
+                                 config, metadataCache, metrics, authorizer, quotaManagers,
+                                 clusterId, time)
+
+            requestHandlerPool = new KafkaRequestHandlerPool(config.brokerId,
+                                                             socketServer.requestChannel,
+                                                             apis, time, config.numIoThreads)
+        }
+    }
+    catch {
+        case e: Throwable =&gt;
+        fatal("Fatal error during KafkaServer startup. Prepare to shutdown", e)
+        isStartingUp.set(false)
+        shutdown()
+        throw e
+    }
+}
+</code></pre>
+<p>整个处理流程可以用下面这张图表述：</p>
+<center><br/> <img src="./img/20210612223917961.png" style="zoom:100%"/><br/></center>
+<h3 id="2-1-kafkarequesthandlerpool">2.1 KafkaRequestHandlerPool</h3>
+<p>我们来看下KafkaRequestHandlerPool的内部，它封装了一堆线程，可以看成是一个线程池，这些线程启动后，就不断执行<strong>KafkaRequestHandler</strong>任务：</p>
+<pre><code class="lang-java">// KafkaRequestHandlerPool.scala
+
+class KafkaRequestHandlerPool(val brokerId: Int,
+                              val requestChannel: RequestChannel,
+                              val apis: KafkaApis,
+                              time: Time,
+                              numThreads: Int) extends Logging with KafkaMetricsGroup {
+  // 工作线程，默认8个
+  val threads = new Array[Thread](numThreads)
+  // KafkaRequestHandler任务
+  val runnables = new Array[KafkaRequestHandler](numThreads)
+  for(i &lt;- 0 until numThreads) {
+    runnables(i) = new KafkaRequestHandler(i, brokerId, aggregateIdleMeter, numThreads, requestChannel, apis, time)
+    threads(i) = Utils.daemonThread("kafka-request-handler-" + i, runnables(i))
+    // 启动任务
+    threads(i).start()
+  }
+}
+</code></pre>
+<h3 id="2-2-kafkarequesthandler">2.2 KafkaRequestHandler</h3>
+<p>KafkaRequestHandler本质是一个Runnable任务，它会不断从RequestChannel的请求队列中获取Request对象，然后交给Kafak API层进行处理：</p>
+<pre><code class="lang-java">// KafkaRequestHandler.scala
+
+def run() {
+  while(true) {
+    try {
+      var req : RequestChannel.Request = null
+      while (req == null) {
+        val startSelectTime = time.nanoseconds
+        // 从RequestChannel的请求队列中获取Request
+        req = requestChannel.receiveRequest(300)
+      }
+      //...
+      // 将请求交给API层处理
+      apis.handle(req)
+    } catch {
+      case e: Throwable =&gt; error("Exception when handling request", e)
+    }
+  }
+}
+</code></pre>
+<p>这里我额外展开下，我们看下Kafka API层的内部，其实就是根据Request请求的不同类型进行处理：</p>
+<pre><code class="lang-java">// KafkaApis.scala
+
+def handle(request: RequestChannel.Request) {
+  try {
+    trace("Handling request:%s from connection %s;securityProtocol:%s,principal:%s".
+      format(request.requestDesc(true), request.connectionId, request.securityProtocol, request.session.principal))
+    // 根据Request请求的不同类型进行处理
+    ApiKeys.forId(request.requestId) match {
+      case ApiKeys.PRODUCE =&gt; handleProducerRequest(request)
+      case ApiKeys.FETCH =&gt; handleFetchRequest(request)
+      case ApiKeys.LIST_OFFSETS =&gt; handleOffsetRequest(request)
+      case ApiKeys.METADATA =&gt; handleTopicMetadataRequest(request)
+      case ApiKeys.LEADER_AND_ISR =&gt; handleLeaderAndIsrRequest(request)
+      case ApiKeys.STOP_REPLICA =&gt; handleStopReplicaRequest(request)
+      case ApiKeys.UPDATE_METADATA_KEY =&gt; handleUpdateMetadataRequest(request)
+      case ApiKeys.CONTROLLED_SHUTDOWN_KEY =&gt; handleControlledShutdownRequest(request)
+      case ApiKeys.OFFSET_COMMIT =&gt; handleOffsetCommitRequest(request)
+      case ApiKeys.OFFSET_FETCH =&gt; handleOffsetFetchRequest(request)
+      case ApiKeys.GROUP_COORDINATOR =&gt; handleGroupCoordinatorRequest(request)
+      case ApiKeys.JOIN_GROUP =&gt; handleJoinGroupRequest(request)
+      case ApiKeys.HEARTBEAT =&gt; handleHeartbeatRequest(request)
+      case ApiKeys.LEAVE_GROUP =&gt; handleLeaveGroupRequest(request)
+      case ApiKeys.SYNC_GROUP =&gt; handleSyncGroupRequest(request)
+      case ApiKeys.DESCRIBE_GROUPS =&gt; handleDescribeGroupRequest(request)
+      case ApiKeys.LIST_GROUPS =&gt; handleListGroupsRequest(request)
+      case ApiKeys.SASL_HANDSHAKE =&gt; handleSaslHandshakeRequest(request)
+      case ApiKeys.API_VERSIONS =&gt; handleApiVersionsRequest(request)
+      case ApiKeys.CREATE_TOPICS =&gt; handleCreateTopicsRequest(request)
+      case ApiKeys.DELETE_TOPICS =&gt; handleDeleteTopicsRequest(request)
+      case requestId =&gt; throw new KafkaException("Unknown api code " + requestId)
+    }
+  } catch {
+    //...
+  } finally
+    request.apiLocalCompleteTimeMs = time.milliseconds
+}
+</code></pre>
+<p>我们重点看下<code>handleProducerRequest</code>，它对普通Producer生产者的请求进行处理，处理完成后会触发以下回调函数。可以看到， 最终处理完的响应结果会被封装程Response对象，交给RequestChannel处理：</p>
+<pre><code class="lang-java">def produceResponseCallback(delayTimeMs: Int) {
+  // 如果该请求不需要ACK确认
+  if (produceRequest.acks == 0) {
+    //...
+  } 
+  // 如果该请求需要ACK确认
+  else {
+  val respBody = request.header.apiVersion match {
+     case 0 =&gt; new ProduceResponse(mergedResponseStatus.asJava)
+     case version@(1 | 2) =&gt; new ProduceResponse(mergedResponseStatus.asJava, delayTimeMs, version)
+     case version =&gt; throw new IllegalArgumentException(s"Version `$version` of ProduceRequest is not handled. Code must be updated.")
+  }
+   // 将响应入队到RequestChannel
+   requestChannel.sendResponse(new RequestChannel.Response(request, respBody))
+  }
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我对网络层的最后两个组件RequestChannel和RequestHandler进行了讲解。它们的整体设计思路还是比较清晰简单的，本质就是利用不用的内存队列和线程池对请求/响应进行处理，提升整体吞吐量，这种思路在实际的生产应用中运用非常多，我在<a href="https://www.tpvlog.com/article/62">《分布式系统从理论到实战系列》</a>专栏的实战篇中也讲解过这类运用，感兴趣的读者可以去看一看。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看消息中间件分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/33">消息中间件</a></div>
+</div></body>
+        </html>
+        

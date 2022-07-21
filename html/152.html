@@ -1,0 +1,49 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Elasticsearch基础（六）——Document路由原理 </title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Elasticsearch基础（六）——Document路由原理 </strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>在Elasticsearch中，记录是以document为单位存储在shard上的。比如，一个名称为<code>test_index</code>的索引，共有3个primary shard，那么对于任意一条document记录，只能存在于其中的某一个primary shard上，如下图（为简便起见，省略了replica shard）：</p>
+<center><br/><img src="./img/20200307184304323.png" style="zoom:55%"><br/></img></center>
+<p>那么，问题来了，对于任意一条document记录，到底该分配到哪个shard上呢？</p>
+<h2 id="-">一、数据路由</h2>
+<p>如果读者看过我的<a href="https://www.tpvlog.com/article/62">《分布式系统从理论到实战系列》</a>，那么对分布式系统中的这种数据分散集群下的数据路由一定不会陌生。</p>
+<p>事实上，Elasticsearch就是采用了hash路由算法，对document记录的id标识进行计算，产生了一个shard序号，通过这个shard序号就可以立即确认写到哪个shard里面。</p>
+<p>举个例子，假设我们往<code>test_index</code>这个索引里面写入了一条document记录（id=1024），然后按照路由算法<code>shard = hash(routing_key) % number_of_primary_shards</code>，计算出shard=1，那么就写到序号为1的那个primary shard中。</p>
+<blockquote>
+<p>我们也可以手动指定document的routing_key值，那么routing_key相同的document就会路由到同一个shard中。</p>
+</blockquote>
+<h2 id="-">二、数据写入</h2>
+<p>了解Elasticsearch进行数据路由的基本原理，我们就来完整的看下document写入（增删改）的整个流程，以便大家整个数据路由过程有个更清晰的认识。</p>
+<p>假设我们ES集群是下面这个样子的，3个primary shard，每个primary shard都有一个副本。初始时，客户端（集成了Elasticsearch Client SDK）发起了一条document的写入请求，请求可能hit到任意某个ES节点上，hit到的这个节点也叫做<strong><em>coordinate node（协调节点）</em></strong>：</p>
+<center><br/><img src="./img/20200307184312798.png" style="zoom:55%"/><br/></center>
+<blockquote>
+<p>由于ES进程1、2、3构成了一个集群，所以每个ES节点其实都知道集群中的其它节点的信息，包括集群中一共有多少primary/replica shard，每个节点上分配着哪些primary/replica shard。</p>
+</blockquote>
+<p>假设ES进程2节点（协调节点）接受到了请求，于是根据document的id进行hash计算，发现结果是3，也就是应该由P3这个primary shard处理这个请求，所以就会把请求转发给ES进程3节点上的P3：</p>
+<center><br/><img src="./img/20200307184320222.png" style="zoom:55%"/><br/></center>
+<p>primary shard 3处理完请求后，会将数据同步到自己的replica shard（R3-1），同步完后响应ES进程2：</p>
+<center><br/><img src="./img/20200307184328052.png" style="zoom:55%"/><br/></center>
+<p>最后，ES进程2（协调节点）收到响应后，返回给ES client结果：</p>
+<center><br/><img src="./img/20200307184335208.png" style="zoom:55%"/><br/></center>
+<blockquote>
+<p>从上述流程也可以看出，Elasticsearch对于写请求，最终都是转交给primary shard去处理的。</p>
+</blockquote>
+<h2 id="-">三、数据查询</h2>
+<p>document数据查询的原理基本和写入类似，只不过查询请求既可以由primary shard处理，也可以由replica shard处理，这样就提高了系统的吞吐量和性能。</p>
+<p><strong><em>coordinate node（协调节点）</em></strong>在接受到查询请求后，会采用round-robin算法，在对应的primary shard及其所有replica中随机选择一个发送请求，以达到读请求负载均衡的目的。</p>
+<p>我们继续通过流程图来看，首先客户端发起查询某个document的请求，假设命中到ES进程2，ES进程2根据document Id计算出应该由primary shard 3来处理：</p>
+<center><br/><img src="./img/20200307184348091.png" style="zoom:55%"/><br/></center>
+<p>primary shard 3有一个replica，所以协调节点会采用round-robin算法选取其中一个转发请求，比如选择了R3-1，然后将请求转发给它，R3-1查询得到结果后返回，最终ES进程2将结果返回给客户端：</p>
+<center><br/><img src="./img/20200307184400851.png" style="zoom:55%"/><br/></center>
+<h2 id="-">四、总结</h2>
+<p>本章，我们对document数据读写的路由机制进行了讲解。Elasticsearch的这种路由机制其实就是把每个节点都看成是对等数据路由中心。事实上，在很多开源分布式框架中，还有一种做法是引入外部的数据路由中心，比如Zookeeper，或者像RocketMQ那样自己实现一个路由中心——NameServer，感兴趣的童鞋可以看看我写的<a href="https://www.tpvlog.com/article/62">《分布式系统从理论到实战系列》</a>。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看Elasticsearch分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/63">Elasticsearch</a></div>
+</div></body>
+        </html>
+        

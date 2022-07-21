@@ -1,0 +1,112 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程基础（二）—— Java内存模型</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程基础（二）—— Java内存模型</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、主存储器与工作存储器</h2>
+<p>Java内存模型（memory model）分为主存储器（main memory）和工作存储器（working  memory）两种。</p>
+<p><strong><em>主存储器（main memory）：</em></strong><br/>类的实例所存在的区域，main memory为所有的线程所共享。</p>
+<p><strong><em>工作存储器（working  memory）：</em></strong><br/>每个线程各自独立所拥有的作业区，在working memory中，存有main memory中的部分拷贝，称之为工作拷贝（working copy）。</p>
+<p><img src="./img/20191022003118078.png" width="60%"/></p>
+<h2 id="-">二、字段的使用</h2>
+<h3 id="2-1-">2.1 字段的引用</h3>
+<p>线程无法直接对主存储器进行操作，当线程需要引用实例的字段的值时，会一次将字段值从主存储器拷贝到工作存储器上（相当于上图中的read-&gt;load）。</p>
+<p>当线程再次需要引用相同的字段时，可能直接使用刚才的工作拷贝（use），也可能重新从主存储器获取（read-&gt;load-&gt;use）。具体会出现哪种情况，由JVM决定。</p>
+<h3 id="2-2-">2.2 字段的赋值</h3>
+<p>由于线程无法直接对主存储器进行操作，所以也就无法直接将值指定给字段。</p>
+<p>当线程欲将值指定给字段时，会一次将值指定给位于工作存储器上的工作拷贝（assign），指定完成后，工作拷贝的内容便会复制到主存储器（store-&gt;write），至于何时进行复制，由JVM决定。</p>
+<p>因此，当线程反复对一个实例的字段进行赋值时，可能只会对工作拷贝进行指定（assign），此时只有指定的最后结果会在某个时刻拷贝到主存储器（store-write）；也可能在每次指定时，都进行拷贝到主存储器的操作（assign-&gt;store-&gt;write）。</p>
+<h2 id="-">三、线程的原子操作</h2>
+<p>Java语言规范定义了线程的八种原子操作：</p>
+<ul>
+<li>read<br/> 负责从主存储器（main  memory）拷贝到工作存储器（working  memory），和load配合使用，不允许单独使用。</li>
+<li>write<br/>与上述相反，负责从工作存储器（working  memory）拷贝到主存储器（main  memory），和store配合使用，不允许单独使用。</li>
+<li>load<br/>read的后续操作，负责将read从主存储器（main  memory）中获取的数据写入工作存储器（working  memory）中，和read配套存在。</li>
+<li>store<br/>write的前置操作，负责将工作存储器（working  memory）中的数据取出，以便write操作将数据写入主存储器（main  memory）。</li>
+<li>use<br/>表示线程引用工作存储器（working  memory）的值。</li>
+<li>assign<br/>表示线程将值指定给工作存储器（working  memory）。</li>
+<li>lock<br/>表示线程取得锁定。</li>
+<li>unlock<br/>表示线程解除锁定。</li>
+</ul>
+<h2 id="-synchronied-">四、synchronied的本质</h2>
+<h3 id="4-1-synchronized">4.1 线程欲进入synchronized</h3>
+<p> 线程欲进入synchronized时，会执行以下两类操作：</p>
+<ul>
+<li><p>强制写入主存储器（main  memory） </p>
+<p>当线程欲进入synchronized时，如果该线程的工作存储器（working  memory）上有未映像到主存储器的拷贝，则这些内容会强制写入主存储器（store-&gt;write），则这些计算结果就会对其它线程可见（visible）。    </p>
+</li>
+</ul>
+<ul>
+<li>工作存储器（working  memory）的释放<br/>当线程欲进入synchronized时，工作存储器上的工作拷贝会被全部丢弃。之后，欲引用主存储器上的值的线程，必定会从主存储器将值拷贝到工作拷贝（read-&gt;load）。</li>
+</ul>
+<h3 id="4-2-synchronized">4.2 线程欲退出synchronized</h3>
+<p> 线程欲退出synchronized时，会执行以下操作：</p>
+<ul>
+<li>强制写入主存储器（main  memory）<br/>当线程欲退出synchronized时，如果该线程的工作存储器（working  memory）上有未映像到主存储器的拷贝，则这些内容会强制写入主存储器（store-&gt;write），则这些计算结果就会对其它线程可见（visible）。</li>
+</ul>
+<p><em>注意： 线程欲退出synchronized时，不会执行工作存储器（working  memory）的释放 操作。</em></p>
+<h2 id="-volatile-">五、volatile的本质</h2>
+<p>volatile具有以下三种功能：</p>
+<ul>
+<li>进行内存同步<br/>volatile只能做内存同步，不能取代synchronized关键字做线程同步。<br/>当线程欲引用volatile字段的值时，通常都会发生从主存储器到工作存储器的拷贝操作；相反的，将值指定给写着volatile的字段后，工作存储器的内容通常会立即映像到主存储器。</li>
+<li>以原子（atomic）方式进行long、double的指定。</li>
+<li>禁止指令重排序优化。</li>
+</ul>
+<h2 id="-double-checked-locking-pattern-">六、Double Checked Locking Pattern的危险性</h2>
+<h3 id="6-1-">6.1 可能存在缺陷的单例模式</h3>
+<p>设计模式中有一种单例模式（Singleton Pattern），通常采用锁来保证线程的安全性。</p>
+<p><em>Main类：</em></p>
+<pre><code class="lang-java">//两个Main线程同时调用单例方法getInstance
+public class Main extends Thread {
+    public static void main(String[] args) {
+        new Main().start();
+        new Main().start();
+    }
+    public void run() {
+        System.out.println(Thread.currentThread().getName() + ":" + MySystem.getInstance().getDate());
+    }
+}
+</code></pre>
+<p><em>单例类：</em></p>
+<pre><code class="lang-java">//采用延迟加载+双重锁的形式保证线程安全以及性能
+public class MySystem {
+    private static MySystem instance = null;
+    private Date date = new Date();
+
+    private MySystem() {
+    }
+    public Date getDate() {
+        return date;
+    }
+    public static MySystem getInstance() {
+        if (instance == null) {
+            synchronized (MySystem.class) {
+                if (instance == null) {
+                    instance = new MySystem();
+                }
+            }
+        }
+        return instance;
+    }
+}
+</code></pre>
+<p><em>分析：</em><br/>上述Main类的<code>MySystem.getInstance().getDate()</code>调用可能返回null或其它值。<br/>假设有两个线程A和B，按照以下顺序执行：</p>
+<p><img src="./img/20191022003131016.png" width="80%"/></p>
+<p>当线程A执行完A-4且未退出synchronized时，线程B开始执行，此时B获得了A创建好的instance实例。<br/>但是注意，此时instance实例可能并未完全初始化完成。</p>
+<p>这是因为线程A制作MySystem实例时，会给date字段指定值new Date()，此时可能只完成了assign操作（线程A对工作存取器上的工作拷贝进行指定），在线程A退出synchronized前，线程A的工作存储器上的值不保证一定会映像到主存储器上（store-&gt;write）。</p>
+<p>所以，当线程B在线程A退出前就调用MySystem.getInstance().getDate()方法的话，由于主存储器上的date字段并未被赋值过，所以B得到的date字段就是未初始化过的。</p>
+<blockquote>
+<p>对象实例化时是多步执行的（譬如内存分配、初始化、返回对象在堆上的引用），并且Java可能进行指令重排（如对象可能按照内存分配、返回对象在堆上的引用、初始化这样的顺序），在线程A对实例部分初始化的时候有可能已经被写入主存，线程B看到了不完整的非空实例。</p>
+</blockquote>
+<p><em>注意：上面描述的这种情况是否真的会发生，取决于JVM，由Java语言规范决定。</em></p>
+<p><em>解决方法：</em><br/>采用<strong>Eager</strong>模式，在MySystem类中直接为instance 字段赋值：</p>
+<p><code>private static MySystem instance = new MySystem();</code></p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

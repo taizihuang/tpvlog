@@ -1,0 +1,200 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>透彻理解分布式存储（一）——整体架构</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>透彻理解分布式存储（一）——整体架构</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>本章，我还是和之前的其它专栏一样，先从整体架构上讲解我们自研的分布式文件系统，后续再逐一拆分讲解每个核心组件，即整体的思路依然延续<strong>“自顶向下”的架构讲解结合"自底向上"的模块实现</strong>。</p>
+<p>通过本章的学习，你将对该分布式文件系统的整体架构有一个清晰的认识，同时我会对落地分布式文件系统的重要技术点在本章进行概要讲解。</p>
+<blockquote>
+<p>注意：本系列我讲解的分布式文件系统只适用于大量小文件的分布式存储，并不是HDFS那种单个大文件的拆分存储，在实现上大量借鉴了Hadoop的设计，事实上，很多开源框架在数据存储这一块的设计思想都是类似的。</p>
+</blockquote>
+<h2 id="-">一、整体架构</h2>
+<p>整个分布式文件系统，我将它划分为四个部分：</p>
+<ul>
+<li>客户端：客户端集成在使用分布式文件系统的应用内，类似于Kafka-Client；</li>
+<li>数据节点：DataNode负责数据文件的实际存储，每个数据节点都是对等的；</li>
+<li>控制节点：NameNode通过心跳感知各个数据节点的状态，同时负责接受客户端的读/写请求，管理集群元数据信息；</li>
+<li>备份节点：BackupNode从控制节点同步元数据，并定期生成内存快照fsimage，可以看成是NameNode的备份。</li>
+</ul>
+<p>节点之间的通信使用gRPC这个开源框架实现：</p>
+<center><br/> <img src="./img/20210630222602260.png" style="zoom:115%"><br/></img></center>
+<h3 id="1-1-namenode">1.1 NameNode</h3>
+<p>NameNode可以看成是控制节点，是整个分布式文件系统的大脑。它主要负责以下工作：</p>
+<ol>
+<li>接受客户端的文件/目录操作命令，然后在内存中维护<strong>文件目录树</strong>；</li>
+<li>记录客户端的操作日志<em>edits log</em>，并将日志刷到磁盘上，防止宕机导致内存文件目录树丢失；</li>
+<li>接受BackupNode的日志拉取请求，返回edits log日志；</li>
+<li>接受BackupNode备份节点发送过来的fsimage快照，并基于fsimage快速恢复内存文件目录树，然后将checkpoint时间点之后的editslog进行回放，恢复剩余的目录树数据。</li>
+</ol>
+<h3 id="1-2-backupnode">1.2 BackupNode</h3>
+<p>BackupNode属于NameNode的备份节点，主要是为了保障NameNode的高可用。它主要负责以下工作：</p>
+<ol>
+<li>定期从NameNode节点拉取Edits log日志，并进行日志回放，生成内存文件目录树；</li>
+<li>基于内存文件目录树，定期生成内存快照文件fsimage，并将文件发送给NameNode。</li>
+</ol>
+<h3 id="1-3-datanode">1.3 DataNode</h3>
+<p>DataNode可以看成是实际的数据存储节点，DataNode之间是对等的关系。它们主要执行以下工作：</p>
+<ol>
+<li>DataNode启动后，需要向NameNode注册自己，NameNode会在内存维护DataNode列表，这样接收到客户端命令后就可以选择实际存活的DataNode作为响应；</li>
+<li>DataNode会定期发送心跳给NameNode，告知自己还存活；</li>
+<li>DataNode负责数据存储，客户端从NameNode获取到可用的DataNode后，会向该DataNode发送请求完成实际的文件读写操作。</li>
+</ol>
+<h3 id="1-4-dfs-client">1.4 DFS-Client</h3>
+<p>DFS-Client，就是分布式文件系统的客户端，各个需要使用分布式文件系统的应用都需要集成该客户端。DFS-Client主要封装了各类文件操作接口，供应用调用使用，它的底层我使用了 Google 开源的gRPC来作为客户端与服务端之间的通信组件。</p>
+<blockquote>
+<p>关于gRPC的使用，我就不赘述了，读者可以自行参阅<a href="https://www.grpc.io/">官方文档</a>。gRPC底层基于Netty完成网络通信，我后续有时间会出专栏对Netty的底层原理进行讲解。</p>
+</blockquote>
+<h3 id="1-5-dfs-rpc">1.5 DFS-RPC</h3>
+<p>DFS-RPC，是一个基于gRPC实现的存根工具包，里面存放了通过proto编译器生成的Java gRPC模板代码。我们的分布式文件系统的各个组件之间通过gRPC框架完成通信，所以都需要依赖<code>dfs-rpc</code>。</p>
+<h2 id="-">二、工程搭建</h2>
+<p>了解了分布式文件系统的整体架构，本节我们就开始搭建项目工程。我将整个Maven工程划分为以下模块：</p>
+<center><br/> <img src="./img/20210630222631871.png" style="zoom:82%"/><br/></center>
+<h3 id="2-1-dfs-rpc">2.1 dfs-rpc</h3>
+<p>gRPC服务提供方的接口存根全部定义在<code>dfs-rpc</code>模块中。比如，NameNode需要提供以下RPC服务接口，供DataNode、DFS-Client、BackupNode调用：</p>
+<ul>
+<li>DataNode注册接口；</li>
+<li>DataNode心跳接口；</li>
+<li>客户端操作命令接口；</li>
+<li>Edits Log日志同步接口。</li>
+</ul>
+<p>我们需要通过ProtoBuf的工具来生成这些接口，我会在下一章讲解gRPC的基本使用。</p>
+<h3 id="2-2-dfs-client">2.2 dfs-client</h3>
+<p>客户端比较简单，需要依赖<code>dfs-rpc</code>。本项目中，我暂且只定义一个接口作为示例。集成客户端的应用系统可以通过RPC方式对文件/目录进行操作。后续，我们也可以根据自身需要对客户端的功能进行扩展：</p>
+<pre><code class="lang-JAVA">/**
+ * 作为文件系统的接口
+ */
+public interface FileSystem {
+
+    /**
+     * 创建目录
+     * @param path 目录对应的路径
+     * @throws Exception
+     */
+    void mkdir(String path) throws Exception;
+}
+</code></pre>
+<h3 id="2-3-dfs-namenode">2.3 dfs-namenode</h3>
+<p>NameNode是分布式文件系统的大脑，同样需要依赖<code>dfs-rpc</code>。它的内部包含了一些核心组件，后续章节我会详细讲解，本节，我们来看下它的启动类：</p>
+<pre><code class="lang-JAVA">/**
+ * NameNode启动类
+ */
+public class NameNode {
+
+    // 负责管理集群元数据的核心组件，即内存文件目录树
+    private FSNameSystem namesystem;
+
+    // 负责管理集群DataNode的组件
+    private DataNodeManager datanodeManager;
+
+    // NameNode对外提供rpc服务的Server
+    private NameNodeRpcServer rpcServer;
+
+    // Edits Log同步组件
+    private EditLogReplicator replicator;
+
+    // fsimage同步组件
+    private FSImageUploadServer fsimageUploadServer;
+
+    public static void main(String[] args) throws Exception {
+        NameNode namenode = new NameNode();
+        namenode.init();
+        namenode.start();
+    }
+
+    private void init() {
+        this.namesystem = new FSNameSystem();
+        this.datanodeManager = new DataNodeManager();
+        this.replicator = new EditLogReplicator(namesystem);
+        this.rpcServer = new NameNodeRpcServer(this.namesystem, this.datanodeManager, this.replicator);
+        this.fsimageUploadServer = new FSImageUploadServer();
+    }
+
+    private void start() throws Exception {
+        this.rpcServer.start();
+        this.fsimageUploadServer.start();
+        this.rpcServer.blockUntilShutdown();
+    }
+}
+</code></pre>
+<h3 id="2-4-dfs-datanode">2.4 dfs-datanode</h3>
+<p>DataNode负责存储实际的数据，由NameNode进行调度，同样需要依赖<code>dfs-rpc</code>。我们来看下它的启动类，它的内部包含了一些核心组件，后续章节我会详细讲解：</p>
+<pre><code class="lang-JAVA">/**
+ * DataNode启动类
+ */
+public class DataNode {
+    private volatile Boolean isRunning;
+
+    // 负责跟NameNode通信的组件
+    private NameNodeConnService connService;
+
+    private void initialize() {
+        this.isRunning = true;
+        this.connService = new NameNodeConnService();
+    }
+
+    private void start() {
+        this.connService.start();
+        try {
+            while (isRunning) {
+                Thread.sleep(1000);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        DataNode datanode = new DataNode();
+        datanode.initialize();
+        datanode.start();
+    }
+}
+</code></pre>
+<h3 id="2-5-backupnode">2.5 BackupNode</h3>
+<p>BackupNode备份节点，同样需要依赖<code>dfs-rpc</code>。我们来看下它的启动类，它的内部包含了一些线程，启动后就会通过RPC方式与NameNode交互：</p>
+<pre><code class="lang-JAVA">/**
+ * BackupNode启动类
+ */
+public class BackupNode {
+    private volatile Boolean isRunning = true;
+
+    private FSNameSystem namesystem;
+    private NameNodeRpcClient namenode;
+
+    public static void main(String[] args) {
+        BackupNode backupNode = new BackupNode();
+        backupNode.init();
+        backupNode.start();
+    }
+
+    public void init() {
+        this.namesystem = new FSNameSystem();
+        this.namenode = new NameNodeRpcClient();
+    }
+
+    public void start() {
+        // 定期拉取Edits Log线程
+        EditsLogFetcher editsLogFetcher = new EditsLogFetcher(this, namesystem, namenode);
+        editsLogFetcher.start();
+
+        // 定期生成fsimage快照线程
+        FSImageCheckPointer checkPointer = new FSImageCheckPointer(this, namesystem, namenode);
+        checkPointer.start();
+    }
+
+    public Boolean isRunning() {
+        return isRunning;
+    }
+}
+</code></pre>
+<h2 id="-">三、总结</h2>
+<p>本章，我对分布式文件系统的整体架构进行了讲解，帮助读者理清楚系统的各个核心模块的作用和关系，从下一章开始，我将具体分析每个模块的功能并开始进行编码。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式存储分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/65">分布式存储</a></div>
+</div></body>
+        </html>
+        

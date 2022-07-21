@@ -1,0 +1,128 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>Java多线程进阶（十）—— J.U.C之locks框架：基于AQS的读写锁(5)</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>Java多线程进阶（十）—— J.U.C之locks框架：基于AQS的读写锁(5)</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<h2 id="-">一、本章概述</h2>
+<p>AQS系列的前四个章节，已经分析了AQS的原理，本章将会从<code>ReentrantReadWriteLock</code>出发，给出其内部利用AQS框架的实现原理。</p>
+<p>ReentrantReadWriteLock（以下简称RRW），也就是读写锁，是一个比较特殊的同步器，特殊之处在于其对同步状态State的定义与ReentrantLock、CountDownLatch都很不同。通过RRW的分析，我们可以更深刻的了解AQS框架的设计思想，以及对<strong><em>“<a href="https://segmentfault.com/a/1190000015562787">什么是资源？如何定义资源是否可以被访问？</a>”</em></strong>这一命题有更深刻的理解。</p>
+<blockquote>
+<p>关于ReentrantReadWriteLock的使用和说明，读者可以参考：<a href="https://segmentfault.com/a/1190000015562389">Java多线程进阶（四）—— juc-locks锁框架：ReentrantReadWriteLock</a></p>
+</blockquote>
+<h2 id="-">二、本章示例</h2>
+<p>和之前的章节一样，本章也通过示例来分析RRW的源码。</p>
+<blockquote>
+<p>假设现在有4个线程，ThreadA、ThreadB、ThreadC、ThreadD。<br/>ThreadA、ThreadB、ThreadD为读线程，ThreadC为写线程：</p>
+<p>初始时，构造RRM对象：<br/> <code>private final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();</code><br/> <code>private final Lock r = rwl.readLock();</code><br/> <code>private final Lock w = rwl.writeLock();</code></p>
+</blockquote>
+<pre><code class="lang-java">//ThreadA调用读锁的lock()方法
+
+//ThreadB调用读锁的lock()方法
+
+//ThreadC调用写锁的lock()方法
+
+//ThreadD调用读锁的lock()方法
+</code></pre>
+<h2 id="-rrw-">三、RRW的公平策略原理</h2>
+<h3 id="1-rrw-">1. RRW对象的创建</h3>
+<p>和ReentrantLock类似，ReentrantReadWriteLock的构造器可以选择公平/非公平策略（默认为非公平策略），RRW内部的<code>FairSync</code>、<code>NonfairSync</code>是AQS的两个子类，分别代表了实现公平策略和非公平策略的同步器：<br/><img alt="img" src="./img/20191027134911520.png" style="zoom:80%;"/></p>
+<p>ReentrantReadWriteLock提供了方法，分别获取读锁/写锁：<br/><img alt="img" src="./img/20191027134917630.png" style="zoom:80%;"/></p>
+<p><code>ReentrantReadWriteLock.ReadLock</code>和<code>ReentrantReadWriteLock.WriteLock</code>其实就是两个实现了Lock接口的内部类:<br/><img alt="img" src="./img/20191027134923975.png" style="zoom:80%;"/></p>
+<h3 id="2-threada-lock-">2. ThreadA调用读锁的lock()方法</h3>
+<p>读锁其实是一种共享锁，实现了AQS的共享功能API，可以看到读锁的内部就是调用了AQS的<strong>acquireShared</strong>方法，该方法前面几章我们已经见过太多次了：<br/><img alt="img" src="./img/20191027134931603.png" style="zoom:80%;"/></p>
+<p>关键来看下ReentrantReadWriteLock是如何实现<strong>tryAcquireShared</strong>方法的：<br/>读锁获取成功的条件如下：</p>
+<ol>
+<li>写锁没有被其它线程占用（可被当前线程占用，这种情况属于锁降级）</li>
+<li>等待队列中的队首没有其它线程（公平策略）</li>
+<li>读锁重入次数没有达到最大值</li>
+<li>CAS操作修改同步状态值State成功</li>
+</ol>
+<p><img alt="img" src="./img/20191027134937557.png" style="zoom:80%;"/></p>
+<p>如果CAS操作失败，会调用<strong>fullTryAcquireShared</strong>方法，自旋修改State值：<br/><img alt="img" src="./img/20191027134944177.png" style="zoom:80%;"/></p>
+<p>ThreadA调用完<strong>lock</strong>方法后，等待队列结构如下：</p>
+<center><br/> <img src="./img/20191027134950185.png"/><br/></center>
+<blockquote>
+<p>此时：<br/>写锁数量：0<br/>读锁数量：1</p>
+</blockquote>
+<h3 id="3-threadb-lock-">3. ThreadB调用读锁的lock()方法</h3>
+<p>由于读锁是共享锁，且此时写锁未被占用，所以此时ThreadB也可以拿到读锁：<br/>ThreadB调用完<strong>lock</strong>方法后，等待队列结构如下：</p>
+<center><br/> <img src="./img/20191027134957017.png"/><br/></center>
+<blockquote>
+<p>此时：<br/>写锁数量：0<br/>读锁数量：2</p>
+</blockquote>
+<h3 id="4-threadc-lock-">4. ThreadC调用写锁的lock()方法</h3>
+<p>写锁其实是一种独占锁，实现了AQS的独占功能API，可以看到写锁的内部就是调用了AQS的acquire方法，该方法前面几章我们已经见过太多次了：<br/><img alt="img" src="./img/20191027135003628.png" style="zoom:80%;"/></p>
+<p>关键来看下ReentrantReadWriteLock是如何实现<strong>tryAcquire</strong>方法的，并没有什么特别，就是区分了两种情况：</p>
+<ol>
+<li>当前线程已经持有写锁</li>
+<li>写锁未被占用</li>
+</ol>
+<p><img alt="img" src="./img/20191027135011644.png" style="zoom:200%;"/></p>
+<p>ThreadC调用完lock方法后，由于存在使用中的读锁，所以会调用<strong>acquireQueued</strong>并被加入等待队列，这个过程就是独占锁的请求过程（<a href="https://segmentfault.com/a/1190000015804888">AQS[二]</a>），等待队列结构如下：</p>
+<center><br/> <img alt="img" src="./img/20191027135024615.png" style="zoom:80%;"/><br/></center>
+<blockquote>
+<p>此时：<br/>写锁数量：0<br/>读锁数量：2</p>
+</blockquote>
+<h3 id="5-threadd-lock-">5. ThreadD调用读锁的lock()方法</h3>
+<p>这个过程和ThreadA和ThreadB几乎一样，读锁是共享锁，可以重复获取，但是有一点区别：<br/>由于等待队列中已经有其它线程（ThreadC）排在当前线程前，所以<strong>readerShouldblock</strong>方法会返回true，这是公平策略的含义。</p>
+<p><img alt="img" src="./img/20191027135033491.png" style="zoom:80%;"/></p>
+<p>虽然获取失败了，但是后续调用<strong>fullTryAcquireShared</strong>方法，自旋修改State值，正常情况下最终修改成功，代表获取到读锁：<br/><img alt="img" src="./img/20191027135040439.png" style="zoom:80%;"/></p>
+<p>最终等待队列结构如下：</p>
+<center><br/> <img alt="img" src="./img/20191027135047055.png" style="zoom:80%;"/><br/></center>
+<blockquote>
+<p>此时：<br/>写锁数量：0<br/>读锁数量：3</p>
+</blockquote>
+<h3 id="6-threada-">6. ThreadA释放读锁</h3>
+<p>内部就是调用了AQS的<strong>releaseShared</strong>方法，该方法前面几章我们已经见过太多次了：<br/><img alt="img" src="./img/20191027135101711.png" style="zoom:80%;"/><br/><img alt="img" src="./img/20191027135108868.png" style="zoom:80%;"/></p>
+<p>关键来看下ReentrantReadWriteLock是如何实现<strong>tryReleaseShared</strong>方法的，没什么特别的，就是将读锁数量减1：<br/><img alt="img" src="./img/20191027135116329.png" style="zoom:80%;"/></p>
+<blockquote>
+<p><strong>注意：</strong><br/><code>HoldCounter</code>是个内部类，通过与<code>ThreadLocal</code>结合使用保存每个线程的持有读锁数量，其实是一种优化手段。<br/><img alt="img" src="./img/20191027135123161.png" style="zoom:80%;"/></p>
+<p>此时：<br/>写锁数量：0<br/>读锁数量：2</p>
+</blockquote>
+<h3 id="7-threadb-">7. ThreadB释放读锁</h3>
+<p>和ThreadA的释放完全一样，此时：</p>
+<blockquote>
+<p>写锁数量：0<br/>读锁数量：1</p>
+</blockquote>
+<h3 id="8-threadd-">8. ThreadD释放读锁</h3>
+<p>和ThreadA的释放几乎一样，不同的是此时读锁数量为0，<strong>tryReleaseShared</strong>方法返回true：<br/><img alt="img" src="./img/20191027135130276.png" style="zoom:80%;"/></p>
+<blockquote>
+<p>此时：<br/>写锁数量：0<br/>读锁数量：0</p>
+</blockquote>
+<center><br/> <img alt="img" src="./img/20191027135141097.png" style="zoom:80%;"/><br/></center>
+<p>因此，会继续调用<strong>doReleaseShared</strong>方法，<strong>doReleaseShared</strong>方法之前在讲<a href="https://segmentfault.com/a/1190000015807573">AQS[四]</a>时已经阐述过了，就是一个自旋操作：</p>
+<center><br/> <img alt="img" src="./img/20191027135147962.png" style="zoom:80%;"/><br/></center>
+<p>该操作会将ThreadC唤醒：</p>
+<center><br/> <img alt="img" src="./img/20191027135154301.png" style="zoom:80%;"/><br/></center>
+<h3 id="9-threadc-">9. ThreadC从原阻塞处继续向下执行</h3>
+<p>ThreadC从原阻塞处被唤醒后，进入下一次自旋操作，然后调用<strong>tryAcquire</strong>方法获取写锁成功，并从队列中移除:</p>
+<center><br/> <img alt="img" src="./img/20191027135200452.png" style="zoom:80%;"/><br/></center>
+<p>等待队列最终状态：</p>
+<center><br/> <img alt="img" src="./img/20191027135209120.png" style="zoom:80%;"/><br/></center>
+<blockquote>
+<p>此时：<br/>写锁数量：1<br/>读锁数量：0</p>
+</blockquote>
+<h3 id="10-threadc-">10. ThreadC释放写锁</h3>
+<p>其实就是独占锁的释放，在<a href="https://segmentfault.com/a/1190000015804888">AQS[二]</a>中，已经阐述过了，不再赘述。</p>
+<blockquote>
+<p>补充一点：如果头结点后面还有等待的共享结点，会以传播的方式依次唤醒，这个过程就是共享结点的唤醒过程，并无区别。</p>
+</blockquote>
+<p><img alt="img" src="./img/20191027135215451.png" style="zoom:80%;"/></p>
+<h2 id="-">四、总结</h2>
+<p>本章通过ReentrantReadWriteLock的公平策略，分析了RRW的源码，非公平策略分析方法也是一样的，非公平和公平的最大区别在于写锁的获取上：<br/><img alt="img" src="./img/20191027135223555.png" style="zoom:80%;"/></p>
+<p>在非公平策略中，写锁的获取永远不需要排队，这其实时性能优化的考虑，因为大多数情况写锁涉及的操作时间耗时要远大于读锁，频次远低于读锁，这样可以防止写线程一直处于饥饿状态。</p>
+<p>关于ReentrantReadWriteLock，最后有两点规律需要注意：</p>
+<ol>
+<li>当RRW的等待队列队首结点是共享结点，说明当前写锁被占用，当写锁释放时，会以传播的方式唤醒头结点之后紧邻的各个共享结点。</li>
+<li>当RRW的等待队列队首结点是独占结点，说明当前读锁被使用，当读锁释放归零后，会唤醒队首的独占结点。</li>
+</ol>
+<p>ReentrantReadWriteLock的特殊之处其实就是用一个int值表示两种不同的状态（低16位表示写锁的重入次数，高16位表示读锁的使用次数），并通过两个内部类同时实现了AQS的两套API，核心部分与共享/独占锁并无什么区别。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看多线程分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/22">多线程</a></div>
+</div></body>
+        </html>
+        

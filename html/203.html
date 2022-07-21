@@ -1,0 +1,42 @@
+
+        <!DOCTYPE html><html><head><link rel="stylesheet" href="./init.css"><title>分布式基础（七）——分布式理论之分布式一致性：Quorum NWR算法</title></head>
+        <body><div class="blog-info overflow-initial">
+<h1 class="blog-info-title">
+<strong>分布式基础（七）——分布式理论之分布式一致性：Quorum NWR算法</strong>
+</h1>
+<div class="blog-info-body markdown-body editor-preview-active-side">
+<p>CAP理论中的一致性一般指的是<em>强一致性</em>，也就是说写操作完成后，任何后续访问都能读到更新后的值。而BASE理论中的一致性指的是<em>最终一致性</em>，也就是说写操作完成后， 任何后续访问可能会读到旧数据，但是整个分布式系统的数据最终会达到一致。</p>
+<p>那么，如果我们的系统现在是最终一致性模型，也就是AP模型，突然有一天因为业务需要，要临时保证节点间的数据强一致性，有没有办法临时做这样的改造呢？</p>
+<p>一种办法是重新开发一套系统，但显然成本太高了。另一种办法就是本章要介绍的Quorum NWR算法。通过 Quorum NWR，我们可以<strong>自定义一致性级别</strong>。</p>
+<h2 id="-quorum-nwr-">一、Quorum NWR三要素</h2>
+<p>Quorum NWR 中有三个要素：N、W、R，它们是 Quorum NWR 的核心内容，我们就是通过组合这三个要素，实现自定义一致性级别的。 </p>
+<h3 id="1-1-n-">1.1 N（副本数）</h3>
+<p>N 表示副本数，又叫做复制因子（Replication Factor）。也就是说，N 表示集群中同一份数据有多少个副本。 注意，副本数不等同于节点数。（如果读者对Elasticsearch或Kafka有了解，可以把副本理解成Replica Shard）</p>
+<p>比如下图中， DATA-1 有 2 个副本，DATA-2 有 3 个副本，DATA-3 有 1 个副本：</p>
+<center><br/> <img src="./img/20200402210841484.png" style="zoom:60%"><br/></img></center>
+<p>在实现 Quorum NWR 的时候，我们需要实现自定义副本数的功能，比如，用户可以指定 DATA-1 具有 2 个副本，DATA-2 具有 3 个副本，就像上图中的样子。 </p>
+<h3 id="1-2-w-">1.2 W（ 写一致性级别 ）</h3>
+<p>W，又称写一致性级别（Write Consistency Level），表示对于客户端的一次写操作，只有成功完成 W 个副本的更新，才算写操作成功。</p>
+<p>以下图中的DATA-2为例，当它的W=2时，如果客户端对 DATA-2 执行写操作，必须完成它的2 个副本的更新，才算完成了写操作：</p>
+<center><br/> <img src="./img/20200402210850714.png" style="zoom:60%"/><br/></center>
+<h3 id="1-3-r-">1.3 R（读一致性级别）</h3>
+<p>R，又称读一致性级别（Read Consistency Level），表示对于客户端的一次写操作，需要读 R 个副本，然后最终返回最新的那份数据。</p>
+<p>以下图中的DATA-2为例，当它的R=2时，如果客户端读取DATA-2的数据，需要读取它的2 个副本中的数据，然后返回最新的那份数据：</p>
+<center><br/> <img src="./img/20200402210859507.png" style="zoom:60%"/><br/></center>
+<hr/>
+<p>N、W、R 值的不同组合，会产生不同的一致性效果，具体来说，有这么两种效果：</p>
+<ul>
+<li>当 W + R &gt; N 的时候，对于客户端来讲，整个系统能保证强一致性，一定能返回更新后的那份数据。</li>
+<li>当 W + R &lt;= N 的时候，对于客户端来讲，整个系统只能保证最终一致性，可能会返回旧数据。 </li>
+</ul>
+<p>我这里以DATA-2为例解释下，为什么W+R&gt;N时，一定可以读到最新的数据。首先，DATA-2的N=3，W=2，R=2，那么当写数据时，必然有2个节点要写成功；此时再读数据，即使读到了一个没有写过的节点，由于要读2个节点的值，另一个必然是写成功的节点，所以最终返回给客户端的还是最新的数据。</p>
+<h2 id="-">二、总结</h2>
+<p>Quorum NWR 是非常实用的一个算法，能有效弥补 AP 型系统缺乏强一致性的痛点，给业务提供了按需选择一致性级别的灵活度。</p>
+<p>很多开源框架都利用Quorum NWR实现自定义一致性级别，比如Elasticsearch，就支持“any、one、quorum、all”4 种写一致性级别。</p>
+</div>
+
+
+<div class="article-footer overflow-initial">所属分类：<a data-original-title="点击查看分布式分类的文章" data-placement="bottom" data-toggle="tooltip" href="https://www.tpvlog.com/type/3">分布式</a></div>
+</div></body>
+        </html>
+        
